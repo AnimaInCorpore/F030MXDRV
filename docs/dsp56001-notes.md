@@ -183,7 +183,7 @@ frame by adding the previous output into the phase word before a single MPY
 extracts the sine-table index. Each stage first derives a 64-word gain ramp in
 internal Y RAM, then consumes one gain per codec frame. The carrier writes
 interleaved stereo into the reused audio buffers, and the reply is that block's
-checksum (`$000e8e`), gated by the smoke suite.
+checksum (`$fef11f`), gated by the smoke suite.
 
 The optimized loop splits feedback history across internal X/Y memory so it
 can fetch and update both words with the modulator ring, prefetches the next
@@ -192,17 +192,23 @@ storing the previous result, and overlaps the carrier's left output store with
 its right-pan shift. The gain-ramp fetch occupies the remaining parallel Y slot
 on each synthesis `MPY`, so frame-accurate gain consumption adds no instruction
 to the operator loop itself; only block-rate ramp derivation remains visible.
+Command setup also copies every fourth entry of the external 256-step waveform
+into a complete signed 64-step table in internal X RAM. The hot indexed reads
+therefore avoid one external-memory instruction cycle each while oscillator
+pitch remains drift-free. Waveform phase is quantized to 64 steps, making this
+an explicit perceptual candidate rather than part of the exact kernel.
 
-Hatari measures 111,204 instruction cycles for the block, or 54.30 cycles
-per channel/frame — a 1.39x surcharge over the 39.16-cycle four-carrier
+Hatari measures 103,012 instruction cycles for the block, or 50.30 cycles
+per channel/frame — a 1.28x surcharge over the 39.16-cycle four-carrier
 floor for the full modulation topology. Per-frame ramps add 4.13 cycles to
-the optimized block-rate spike but leave the completed version 9.7% below
-the first 60.10-cycle implementation. The linear eight-channel projection is
-434.39 cycles against the 326.27-cycle codec-frame budget: the worst-case
-all-algorithm-0 workload misses real time by 1.33x, compared to the exact
-kernel's 46.84x. Remaining headroom includes cheaper carrier-only stages for
-parallel algorithms, the serialized indexed sine reads, shared ramp
-derivation, and shared block overhead.
+the optimized block-rate spike, while internal coarse-sine reads recover 4.00;
+the completed version remains 16.3% below the first 60.10-cycle
+implementation. The linear eight-channel projection is 402.39 cycles against
+the 326.27-cycle codec-frame budget: the worst-case all-algorithm-0 workload
+misses real time by 1.23x, compared to the exact kernel's 46.84x. Remaining
+headroom includes cheaper carrier-only stages for parallel algorithms,
+accumulator-space phase addressing, shared ramp derivation, and shared block
+overhead.
 
 ## Embedded second-stage program loader
 
@@ -214,11 +220,12 @@ final YM program deliberately begins at `P:$0080`, leaving
 through `Dsp_BlkUnpacked`.
 
 The generated stream starts with magic `$4d584c`, followed by a section count
-and address/count/data records. The current program contains 2,938 initialized
+and address/count/data records. The current program contains 2,952 initialized
 words in five sparse P sections. After installing them, the loader replies
 `$4c4f41` and jumps through the replaced reset vector at `P:$0000`. The build
 generator rejects a bootstrap above the 512-word XBIOS limit, any overlap with
-the reserved loader gap, non-P sections, and sections outside 16-bit P memory.
+the reserved loader gap or `P:$0c20` table boundary, non-P sections, and
+sections outside 16-bit P memory.
 This removes the former 8 KiB converted-LOD ceiling from future specialized or
 unrolled kernels; the actual Falcon P-memory reservation is now the relevant
 limit.

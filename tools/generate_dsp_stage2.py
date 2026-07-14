@@ -109,7 +109,9 @@ def make_boot_image(path: Path) -> list[int]:
     return words
 
 
-def make_program_stream(path: Path) -> tuple[list[int], int, int]:
+def make_program_stream(
+    path: Path, program_limit: int | None = None
+) -> tuple[list[int], int, int]:
     sections, entry = parse_lod(path)
     sections = merge_sections(sections)
     if entry != 0:
@@ -129,6 +131,11 @@ def make_program_stream(path: Path) -> tuple[list[int], int, int]:
                 "error: final program overlaps reserved loader gap "
                 f"P:${LOADER_FIRST:04x}-P:${LOADER_LIMIT - 1:04x}"
             )
+        if program_limit is not None and section.limit > program_limit:
+            raise SystemExit(
+                f"error: final program reaches P:${section.limit - 1:04x}, "
+                f"overlapping the reserved table boundary at P:${program_limit:04x}"
+            )
 
     stream = [STAGE2_MAGIC, len(sections)]
     for section in sections:
@@ -147,9 +154,13 @@ def format_values(directive: str, values: list[int], digits: int, width: int) ->
     return lines
 
 
-def emit_include(bootstrap: Path, program: Path) -> str:
+def emit_include(
+    bootstrap: Path, program: Path, program_limit: int | None = None
+) -> str:
     boot_words = make_boot_image(bootstrap)
-    stream, section_count, initialized_words = make_program_stream(program)
+    stream, section_count, initialized_words = make_program_stream(
+        program, program_limit
+    )
 
     boot_bytes: list[int] = []
     for word in boot_words:
@@ -176,8 +187,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bootstrap", type=Path, required=True)
     parser.add_argument("--program", type=Path, required=True)
+    parser.add_argument("--program-limit", type=lambda value: int(value, 0))
     arguments = parser.parse_args()
-    print(emit_include(arguments.bootstrap, arguments.program), end="")
+    print(
+        emit_include(arguments.bootstrap, arguments.program, arguments.program_limit),
+        end="",
+    )
 
 
 if __name__ == "__main__":

@@ -191,21 +191,32 @@ rt_gain_alignment_pad:
 rt_envelope_gain:
         ds      4
 
-; Block-oriented spike state: four 8.16 operator phases in table-entry
-; units, four signed fractional gains advanced by per-frame slopes, and the
-; feedback output history.
-rt2_phase:
-        ds      4
-rt2_gain:
-        ds      4
-rt2_fb_1:
-        ds      1
+; The real-time spike is mutually exclusive with the exact renderer. Reuse
+; its internal-X scratch window for a 64-entry full-wave sine table, populated
+; from every fourth entry of rt_linear_sine when command $14 starts. A coarse
+; internal lookup avoids the Falcon external-memory penalty on all four hot
+; indexed reads while retaining a complete signed waveform.
+        org     x:$40
+rt2_coarse_sine:
+        ds      64
 
 ; One operator stage writes this ring while the next consumes it in place
 ; as its modulator. Modulo-64 addressing requires the 64-word alignment.
         org     x:$80
 rt2_stage_ring:
         ds      64
+
+; Block-oriented spike state: four 8.16 operator phases in table-entry
+; units, four signed fractional gains advanced by per-frame slopes, and the
+; feedback output history. This follows the stage ring in otherwise-unused
+; internal X RAM so the coarse sine overlay can occupy a full aligned page.
+        org     x:$c0
+rt2_phase:
+        ds      4
+rt2_gain:
+        ds      4
+rt2_fb_1:
+        ds      1
 
 ; Larger register and operator arrays remain in external X memory. Operator
 ; state uses logical per-channel order M1,C1,M2,C2. Phases are native 10.10
@@ -292,17 +303,7 @@ start:
         movep   #$3000,x:m_ipr          ; SSI interrupt priority level 2
         move    #>-1,m0                 ; linear addressing for ym_regdata
 
-        ; MAME's raw register order is M1,C1,M2,C2: offsets 0,16,8,24.
-        move    #ym_slot_offsets,r0
-        clr     a
-        move    a1,x:(r0)+
-        move    #>16,a
-        move    a1,x:(r0)+
-        move    #>8,a
-        move    a1,x:(r0)+
-        move    #>24,a
-        move    a1,x:(r0)
-
+        jsr     ym_initialize_slot_offsets
         jsr     ym_reset
 
 command_loop:
@@ -393,6 +394,22 @@ command_loop:
         move    #>DSP_REPLY_ERROR,a
         jsr     send_reply
         jmp     command_loop
+
+; Command $14 reuses the internal-X window containing this persistent table.
+; Centralizing setup lets the isolated benchmark restore the exact renderer's
+; logical-to-raw operator mapping before returning to the normal protocol.
+ym_initialize_slot_offsets:
+        ; MAME's raw register order is M1,C1,M2,C2: offsets 0,16,8,24.
+        move    #ym_slot_offsets,r0
+        clr     a
+        move    a1,x:(r0)+
+        move    #>16,a
+        move    a1,x:(r0)+
+        move    #>8,a
+        move    a1,x:(r0)+
+        move    #>24,a
+        move    a1,x:(r0)
+        rts
 
 command_ping:
         move    #>DSP_REPLY_HELLO,a
@@ -626,13 +643,22 @@ rt2_clear_state:
         move    #>$100000,x0           ; 0.125
         move    x0,x:(r4)+
 
+        ; Build a complete 64-step waveform in internal X RAM. The benchmark
+        ; markers intentionally exclude this one-time command setup cost.
         move    #rt_linear_sine,r0
-        move    #>255,m0
+        move    #rt2_coarse_sine,r6
+        move    #>4,n0
+        do      #64,rt2_coarse_sine_ready
+        move    y:(r0)+n0,x0
+        move    x0,x:(r6)+
+rt2_coarse_sine_ready:
+        move    #rt2_coarse_sine,r6
         move    #ssi_buffer_a,r1
         move    #>63,m3
         move    #>63,m5
+        move    m3,m6
         move    #>63,m7
-        move    #>$40,y1               ; (phase*64*2)>>46 = table index
+        move    #>$10,y1               ; 6-bit index into the coarse waveform
         move    #>$024a74,x1           ; 440 Hz: 2 + $4a74/65536 entries
 
 rt2_profile_loop_start:
@@ -667,9 +693,9 @@ rt2_op1_gain_ramp_done:
         add     b,a
         move    a1,x0
         mpy     x0,y1,a
-        move    a1,n0
+        move    a1,n6
         add     x1,b
-        move    y:(r0+n0),x0
+        move    x:(r6+n6),x0
         mpy     x0,y0,a y:(r7)+,y0
         move    a,x:(r3)+ a,y:(r4)
 rt2_op1_done:
@@ -695,9 +721,9 @@ rt2_op2_gain_ramp_done:
         add     b,a
         move    a1,x0
         mpy     x0,y1,a
-        move    a1,n0
+        move    a1,n6
         add     x1,b
-        move    y:(r0+n0),x0
+        move    x:(r6+n6),x0
         mpy     x0,y0,a x:(r3)+,x0 y:(r7)+,y0
         move    a,x:(r5)+ x0,a
 rt2_op2_done:
@@ -722,9 +748,9 @@ rt2_op3_gain_ramp_done:
         add     b,a
         move    a1,x0
         mpy     x0,y1,a
-        move    a1,n0
+        move    a1,n6
         add     x1,b
-        move    y:(r0+n0),x0
+        move    x:(r6+n6),x0
         mpy     x0,y0,a x:(r3)+,x0 y:(r7)+,y0
         move    a,x:(r5)+ x0,a
 rt2_op3_done:
@@ -749,9 +775,9 @@ rt2_op4_gain_ramp_done:
         add     b,a
         move    a1,x0
         mpy     x0,y1,a
-        move    a1,n0
+        move    a1,n6
         add     x1,b
-        move    y:(r0+n0),x0
+        move    x:(r6+n6),x0
         mpy     x0,y0,a x:(r3)+,x0 y:(r7)+,y0
         asr     a a1,x:(r1)+           ; left, then half-amplitude right
         move    a,x:(r1)+ x0,a
@@ -760,6 +786,7 @@ rt2_op4_done:
 rt2_blocks_done:
         nop
 rt2_profile_loop_done:
+        jsr     ym_initialize_slot_offsets
 
         ; Checksum the rendered stereo block. The cycle bracket above
         ; excludes this conformance pass.
@@ -774,8 +801,10 @@ rt2_checksum_done:
         move    #>-1,m0
         move    #>-1,m3
         move    #>-1,m5
+        move    m3,m6
         move    #>-1,m7
         move    #>0,n0
+        move    #>0,n6
         jsr     send_reply
         jmp     command_loop
 

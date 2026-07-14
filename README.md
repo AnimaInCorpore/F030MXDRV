@@ -63,13 +63,15 @@ why the project publishes its own profiler.
   modulo rings and parallel X/Y moves. A second, block-oriented spike now
   renders a complete serial algorithm-0 channel — operator-1 feedback,
   per-frame modulation, per-frame envelope gain slopes, and interleaved
-  stereo — in 54.30 cycles per codec frame. Its linear eight-channel
-  projection is 434.39 cycles against the 326.27-cycle frame budget, so the
-  worst-case all-algorithm-0 workload currently misses real time by **1.33x**
+  stereo — in 50.30 cycles per codec frame. Its linear eight-channel
+  projection is 402.39 cycles against the 326.27-cycle frame budget, so the
+  worst-case all-algorithm-0 workload currently misses real time by **1.23x**
   (not the exact kernel's 46.84x). Split X/Y feedback state and software-
-  pipelined ring/output traffic keep this frame-accurate version 9.7% below
-  the first block-rate implementation; cheaper parallel-algorithm stages
-  remain unexploited.
+  pipelined ring/output traffic now feed a command-local 64-step full-wave
+  table in internal X RAM, keeping this frame-accurate-gain version 16.3%
+  below the first block-rate implementation. The coarse waveform is an
+  explicit perceptual compromise that still needs comparison-vector gating;
+  cheaper parallel-algorithm stages remain unexploited.
 - MDX synchronization/modulation and real-time mixed-block production
   remain. The exact boundary between implemented and pending work is kept in
   [the architecture notes](docs/architecture.md).
@@ -78,7 +80,7 @@ why the project publishes its own profiler.
 
 - The 68030 executable embeds everything the DSP needs: packed immutable
   ymfm tables, plus the complete sparse DSP program behind a 111-word
-  `Dsp_ExecBoot` first stage that receives 2,938 initialized P-memory words
+  `Dsp_ExecBoot` first stage that receives 2,952 initialized P-memory words
   through the host port — removing the 8 KiB converted-LOD ceiling.
 - The DSP kernel caches all 32 unmodulated phase increments across register
   writes in internal Y RAM and advances them with parallel X/Y fetches.

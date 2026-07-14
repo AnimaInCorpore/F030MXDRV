@@ -155,7 +155,8 @@ $(DSP_STAGE2_IMAGE): tools/generate_dsp_stage2.py $(DSP_BUILD)/.assembled
 	@mkdir -p $(GENERATED_BUILD)
 	python3 tools/generate_dsp_stage2.py \
 		--bootstrap $(DSP_BUILD)/YMBOOT.LOD \
-		--program $(DSP_BUILD)/YM2151.LOD > $@
+		--program $(DSP_BUILD)/YM2151.LOD \
+		--program-limit 0xc20 > $@
 
 check: all reference
 	@test -s $(RELEASE_DIR)/f030mxdrv.tos
@@ -216,7 +217,7 @@ smoke: check
 	@rg -q "Direct Transfer 0x01c0de" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x01c3c0" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x140000" build/hatari-smoke.trace
-	@rg -q "Transfer 0x000e8e" build/hatari-smoke.trace
+	@rg -q "Transfer 0xfef11f" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x01c3de" build/hatari-smoke.trace
 	@rg -q "XBIOS 0x80 Locksnd" build/hatari-smoke.trace
 	@rg -q "XBIOS 0x89 Dsptristate\\(0x1, 0x0\\)" build/hatari-smoke.trace

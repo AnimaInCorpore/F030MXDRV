@@ -142,10 +142,19 @@ def main() -> int:
         ("opm_algorithm_ops", algorithm_ops),
         ("opm_dt2_delta", dt2_delta),
     ]
-    # Align the codec-rate full-wave table to a 256-word modulo boundary. The
-    # upload receiver writes one contiguous block beginning at Y:$1380.
+    # Leave P:$0000-$0c1f available to the command kernel, then place the
+    # expanded exact tables and their packed upload source contiguously. Align
+    # the codec-rate full-wave table to a 256-word modulo boundary.
+    runtime_table_start = 0x0C20
+    runtime_table_words = sum(
+        (len(phase), len(increments), len(detune), len(sine), len(power))
+    )
+    uploaded_table_start = runtime_table_start + runtime_table_words
+    realtime_sine_start = 0x1500
     uploaded_words = sum(len(values) for _, values in uploaded_tables)
-    realtime_padding_words = 0x1500 - (0x1380 + uploaded_words)
+    realtime_padding_words = realtime_sine_start - (
+        uploaded_table_start + uploaded_words
+    )
     if realtime_padding_words < 0:
         raise RuntimeError("packed YM tables overlap the codec-rate sine table")
     realtime_padding = [0] * realtime_padding_words
@@ -170,7 +179,7 @@ def main() -> int:
     else:
         # Falcon external P memory aliases external X/Y RAM. Keep the runtime
         # lookup block above the complete command kernel and its clock helpers.
-        print("        org     y:$c00")
+        print(f"        org     y:${runtime_table_start:x}")
         print()
         emit_dsp_reservation("opm_phase_step", phase)
         emit_dsp_reservation("opm_envelope_increment", increments)
