@@ -22,6 +22,29 @@ constexpr std::array<uint32_t, 4> kLogicalToRawOperator = { 0, 16, 8, 24 };
 
 class oracle_interface : public ymfm::ymfm_interface
 {
+public:
+    void ymfm_set_timer(uint32_t tnum, int32_t duration_in_clocks) override
+    {
+        m_timer_clocks.at(tnum) = duration_in_clocks;
+    }
+
+    void advance(uint32_t clocks)
+    {
+        for (uint32_t tnum = 0; tnum < m_timer_clocks.size(); ++tnum)
+        {
+            if (m_timer_clocks[tnum] < 0)
+                continue;
+            m_timer_clocks[tnum] -= clocks;
+            if (m_timer_clocks[tnum] <= 0)
+            {
+                m_timer_clocks[tnum] = -1;
+                m_engine->engine_timer_expired(tnum);
+            }
+        }
+    }
+
+private:
+    std::array<int32_t, 2> m_timer_clocks = { -1, -1 };
 };
 
 class inspectable_ym2151 : public ymfm::ym2151
@@ -64,7 +87,8 @@ uint32_t reference_phase_step()
     return chip.engine().debug_operator(0)->debug_cache().phase_step;
 }
 
-void emit_m68k_reference(const std::string &trace_path, const std::string &noise_trace_path)
+void emit_m68k_reference(const std::string &trace_path, const std::string &noise_trace_path,
+    const std::string &csm_trace_path)
 {
     const auto events = load_trace(trace_path);
     oracle_interface intf;
@@ -153,6 +177,32 @@ void emit_m68k_reference(const std::string &trace_path, const std::string &noise
               << std::setfill('0') << noise_left << "\n";
     std::cout << "YM_REF_NOISE_63_RIGHT equ    $" << std::hex << std::setw(6)
               << std::setfill('0') << noise_right << "\n";
+
+    // Timer A is programmed for a two-sample period. It expires after sample
+    // 1, so the CSM key pulse is consumed by prepare() at the start of sample
+    // 2. Timer status remains clear because the trace leaves enable-A off.
+    const auto csm_events = load_trace(csm_trace_path);
+    oracle_interface csm_intf;
+    inspectable_ym2151 csm_chip(csm_intf);
+    csm_chip.reset();
+    size_t csm_event = 0;
+    inspectable_ym2151::output_data csm_output;
+    for (uint32_t sample = 0; sample <= 2; ++sample)
+    {
+        while (csm_event < csm_events.size() && csm_events[csm_event].sample == sample)
+        {
+            const auto &event = csm_events[csm_event++];
+            write_register(csm_chip, event.reg, event.data);
+        }
+        csm_chip.generate(&csm_output);
+        csm_intf.advance(64);
+    }
+    const uint32_t csm_left = uint32_t(csm_output.data[0]) & 0x00ffffff;
+    const uint32_t csm_right = uint32_t(csm_output.data[1]) & 0x00ffffff;
+    std::cout << "YM_REF_CSM_2_LEFT equ        $" << std::hex << std::setw(6)
+              << std::setfill('0') << csm_left << "\n";
+    std::cout << "YM_REF_CSM_2_RIGHT equ       $" << std::hex << std::setw(6)
+              << std::setfill('0') << csm_right << "\n";
 }
 
 std::vector<trace_event> load_trace(const std::string &path)
@@ -212,6 +262,7 @@ void emit_vectors(const std::string &trace_path, uint32_t samples)
 
         inspectable_ym2151::output_data output;
         chip.generate(&output);
+        intf.advance(64);
         std::cout << sample << '\t' << output.data[0] << '\t' << output.data[1];
         for (uint32_t raw : kLogicalToRawOperator)
         {
@@ -234,9 +285,9 @@ int main(int argc, char **argv)
 {
     try
     {
-        if (argc == 4 && std::string(argv[1]) == "--emit-m68k")
+        if (argc == 5 && std::string(argv[1]) == "--emit-m68k")
         {
-            emit_m68k_reference(argv[2], argv[3]);
+            emit_m68k_reference(argv[2], argv[3], argv[4]);
             return 0;
         }
         if (argc == 2 && std::string(argv[1]) == "--phase-hex")
@@ -252,7 +303,7 @@ int main(int argc, char **argv)
         }
 
         std::cerr << "usage:\n"
-                  << "  ym2151_oracle --emit-m68k ATTACK_TRACE NOISE_TRACE\n"
+                  << "  ym2151_oracle --emit-m68k ATTACK_TRACE NOISE_TRACE CSM_TRACE\n"
                   << "  ym2151_oracle --phase-hex\n"
                   << "  ym2151_oracle --vectors TRACE SAMPLES\n";
         return 2;

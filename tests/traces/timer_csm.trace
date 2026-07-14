@@ -1,0 +1,15 @@
+# sample register data (hex)
+# Channel 0 operator M1 is the only audible carrier. Timer A has a two-sample
+# period and CSM enabled, but timer-A status disabled.
+0 20 c7
+0 28 4c
+0 30 00
+0 40 01
+0 60 00
+0 80 ff
+0 a0 00
+0 c0 00
+0 e0 0f
+0 10 ff
+0 11 02
+0 14 81

@@ -1,8 +1,8 @@
 ; F030MXDRV YM2151 DSP core
 ;
 ; The register, phase, envelope, algorithm, feedback, panning, and YM3012
-; behavior here follows the vendored MAME/ymfm core. LFO, noise, timers, and
-; continuous SSI output are layered on top of this command-clocked kernel.
+; behavior here follows the vendored MAME/ymfm core. Continuous SSI output is
+; layered on top of this command-clocked kernel.
 
         include 'ioequ.inc'
         include 'protocol.inc'
@@ -24,22 +24,22 @@ ym_regdata:
         ds      256
 
 last_command:
-        dc      0
+        ds      1
 
 query_channel:
-        dc      0
+        ds      1
 query_raw_operator:
-        dc      0
+        ds      1
 query_block_freq:
-        dc      0
+        ds      1
 query_block:
-        dc      0
+        ds      1
 query_dtmul:
-        dc      0
+        ds      1
 query_detune:
-        dc      0
+        ds      1
 query_pm_delta:
-        dc      0
+        ds      1
 
 ; Operator state uses logical per-channel order M1,C1,M2,C2. Phases are the
 ; native 10.10 ymfm values; modulo-24-bit storage preserves the low 10 waveform
@@ -63,81 +63,81 @@ ym_feedback_in:
         ds      8
 
 ym_env_counter:
-        dc      0
+        ds      1
 ym_env_tick:
-        dc      0
+        ds      1
 ym_last_left:
-        dc      0
+        ds      1
 ym_last_right:
-        dc      0
+        ds      1
 
 ; OPM global state. The 30-bit LFO counter is split at bit 22 so both pieces
 ; remain positive native integers. The noise history needs 25 bits because the
 ; LFO noise waveform consumes bits 17-24.
 ym_lfo_fraction:
-        dc      0
+        ds      1
 ym_lfo_phase:
-        dc      0
+        ds      1
 ym_lfo_am:
-        dc      0
+        ds      1
 ym_lfo_pm:
-        dc      0
+        ds      1
 ym_lfo_raw_am:
-        dc      0
+        ds      1
 ym_lfo_raw_pm:
-        dc      0
+        ds      1
 ym_noise_lfsr_low:
-        dc      0
+        ds      1
 ym_noise_lfsr_high:
-        dc      0
+        ds      1
 ym_noise_counter:
-        dc      0
+        ds      1
 ym_noise_frequency:
-        dc      0
+        ds      1
 ym_noise_state:
-        dc      0
+        ds      1
 ym_noise_newbit:
-        dc      0
+        ds      1
 
 ym_status:
-        dc      0
+        ds      1
 ym_busy:
-        dc      0
-ym_timer_a_running:
-        dc      0
-ym_timer_b_running:
-        dc      0
+        ds      1
+ym_csm_active:
+        ds      1
 ym_timer_a_counter:
-        dc      0
+        ds      1
 ym_timer_b_counter:
-        dc      0
+        ds      1
+ym_timer_b_phase:
+        ds      1
 
 ; Scratch state. Keeping it explicit makes subroutine register clobbers safe
 ; and leaves the protocol probes useful while the real-time loop evolves.
 synth_index:
-        dc      0
+        ds      1
 synth_channel:
-        dc      0
+        ds      1
 synth_operator:
-        dc      0
+        ds      1
 synth_rate:
-        dc      0
+        ds      1
 synth_increment:
-        dc      0
+        ds      1
 synth_algorithm:
-        dc      0
+        ds      1
 synth_result:
-        dc      0
+        ds      1
 synth_am_offset:
-        dc      0
+        ds      1
 volume_phase:
-        dc      0
+        ds      1
 volume_sign:
-        dc      0
+        ds      1
 volume_envelope:
-        dc      0
+        ds      1
 volume_sine:
-        dc      0
+        ds      1
 
 synth_opout:
         ds      8
@@ -376,6 +376,11 @@ ym_write_packed:
         move    #>$1a,n0                ; PM depth shadow
 
 ym_write_store:
+        move    n0,a
+        move    #>$14,y0
+        cmp     y0,a
+        jeq     ym_write_mode
+
         move    #ym_regdata,r0
         nop                             ; address-register pipeline interlock
         move    x0,x:(r0+n0)
@@ -387,6 +392,70 @@ ym_write_store:
         jsr     ym_write_keyon
 
 ym_write_done:
+        rts
+
+; Register 14 controls Timer A/B load and status plus CSM. Mode writes only
+; start a timer on a 0->1 load edge; expiration reloads it until load clears.
+ym_write_mode:
+        move    #ym_regdata+$14,r0
+        nop
+        move    x:(r0),b                ; old mode
+        move    b1,a
+        not     a
+        move    x0,y1
+        and     y1,a1                   ; rising load/control bits
+        move    a1,x:synth_result
+        move    x0,x:(r0)               ; publish new mode before reload
+
+        jclr    #4,x0,ym_mode_keep_a_status
+        bclr    #0,x:ym_status
+ym_mode_keep_a_status:
+        jclr    #5,x0,ym_mode_keep_b_status
+        bclr    #1,x:ym_status
+ym_mode_keep_b_status:
+        move    x:synth_result,a
+        jclr    #0,a1,ym_mode_timer_b
+        jsr     ym_reload_timer_a
+ym_mode_timer_b:
+        move    x:synth_result,a
+        jclr    #1,a1,ym_write_done
+        jsr     ym_reload_timer_b
+        move    x:ym_timer_b_counter,a
+        move    x:ym_timer_b_phase,x0
+        sub     x0,a
+        move    a1,x:ym_timer_b_counter
+        rts
+
+; Timer A counts (1024 - 10-bit latch) native samples.
+ym_reload_timer_a:
+        move    #ym_regdata+$10,r0
+        nop
+        move    x:(r0)+,a
+        rep     #2
+        asl     a
+        move    x:(r0),b
+        move    #>3,y0
+        and     y0,b1
+        move    b1,x0
+        add     x0,a
+        move    #>1024,b
+        move    a1,x0
+        sub     x0,b
+        move    b1,x:ym_timer_a_counter
+        rts
+
+; Timer B's free-running divide-by-16 is aligned because mode writes enter
+; this command-clocked kernel only at native sample boundaries.
+ym_reload_timer_b:
+        move    #ym_regdata+$12,r0
+        nop
+        move    x:(r0),a
+        move    #>256,b
+        move    a1,x0
+        sub     x0,b
+        rep     #4
+        asl     b
+        move    b1,x:ym_timer_b_counter
         rts
 
 ; Register 08 key-on bits are in logical operator order. Writes update the
@@ -678,9 +747,7 @@ ym_query_phase_shifted:
         asl     b
         add     y1,b
         move    b1,n1
-        move    #opm_detune_adjustment,r1
-        nop
-        move    y:(r1+n1),x0
+        jsr     ym_lookup_detune
 
         ; DT1 bit 2 selects negative detune.
         move    x:query_detune,b
@@ -717,6 +784,36 @@ ym_query_error:
         move    #>DSP_REPLY_ERROR,a
         rts
 
+; Read one 5-bit DT1 adjustment directly from the four-per-word packed table.
+; Keeping this small lookup packed saves both loader bytes and startup code.
+ym_lookup_detune:
+        move    a1,x1
+        move    n1,a
+        move    #>3,y0
+        and     y0,a1
+        move    a1,x:table_slots
+        move    n1,a
+        rep     #2
+        lsr     a
+        move    a1,n1
+        move    #opm_detune_adjustment_packed,r1
+        nop
+        move    y:(r1+n1),b
+        move    x:table_slots,a
+        tst     a
+        jeq     ym_lookup_detune_mask
+        move    a1,y0
+        do      y0,ym_lookup_detune_shift
+        rep     #5
+        lsr     b
+ym_lookup_detune_shift:
+ym_lookup_detune_mask:
+        move    #>$1f,y0
+        and     y0,b1
+        move    b1,x0
+        move    x1,a
+        rts
+
         ; Split the LOD program records below TOS 4.02's converter limit.
         ds      1
 
@@ -740,7 +837,7 @@ ym_expand_tables:
 ym_expand_phase_word:
         move    x:table_remaining,a
         tst     a
-        jeq     ym_expand_detune_start
+        jeq     ym_expand_envelope_start
         move    y:(r1)+,a
         move    a1,x:table_packed
         move    #>8,a
@@ -748,7 +845,7 @@ ym_expand_phase_word:
 ym_expand_phase_nibble:
         move    x:table_remaining,a
         tst     a
-        jeq     ym_expand_detune_start
+        jeq     ym_expand_envelope_start
         move    x:table_packed,a
         move    #>7,y0
         and     y0,a1
@@ -773,37 +870,6 @@ ym_expand_phase_nibble:
         move    a1,x:table_slots
         jne     ym_expand_phase_nibble
         jmp     ym_expand_phase_word
-
-ym_expand_detune_start:
-        move    #opm_detune_adjustment_packed,r1
-        move    #opm_detune_adjustment,r0
-        move    #>128,a
-        move    a1,x:table_remaining
-ym_expand_detune_word:
-        move    y:(r1)+,a
-        move    a1,x:table_packed
-        move    #>4,a
-        move    a1,x:table_slots
-ym_expand_detune_value:
-        move    x:table_packed,a
-        move    #>$1f,y0
-        and     y0,a1
-        move    a1,y:(r0)+
-        move    x:table_packed,a
-        rep     #5
-        lsr     a
-        move    a1,x:table_packed
-        move    x:table_remaining,a
-        move    #>1,x0
-        sub     x0,a
-        move    a1,x:table_remaining
-        jeq     ym_expand_envelope_start
-        move    x:table_slots,a
-        move    #>1,x0
-        sub     x0,a
-        move    a1,x:table_slots
-        jne     ym_expand_detune_value
-        jmp     ym_expand_detune_word
 
 ym_expand_envelope_start:
         move    #opm_envelope_increment_packed,r1
@@ -1345,6 +1411,8 @@ ym_prepare_key_loop:
         move    #ym_key_live,r0
         nop
         move    x:(r0+n0),a
+        move    x:ym_csm_active,x0
+        or      x0,a
         move    a1,b
         move    #ym_key_state,r0
         nop
@@ -1393,6 +1461,7 @@ ym_prepare_key_next:
         move    #>32,x0
         cmp     x0,a
         jlt     ym_prepare_key_loop
+        bclr    #0,x:ym_csm_active
         rts
 
 ; Sustain target in native 4.6 envelope units.
@@ -2080,8 +2149,52 @@ ym_clock_channel_loop:
         move    x:ym_last_right,a
         jsr     ym_roundtrip_fp
         move    a1,x:ym_last_right
+        jsr     ym_clock_timers
         clr     a                       ; one sample is the 64-clock busy time
         move    a1,x:ym_busy
+        rts
+
+; Clock the two OPM timers after the generated sample. Thus a period of N is
+; visible in status after N clock commands, while CSM is consumed by the key
+; preparation at the beginning of sample N.
+ym_clock_timers:
+        move    x:ym_timer_b_phase,a
+        move    #>1,x0
+        add     x0,a
+        move    #>$0f,y0
+        and     y0,a1
+        move    a1,x:ym_timer_b_phase
+
+        move    x:ym_regdata+$14,b
+        move    b1,y1
+
+        jclr    #0,y1,ym_clock_timer_b
+        move    x:ym_timer_a_counter,a
+        sub     x0,a
+        move    a1,x:ym_timer_a_counter
+        tst     a
+        jne     ym_clock_timer_b
+        jclr    #2,y1,ym_clock_timer_a_csm
+        bset    #0,x:ym_status
+ym_clock_timer_a_csm:
+        jclr    #7,y1,ym_clock_timer_a_reload
+        bset    #0,x:ym_csm_active
+ym_clock_timer_a_reload:
+        jsr     ym_reload_timer_a
+
+ym_clock_timer_b:
+        jclr    #1,y1,ym_clock_timers_done
+        move    x:ym_timer_b_counter,a
+        move    #>1,x0
+        sub     x0,a
+        move    a1,x:ym_timer_b_counter
+        tst     a
+        jne     ym_clock_timers_done
+        jclr    #3,y1,ym_clock_timer_b_reload
+        bset    #1,x:ym_status
+ym_clock_timer_b_reload:
+        jsr     ym_reload_timer_b
+ym_clock_timers_done:
         rts
 
         ym_lfo_code

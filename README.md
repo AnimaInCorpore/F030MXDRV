@@ -14,14 +14,14 @@ MXDRV's `WriteOPM`. The DSP clocks stereo YM2151 samples at the native 62.5 kHz
 rate with phase accumulation, ADSR envelopes, logarithmic sine/power lookup,
 operator feedback, all eight algorithms, panning, and YM3012 output rounding.
 The DSP also clocks all four LFO waveforms, AM/PM depth and sensitivity,
-operator AM gating, the channel-7 noise generator, and the 64-clock busy flag.
-Generated tables and expected tone/noise samples come mechanically from the
-vendored ymfm implementation.
+operator AM gating, the channel-7 noise generator, Timer A/B status and reload
+semantics, CSM keying, and the 64-clock busy flag. Generated tables and expected
+tone/noise/CSM samples come mechanically from the vendored ymfm implementation.
 
 This is not a complete music driver yet. MDX command replay and timer service,
-YM2151 timers/CSM, PDX mixing, resampling, and Falcon SSI/crossbar output
-remain. The exact boundary between implemented and pending work is kept in
-[the architecture notes](docs/architecture.md).
+PDX mixing, resampling, and Falcon SSI/crossbar output remain. The exact
+boundary between implemented and pending work is kept in [the architecture
+notes](docs/architecture.md).
 
 ## Build
 
@@ -45,7 +45,8 @@ When Hatari is installed, the non-interactive integration smoke test boots TOS
 the MXDRV `OPMBuf` seam, an exact phase step, envelope state, stereo sample
 checkpoints, and all eight algorithms with feedback against ymfm, including
 signed YM3012 rounding. It also checks busy/status, a deterministic LFO
-boundary, and channel-7 noise output:
+boundary, channel-7 noise output, Timer A/B boundaries and status reset/cancel,
+and a timer-driven CSM key sample:
 
 ```sh
 make smoke
@@ -74,6 +75,7 @@ harness at this stage, not yet an MDX player.
 - `tools/generate_ym2151_tables.py`: mechanical ymfm-to-DSP table generator.
 - `tests/traces/attack_all_carriers.trace`: timestamped oracle input trace.
 - `tests/traces/noise_channel7.trace`: fastest-rate channel-7 noise trace.
+- `tests/traces/timer_csm.trace`: two-sample Timer A/CSM oracle trace.
 - `docs/ym2151-ground-truth.md`: facts extracted from the vendored MAME core.
 - `docs/dsp56001-notes.md`: constraints taken from the local Motorola manual.
 - `docs/architecture.md`: ownership, protocol, and staged port plan.

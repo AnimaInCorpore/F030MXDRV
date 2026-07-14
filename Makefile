@@ -67,10 +67,10 @@ $(YM2151_ORACLE): tools/ym2151_oracle.cpp $(YMFM_SOURCE)/ymfm_opm.cpp \
 		tools/ym2151_oracle.cpp $(YMFM_SOURCE)/ymfm_opm.cpp -o $@
 
 $(YM2151_REFERENCE): $(YM2151_ORACLE) tests/traces/attack_all_carriers.trace \
-		tests/traces/noise_channel7.trace
+		tests/traces/noise_channel7.trace tests/traces/timer_csm.trace
 	@mkdir -p $(GENERATED_BUILD)
 	$(YM2151_ORACLE) --emit-m68k tests/traces/attack_all_carriers.trace \
-		tests/traces/noise_channel7.trace > $@
+		tests/traces/noise_channel7.trace tests/traces/timer_csm.trace > $@
 
 $(YM2151_TABLES): tools/generate_ym2151_tables.py $(YMFM_SOURCE)/ymfm_fm.ipp
 	@mkdir -p $(GENERATED_BUILD)
@@ -147,6 +147,9 @@ smoke: check
 	@rg -q "Transfer 0x0029e0" build/hatari-smoke.trace
 	@rg -q "Transfer 0x006b40" build/hatari-smoke.trace
 	@rg -q "Transfer 0xffe520" build/hatari-smoke.trace
+	@rg -q "Transfer 0x000001" build/hatari-smoke.trace
+	@rg -q "Transfer 0x000002" build/hatari-smoke.trace
+	@rg -q "Transfer 0x0001aa" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x01c0de" build/hatari-smoke.trace
 	@echo "Hatari MXDRV/DSP ymfm sample-oracle smoke test: OK"
 

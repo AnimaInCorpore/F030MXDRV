@@ -230,6 +230,170 @@ start:
         cmp.l   #YM_REF_NOISE_63_RIGHT,d0
         bne     protocol_failed
 
+        ; Timer A uses its 10-bit latch directly in native sample units.
+        ; Value $3fe therefore expires after two clock commands.
+        bsr     mxdrv_reset
+        tst.l   d0
+        bne     protocol_failed
+        moveq   #$10,d1
+        moveq   #-$01,d2               ; timer A high = $ff
+        bsr     mxdrv_write_ym2151
+        tst.l   d0
+        bne     protocol_failed
+        moveq   #$11,d1
+        moveq   #2,d2                  ; timer A low = 2, value = $3fe
+        bsr     mxdrv_write_ym2151
+        tst.l   d0
+        bne     protocol_failed
+        moveq   #$14,d1
+        moveq   #5,d2                  ; enable A + load A
+        bsr     mxdrv_write_ym2151
+        tst.l   d0
+        bne     protocol_failed
+
+        moveq   #1,d3
+        bsr     clock_samples
+        bsr     mxdrv_query_status
+        tst.l   d0
+        bne     protocol_failed
+        moveq   #1,d3
+        bsr     clock_samples
+        bsr     mxdrv_query_status
+        cmpi.l  #1,d0
+        bne     protocol_failed
+
+        moveq   #$14,d1
+        moveq   #$15,d2                ; reset A without restarting loaded timer
+        bsr     mxdrv_write_ym2151
+        tst.l   d0
+        bne     protocol_failed
+        bsr     mxdrv_query_status
+        cmpi.l  #$80,d0
+        bne     protocol_failed
+        moveq   #1,d3
+        bsr     clock_samples
+        bsr     mxdrv_query_status
+        tst.l   d0
+        bne     protocol_failed
+        moveq   #1,d3
+        bsr     clock_samples
+        bsr     mxdrv_query_status
+        cmpi.l  #1,d0
+        bne     protocol_failed
+
+        moveq   #$14,d1
+        moveq   #$14,d2                ; reset A + clear load cancels it
+        bsr     mxdrv_write_ym2151
+        tst.l   d0
+        bne     protocol_failed
+        moveq   #3,d3
+        bsr     clock_samples
+        bsr     mxdrv_query_status
+        tst.l   d0
+        bne     protocol_failed
+
+        ; Timer B's $ff latch has a 16-sample period.
+        bsr     mxdrv_reset
+        tst.l   d0
+        bne     protocol_failed
+        moveq   #$12,d1
+        moveq   #-$01,d2
+        bsr     mxdrv_write_ym2151
+        tst.l   d0
+        bne     protocol_failed
+        moveq   #$14,d1
+        moveq   #$0a,d2                ; enable B + load B
+        bsr     mxdrv_write_ym2151
+        tst.l   d0
+        bne     protocol_failed
+        moveq   #15,d3
+        bsr     clock_samples
+        bsr     mxdrv_query_status
+        tst.l   d0
+        bne     protocol_failed
+        moveq   #1,d3
+        bsr     clock_samples
+        bsr     mxdrv_query_status
+        cmpi.l  #2,d0
+        bne     protocol_failed
+        moveq   #$14,d1
+        moveq   #$28,d2                ; reset B + clear load
+        bsr     mxdrv_write_ym2151
+        tst.l   d0
+        bne     protocol_failed
+        moveq   #17,d3
+        bsr     clock_samples
+        bsr     mxdrv_query_status
+        tst.l   d0
+        bne     protocol_failed
+
+        ; The divide-by-16 source is free-running. Loading B five samples
+        ; after reset shortens this first $ff period from 16 to 11 samples.
+        bsr     mxdrv_reset
+        tst.l   d0
+        bne     protocol_failed
+        moveq   #5,d3
+        bsr     clock_samples
+        moveq   #$12,d1
+        moveq   #-$01,d2
+        bsr     mxdrv_write_ym2151
+        tst.l   d0
+        bne     protocol_failed
+        moveq   #$14,d1
+        moveq   #$0a,d2
+        bsr     mxdrv_write_ym2151
+        tst.l   d0
+        bne     protocol_failed
+        moveq   #10,d3
+        bsr     clock_samples
+        bsr     mxdrv_query_status
+        tst.l   d0
+        bne     protocol_failed
+        moveq   #1,d3
+        bsr     clock_samples
+        bsr     mxdrv_query_status
+        cmpi.l  #2,d0
+        bne     protocol_failed
+
+        ; With timer-A status disabled, its two-sample expiration still raises
+        ; the all-operator CSM key input for sample 2.
+        bsr     mxdrv_reset
+        tst.l   d0
+        bne     protocol_failed
+        lea     csm_trace(pc),a3
+        moveq   #11,d3
+.write_csm_trace:
+        moveq   #0,d1
+        moveq   #0,d2
+        move.b  (a3)+,d1
+        move.b  (a3)+,d2
+        bsr     mxdrv_write_ym2151
+        tst.l   d0
+        bne     protocol_failed
+        dbra    d3,.write_csm_trace
+
+        moveq   #2,d3                  ; samples 0..1: timer has not keyed yet
+        bsr     clock_samples
+        tst.l   d0
+        bne     protocol_failed
+        bsr     mxdrv_query_right
+        tst.l   d0
+        bne     protocol_failed
+        bsr     mxdrv_query_status      ; enable-A is clear, so no status flag
+        tst.l   d0
+        bne     protocol_failed
+        moveq   #1,d3                  ; sample 2 consumes the CSM key input
+        bsr     clock_samples
+        cmp.l   #YM_REF_CSM_2_LEFT,d0
+        bne     protocol_failed
+        bsr     mxdrv_query_right
+        cmp.l   #YM_REF_CSM_2_RIGHT,d0
+        bne     protocol_failed
+        moveq   #0,d1
+        bsr     mxdrv_query_envelope
+        tst.l   d0
+        bne     protocol_failed
+
         ; Unique completion marker for the non-interactive Hatari trace gate.
         move.l  #DSP_CMD_PING+$c0de,d0
         bsr     dsp_exchange
@@ -307,6 +471,12 @@ noise_trace:
         dc.b    $27,$c7,$2f,$4c,$37,$00
         dc.b    $5f,$01,$7f,$00,$9f,$1c,$bf,$00,$df,$00,$ff,$0f
         dc.b    $0f,$9f,$08,$47
+        even
+
+csm_trace:
+        dc.b    $20,$c7,$28,$4c,$30,$00,$40,$01
+        dc.b    $60,$00,$80,$ff,$a0,$00,$c0,$00,$e0,$0f
+        dc.b    $10,$ff,$11,$02,$14,$81
         even
 
 algorithm_references:

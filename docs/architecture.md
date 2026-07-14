@@ -54,10 +54,10 @@ protocol version in the ping reply whenever either side changes incompatibly.
    DSP. The checked attack trace is bit-exact with ymfm at the phase, envelope,
    and rounded-output boundaries; a second sweep covers all eight algorithms
    with operator feedback enabled.
-4. **Chip globals (partial):** register reset, key edges, pan, YM3012
+4. **Chip globals (present):** register reset, key edges, pan, YM3012
    10.3-float round-trip behavior, all LFO waveforms, AM/PM modulation,
-   channel-7 noise, and the write-busy status bit are implemented. Timer A/B
-   flags and CSM remain.
+   channel-7 noise, Timer A/B load/reload/reset/status behavior, CSM keying,
+   and the write-busy status bit are implemented.
 5. **Falcon audio:** clock the DSP synthesis kernel, resample the X68000's
    62.5 kHz OPM stream for a supported Falcon codec rate, and transmit stereo
    through SSI/crossbar. Restore all locked audio/DSP resources on exit.
@@ -75,7 +75,7 @@ traces can be compared at these boundaries:
 - phase step and envelope attenuation per operator;
 - per-algorithm channel output before panning;
 - stereo output before and after YM3012 rounding;
-- timer/status events in source-clock units.
+- timer/status events in source-clock units and timer-driven CSM output.
 
 Exact equality is expected for integer state and pre-resampling native samples.
 Only the future resampling stage may introduce explicitly documented error.
