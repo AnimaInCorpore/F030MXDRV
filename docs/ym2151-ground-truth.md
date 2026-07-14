@@ -80,11 +80,13 @@ multiplier, LFO PM, key scaling, and envelope rates must remain in the same
 integer domains as ymfm until the final DSP fixed-point conversion is defined.
 
 The build mechanically imports ymfm's phase-step, DT1, log-sine, power, and
-envelope-increment tables. Fixed-width and delta packing keep the converted
-DSP image below TOS 4.02's 8 KiB practical limit. The packed source tables live
-in the 68030 executable, are uploaded as a 329-word bootstrap transaction, and
-are expanded exactly on the DSP before conformance or audio work begins; DT1
-continues to be read from its packed table. The frequency path removes
+envelope-increment tables. Fixed-width and delta packing reduce host-transfer
+and DSP-memory cost. The packed source tables live in the 68030 executable, are
+uploaded as a 329-word bootstrap transaction, and are expanded exactly on the
+DSP before conformance or audio work begins; DT1 continues to be read from its
+packed table. Program code is installed by the embedded second-stage loader,
+so TOS's former converted-LOD size ceiling no longer constrains specialization.
+The frequency path removes
 the gaps from OPM key codes, applies the DT2 deltas `[0, 384, 500, 608]`, handles
 octave overflow/clamping, adds signed DT1, and applies the x.1 multiplier
 (`MUL=0` means 0.5). Protocol commands `05 cc oo` and `07 00 ii` expose phase

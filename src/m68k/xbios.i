@@ -139,6 +139,18 @@
         lea     12(sp),sp
         endm
 
+; Reset the DSP and install at most 512 packed 24-bit words in internal P RAM.
+; Unlike Dsp_ExecProg, this deliberately hands all later memory placement to
+; the embedded bootstrap.
+        macro   Dsp_ExecBoot codeptr,codesize,ability
+        move.w  \3,-(sp)
+        move.l  \2,-(sp)
+        pea     \1
+        move.w  #110,-(sp)
+        trap    #14
+        lea     12(sp),sp
+        endm
+
 ; Transfer 24-bit DSP words held in 32-bit 68030 slots. Dsp_BlkWords (XBIOS
 ; 123) is not suitable here: it expands 16-bit CPU words to DSP words.
         macro   Dsp_BlkUnpacked input,input_count,output,output_count

@@ -174,6 +174,21 @@ table_slots:
 table_current:
         ds      1
 
+; State used only by the codec-rate lower-bound profile. The four oscillators
+; retain 16-bit fractional table positions while r0-r3 hold their modulo-256
+; integer positions for the duration of the benchmark command. The phase ring
+; must begin on a four-word boundary for m4/m5 modulo addressing.
+rt_profile_alignment_pad:
+        ds      2
+rt_phase_fraction:
+        ds      4
+rt_profile_checksum:
+        ds      1
+rt_gain_alignment_pad:
+        ds      3
+rt_envelope_gain:
+        ds      4
+
 ; Larger register and operator arrays remain in external X memory. Operator
 ; state uses logical per-channel order M1,C1,M2,C2. Phases are native 10.10
 ; ymfm values; modulo-24-bit storage preserves the low waveform bits at wrap.
@@ -222,7 +237,9 @@ ym_phase_step_cache:
 ; Program
 ; -----------------------------------------------------------------------------
 
-        org     p:$40
+; P:$0040-$007f is reserved for the transient second-stage loader. It remains
+; unused after bootstrap and keeps that loader out of the interrupt vectors.
+        org     p:$80
 
 start:
         movep   #1,x:m_pbc              ; enable the Falcon host port
@@ -298,6 +315,10 @@ command_loop:
         move    #>DSP_CMD_QUERY_TIME,x0
         cmp     x0,a
         jeq     command_query_time
+
+        move    #>DSP_CMD_PROFILE_RT,x0
+        cmp     x0,a
+        jeq     command_profile_realtime
 
         move    #>DSP_CMD_START_MIXED,x0
         cmp     x0,a
@@ -406,6 +427,113 @@ command_load_tables_loop:
         jsr     ym_reset
         jsr     ym_rebuild_phase_cache
         move    #>DSP_REPLY_OK,a
+        jsr     send_reply
+        jmp     command_loop
+
+; Profile a strict lower bound for one four-operator codec-rate channel. It
+; includes fractional phase accumulation, modulo table addressing, four linear
+; sine lookups, distinct static carrier gains, carrier summing, and a retained
+; checksum. It deliberately omits envelope evolution, feedback, modulation
+; routing, LFO/noise, register-event service, panning, and SSI, so an eight-
+; channel projection is optimistic by design.
+command_profile_realtime:
+        clr     a
+        move    #rt_phase_fraction,r4
+        do      #4,rt_profile_clear_fraction
+        move    a1,x:(r4)+
+rt_profile_clear_fraction:
+        move    a1,x:rt_profile_checksum
+
+        move    #rt_linear_sine,r0
+        move    #rt_linear_sine,r1
+        move    #rt_linear_sine,r2
+        move    #rt_linear_sine,r3
+        move    #rt_phase_fraction,r4
+        move    #rt_phase_fraction,r5
+        move    #rt_envelope_gain,r7
+        move    #>$400000,x0           ; 0.5 signed fractional gain
+        move    x0,x:(r7)+
+        move    #>$300000,x0           ; 0.375
+        move    x0,x:(r7)+
+        move    #>$200000,x0           ; 0.25
+        move    x0,x:(r7)+
+        move    #>$100000,x0           ; 0.125
+        move    x0,x:(r7)+
+        move    #rt_envelope_gain,r7
+        move    #>255,m0
+        move    #>255,m1
+        move    #>255,m2
+        move    #>255,m3
+        move    #>3,m4
+        move    #>3,m5
+        move    #>3,m7
+        move    #>2,n0                  ; 440 Hz: 2 + $4a74/65536 entries
+        move    #>2,n1
+        move    #>2,n2
+        move    #>2,n3
+        move    #>$4a74,x1
+        move    #>$00ffff,y1
+
+rt_profile_loop_start:
+        do      #DSP_RT_PROFILE_FRAMES,rt_profile_frame_done
+        clr     b
+
+        move    x:(r4)+,a
+        add     x1,a
+        move    (r0)+n0
+        jclr    #16,a1,rt_profile_op1_no_carry
+        move    (r0)+
+rt_profile_op1_no_carry:
+        and     y1,a1 x:(r7)+,x0 y:(r0),y0
+        mac     x0,y0,b a1,x:(r5)+
+
+        move    x:(r4)+,a
+        add     x1,a
+        move    (r1)+n1
+        jclr    #16,a1,rt_profile_op2_no_carry
+        move    (r1)+
+rt_profile_op2_no_carry:
+        and     y1,a1 x:(r7)+,x0 y:(r1),y0
+        mac     x0,y0,b a1,x:(r5)+
+
+        move    x:(r4)+,a
+        add     x1,a
+        move    (r2)+n2
+        jclr    #16,a1,rt_profile_op3_no_carry
+        move    (r2)+
+rt_profile_op3_no_carry:
+        and     y1,a1 x:(r7)+,x0 y:(r2),y0
+        mac     x0,y0,b a1,x:(r5)+
+
+        move    x:(r4)+,a
+        add     x1,a
+        move    (r3)+n3
+        jclr    #16,a1,rt_profile_op4_no_carry
+        move    (r3)+
+rt_profile_op4_no_carry:
+        and     y1,a1 x:(r7)+,x0 y:(r3),y0
+        mac     x0,y0,b a1,x:(r5)+
+
+        move    x:rt_profile_checksum,a
+        add     b,a
+        move    a1,x:rt_profile_checksum
+rt_profile_frame_done:
+        nop
+rt_profile_loop_done:
+        ; The exact renderer uses linear addressing. The benchmark owns these
+        ; address-mode registers only for the duration of this command.
+        move    #>-1,m0
+        move    #>-1,m1
+        move    #>-1,m2
+        move    #>-1,m3
+        move    #>-1,m4
+        move    #>-1,m5
+        move    #>-1,m7
+        move    #>0,n0
+        move    #>0,n1
+        move    #>0,n2
+        move    #>0,n3
+        move    x:rt_profile_checksum,a
         jsr     send_reply
         jmp     command_loop
 

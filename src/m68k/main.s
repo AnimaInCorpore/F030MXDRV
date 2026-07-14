@@ -8,7 +8,6 @@
 DSP_X_WORDS     equ     8192
 DSP_Y_WORDS     equ     8192
 DSP_ABILITY     equ     3
-DSP_LOAD_BUFFER equ     40000
 
 SOUND_STEREO16  equ     1
 SOUND_DSP_XMIT  equ     1
@@ -32,8 +31,15 @@ start:
         tst.l   d0
         bmi     reserve_failed
 
-        Dsp_LoadProgram dsp_filename,#DSP_ABILITY,dsp_load_buffer
-        tst.l   d0
+        ; XBIOS can boot at most 512 contiguous internal-P words. Install the
+        ; embedded loader there, then stream the complete sparse program as
+        ; unpacked 24-bit words. The loader acknowledges only after every
+        ; section is resident and immediately enters the final reset vector.
+        Dsp_ExecBoot dsp_bootstrap_image,#DSP_BOOT_WORDS,#DSP_ABILITY
+        clr.l   dsp_stage2_reply
+        Dsp_BlkUnpacked dsp_program_image,#DSP_STAGE2_TRANSFER_WORDS,dsp_stage2_reply,#1
+        move.l  dsp_stage2_reply,d0
+        cmp.l   #DSP_STAGE2_REPLY_OK,d0
         bne     load_failed
 
         move.l  #DSP_CMD_PING,d0
@@ -847,6 +853,71 @@ run_conformance:
         tst.l   d0
         bne     protocol_failed
 
+        ; Install the same sustained four-operator algorithm-7 voice on all
+        ; eight channels. The unique ping immediately before command 0b lets
+        ; Hatari's DSP profiler arm on a deterministic full-load render using
+        ; the cached no-PM phase path. The command sequence itself also runs
+        ; unchanged on a real Falcon.
+        bsr     mxdrv_reset
+        tst.l   d0
+        bne     protocol_failed
+        moveq   #0,d5
+.profile_channel:
+        lea     attack_trace(pc),a3
+        moveq   #27,d3
+.profile_write:
+        moveq   #0,d1
+        moveq   #0,d2
+        move.b  (a3)+,d1
+        move.b  (a3)+,d2
+        cmpi.b  #$08,d1
+        beq     .profile_key_on
+        or.b    d5,d1                 ; channel occupies register bits 0-2
+        bra     .profile_send
+.profile_key_on:
+        or.b    d5,d2                 ; key-on data selects the channel
+.profile_send:
+        bsr     mxdrv_write_ym2151
+        tst.l   d0
+        bne     protocol_failed
+        dbra    d3,.profile_write
+        addq.w  #1,d5
+        cmpi.w  #8,d5
+        bcs     .profile_channel
+
+        move.l  #DSP_CMD_PING+$c1c0,d0
+        bsr     dsp_exchange
+        cmp.l   #DSP_REPLY_HELLO,d0
+        bne     protocol_failed
+
+        move.l  #DSP_CMD_START_AUDIO,d0
+        bsr     dsp_exchange
+        cmp.l   #DSP_REPLY_OK,d0
+        bne     protocol_failed
+        move.l  #DSP_CMD_STOP_AUDIO,d0
+        bsr     dsp_exchange
+        cmp.l   #DSP_REPLY_OK,d0
+        bne     protocol_failed
+        move.l  #DSP_CMD_QUERY_AUDIO,d0
+        bsr     dsp_exchange
+        cmpi.l  #DSP_MIX_FRAME_COUNT,d0
+        bne     protocol_failed
+        move.l  #DSP_CMD_QUERY_TIME,d0
+        bsr     dsp_exchange
+        cmpi.l  #1280,d0
+        bne     protocol_failed
+
+        ; Run the isolated codec-rate four-operator lower-bound kernel. Its
+        ; unique marker gives the Hatari cycle profiler a stable arming point.
+        move.l  #DSP_CMD_PING+$c2c0,d0
+        bsr     dsp_exchange
+        cmp.l   #DSP_REPLY_HELLO,d0
+        bne     protocol_failed
+        move.l  #DSP_CMD_PROFILE_RT,d0
+        bsr     dsp_exchange
+        cmpi.l  #DSP_RT_PROFILE_CHECKSUM,d0
+        bne     protocol_failed
+
         ; Unique completion marker for the non-interactive Hatari trace gate.
         move.l  #DSP_CMD_PING+$c0de,d0
         bsr     dsp_exchange
@@ -1107,6 +1178,7 @@ clock_samples:
         data
 
         include "ym2151_host_tables.i"
+        include "dsp_stage2_image.i"
 
 banner:
         dc.b    27,'E','F030MXDRV DSP core',13,10
@@ -1127,8 +1199,7 @@ reserve_error_text:
         dc.b    'Press a key to exit.',13,10,0
 
 load_error_text:
-        dc.b    'Error: unable to load YM2151.LOD.',13,10
-        dc.b    'Keep it beside F030MXDRV.TOS.',13,10
+        dc.b    'Error: unable to bootstrap the DSP program.',13,10
         dc.b    'Press a key to exit.',13,10,0
 
 protocol_error_text:
@@ -1138,10 +1209,6 @@ protocol_error_text:
 sound_error_text:
         dc.b    'Error: unable to lock the Falcon sound system.',13,10
         dc.b    'Press a key to exit.',13,10,0
-
-dsp_filename:
-        dc.b    'ym2151.lod',0
-        even
 
 attack_trace:
         dc.b    $20,$c7,$28,$4c,$30,$00
@@ -1343,8 +1410,8 @@ algorithm_references:
 
         bss
 
-dsp_load_buffer:
-        ds.b    DSP_LOAD_BUFFER
+dsp_stage2_reply:
+        ds.l    1
 dsp_table_reply:
         ds.l    1
 player_mode:

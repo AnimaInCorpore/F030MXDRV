@@ -12,13 +12,13 @@ routine receives the register in `d1.b` and data in `d2.b`, mirrors the byte in
 `OPMBuf`, then writes the X68000 OPM ports. `src/m68k/mxdrv_port.s` preserves
 those input conventions and replaces the hardware write with one DSP word.
 
-## Host/DSP protocol v10
+## Host/DSP protocol v11
 
 Every transport unit is one DSP/host 24-bit word. The upper byte is an opcode.
 
 | Word | Meaning | Reply |
 | --- | --- | --- |
-| `01 00 00` | ping/protocol query | `4d 58 0a` (`MX`, version 10) |
+| `01 00 00` | ping/protocol query | `4d 58 0b` (`MX`, version 11) |
 | `02 rr dd` | write YM2151 register `rr = dd`, including during SSI playback | `00 00 00` |
 | `03 00 00` | reset YM2151 state | `00 00 00` |
 | `04 00 00` | clock one native 62.5 kHz sample | signed left sample |
@@ -27,12 +27,13 @@ Every transport unit is one DSP/host 24-bit word. The upper byte is an opcode.
 | `07 00 ii` | query logical operator `ii` | 10-bit envelope attenuation |
 | `08 00 00` | query chip status | timer flags plus busy in bit 7 |
 | `09 00 00` | query LFO state | packed phase, AM, signed PM bytes |
-| `0a 00 00` + 329 words | upload packed immutable ymfm tables | `00 00 00` after expansion/reset |
+| `0a 00 00` + 640 words | upload packed immutable ymfm tables plus the codec-rate sine table | `00 00 00` after expansion/reset |
 | `0b 00 00` | pre-render FM and start interrupt-fed SSI on buffer A | `00 00 00` before transmit starts |
 | `0c 00 00` | stop and disable DSP SSI transmit | `00 00 00` |
 | `0d 00 00` | query prepared SSI stereo frames | unsigned 24-bit frame count |
 | `0e tt tt` + `02 rr dd` | queue `rr = dd` at absolute rolling native time `tttt` | `00 00 00`, or error if invalid/full/out of order |
 | `0f 00 00` | query the rolling 16-bit native-sample clock | unsigned 16-bit time |
+| `10 00 00` | run the 2048-frame codec-rate four-operator feasibility kernel | deterministic checksum `04 1a c9` |
 | `11 00 00` + 2014 words | upload 1007 interleaved stereo PCM frames, mix with a new FM period, and start interrupt-fed SSI | `00 00 00` before transmit starts |
 | `12 00 00` | query the first nonzero mixed stereo probe | signed left+right sample sum |
 | `13 00 00` + 2014 words | upload PCM to the inactive buffer, render FM in place, and switch at a stereo boundary | `00 00 00` after the switch |
@@ -50,7 +51,7 @@ FIFO, so the host can refill slots after earlier entries are consumed. The
 ahead. Command `0f` exposes the current scheduling position to the host.
 
 Commands `0a`, `11`, and `13` are the exceptions to the single-word transaction
-shape. Command `0a` consumes exactly 329 following host words before replying.
+shape. Command `0a` consumes exactly 640 following host words before replying.
 Command `11` consumes 1007 interleaved signed left/right frame pairs, renders
 the matching FM period, saturates PCM+FM to signed 16-bit, and starts SSI on
 buffer A. While SSI's fast transmit interrupt repeats that complete block,
@@ -69,6 +70,12 @@ continuous event timeline; only chip reset returns it to zero. Command `0d`
 counts prepared frames, not the number replayed by SSI. This distinction keeps
 the result deterministic when the same completed block repeats during a slow
 refill.
+
+Command `10` is a conformance and cycle-measurement spike, not an audio command.
+It owns `r0-r5`, `m0-m5`, and `n0-n3` while SSI is stopped, restores linear
+addressing before returning, and lets Hatari bracket only its hot loop through
+listing-resolved symbols. Its checksum is gated so address-ring or parallel-
+move regressions cannot silently invalidate the timing result.
 
 The constants are duplicated in `src/m68k/protocol.i` and
 `src/dsp/protocol.inc` because the two assemblers do not share syntax. Keep the
@@ -107,7 +114,7 @@ protocol version in the ping reply whenever either side changes incompatibly.
    and the write-busy status bit are implemented.
 5. **Falcon audio (in progress):** the DSP converts 1280 native 62.5 kHz
    samples into 1007 frames at the Falcon's 25.175 MHz / 4 / 128 codec rate.
-   Protocol v10 feeds 16-bit, two-word SSI network frames from a fast transmit
+   Protocol v11 feeds 16-bit, two-word SSI network frames from a fast transmit
    interrupt using two aligned external-X buffers. The normal interrupt mutates
    only its dedicated `r6/m6` pair; a separate long exception path reads SSISR
    and writes TX to clear a transmit underrun. The 68030 can fill the inactive
@@ -117,16 +124,20 @@ protocol version in the ping reply whenever either side changes incompatibly.
    boundaries, clock progression from 1280 through 3840 native samples, a
    three-second no-refill interval, and clean stop/tristate/unlock.
 
-   The current scalar YM kernel still cannot synthesize at codec cadence. The
-   earlier direct-mode measurement generated 5,679 fresh frames per nominal
-   second, about 11.5% of the required rate; that mode was removed to recover
-   program space for the interrupt vectors and second-buffer control. Rendering
-   one 1007-frame block therefore still takes about 177 ms while the codec
-   consumes it in 20.48 ms. Protocol v10 makes that miss safe by repeating the
-   last complete block, but it does not make playback temporally accurate. The
-   converted DSP image is currently 8,082 of the 8,192-byte loader budget, so
-   only 110 bytes remain for further DSP features. More operator specialization
-   and hardware cycle measurement are required to close the roughly 8.6x gap.
+   A reproducible Hatari DSP-cycle gate now supersedes the earlier VBL-derived
+   throughput estimate. With four operators active on all eight channels and
+   the cached no-PM path selected, rendering one 1280-sample period consumes
+   16,459,267 instruction cycles, or 12,858.80 per native sample. The Falcon
+   budget is 256.68 cycles per sample, so the exact scalar kernel misses real
+   time by 50.10x before steady SSI and host-port overhead. Protocol v11 makes
+   that miss safe by repeating the last complete block, but it does not make
+   playback temporally accurate. The exact kernel is retained as the
+   conformance reference; the real-time output contract now requires an
+   explicit accuracy/rate/workload compromise rather than another scalar
+   optimization pass. An embedded second-stage P-memory loader now removes the
+   former 8 KiB converted-LOD ceiling: a 111-word `Dsp_ExecBoot` program at
+   `P:$0040` receives all sparse P sections, acknowledges completion, and enters
+   the final program at its replaced reset vector.
 6. **PCM/PDX (in progress):** standard raw PDX banks have checked lookup for all
    96 offset/length entries and eight independent streaming MSM6258 decoders. A
    codec-rate host mixer implements the five PCM8 playback clocks with exact
@@ -134,7 +145,7 @@ protocol version in the ping reply whenever either side changes incompatibly.
    pan, voice start/stop and active masks, and signed 16-bit saturation. A
    generated oracle checks low-nibble-first decoding, predictor and step state,
    sample exhaustion, malformed bank ranges, and deterministic two-voice mixer
-   frames under Hatari. A protocol-v10 integration gate renders one 1007-frame
+   frames under Hatari. A protocol-v11 integration gate renders one 1007-frame
    PCM period on the host, uploads it, checks the DSP-mixed stereo sum, and sends
    the block through the Falcon SSI path. MDX PCM notes now bind tracks 8-15 to
    PDX voices 0-7 with encoded durations and default rate/gain/pan. Continuous
@@ -158,5 +169,55 @@ traces can be compared at these boundaries:
 - stereo output before and after YM3012 rounding;
 - timer/status events in source-clock units and timer-driven CSM output.
 
-Exact equality is expected for integer state and pre-resampling native samples.
-Only the future resampling stage may introduce explicitly documented error.
+Exact equality remains the contract for the conformance kernel's integer state
+and pre-resampling native samples. The cycle gate shows that this kernel is not
+a viable real-time renderer on a stock Falcon. Any replacement audio kernel
+must state its relaxed boundary explicitly and retain the exact path for
+regression comparisons.
+
+## Real-time compatibility contract
+
+The selected Falcon playback target is perceptual FM compatibility at the
+49,169.921875 Hz codec cadence, with the exact command-clocked kernel retained
+as an offline/conformance oracle. The real-time kernel must preserve these
+externally meaningful behaviors:
+
+- every YM register write remains ordered and is mapped to the first codec
+  sample at or after its exact 62.5 kHz timestamp, with less than one codec
+  frame of output-event latency;
+- key state, channel algorithm, panning, total-level changes, Timer A/B status,
+  busy state, and CSM event order retain the exact register semantics;
+- oscillator, envelope, LFO, noise, and timer accumulators have no long-term
+  rate drift; pitch and control-rate timing may be quantized only to the codec
+  frame boundary;
+- PDX decoding, rate conversion, gain, panning, and saturated PCM/FM mixing
+  retain their current integer contracts; and
+- an all-eight-FM/all-eight-PDX workload must produce fresh buffers without an
+  SSI underrun on a stock Falcon.
+
+Native per-sample operator output, feedback history, modulation sidebands, and
+YM3012 rounding are not required to equal ymfm sample for sample in this mode.
+They must instead be checked against the exact kernel with pitch/timing tests,
+spectral and envelope comparisons, and a corpus of real MDX/PDX material. A
+codec-rate engine must update feedback and modulation on every produced sample;
+holding selected native outputs is not a valid shortcut because those outputs
+feed later operator state.
+
+## Remaining roadmap
+
+1. Expand the measured codec-rate floor into a block-oriented, algorithm-
+   specialized channel spike. The optimized four-operator floor is 39.16
+   cycles/frame, or 313.31 cycles for eight channels against a 326.27-cycle
+   budget; the new spike must cover envelopes, feedback, modulation, stereo
+   accumulation, and SSI without losing that parallelism.
+2. Add exact-to-perceptual comparison vectors for pitch, key/write timing,
+   envelopes, LFO/noise rates, feedback spectra, and all eight algorithms.
+3. Integrate the selected real-time kernel with the rolling write FIFO and
+   double-buffered PCM mixer while retaining the current exact protocol path.
+4. Measure cycle count, SSI underruns, buffer switches, and host/DSP contention
+   on a real Falcon before declaring the audio transport complete.
+5. Finish MDX software modulation, synchronization, legato, remaining command
+   behavior, and continuous mixed FM/PDX scheduling.
+6. Run a compatibility corpus of real MDX/PDX pairs and complete the public
+   MXDRV call-table behavior, error handling, packaging, and hardware soak
+   tests.

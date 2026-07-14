@@ -59,9 +59,9 @@ Phase, key edges, feedback history, LFO/noise, and timers continue to clock.
 Frequently accessed scalar state now occupies internal `X:$0000-$0041`.
 Short-address loads and stores remove an extension word and avoid external RAM;
 this reduced the initialized loader payload from 8,100 to 7,113 bytes before
-adding the FIFO and audio transport. The current protocol-v10 image, including
-interrupt-fed double buffering and PCM/FM mixing, is 8,082 bytes; the build
-checks it against the 8 KiB TOS limit.
+adding the FIFO and audio transport. The buffered-audio image later reached 8,082
+bytes, which motivated the second-stage loader described below rather than
+making code size part of the synthesis contract.
 
 ## Falcon SSI interrupt-buffered mixed path
 
@@ -100,7 +100,7 @@ channels, preloads the new block's first left word, and restores `$5a00`.
 Buffer pointers use `r6/r7`; the phase-cache loop owns `r4`, so sharing that
 register would displace the refill position during every YM sample.
 
-Protocol v10 implements the event shape with a rolling clock. A refillable
+Protocol v11 implements the event shape with a rolling clock. A refillable
 32-entry ring FIFO stores an absolute 16-bit native-sample time beside each
 packed register write. Entries must be in nondecreasing modular order and
 within the 32,767-sample future horizon; all writes due at a boundary are
@@ -108,9 +108,77 @@ applied before clocking that YM sample. FIFO and clock-query transactions are
 serviced while SSI is active, and the clock continues across refills instead of
 restarting at zero.
 
-The previous direct-mode throughput instrument generated 5,679 fresh codec
-frames and advanced 7,217 native samples during a nominal 50-VBL interval.
-That is about 11.5% of the required 49,169.921875 frames per second. Direct mode
-was removed to recover loader space; the double buffer now keeps transport
-alive by repeating the last complete block, while the same result remains the
-concrete optimization target for real-time fresh synthesis.
+## Cycle feasibility gate
+
+The Falcon DSP oscillator measured by Hatari is 32,084,988 Hz. One DSP56001
+instruction cycle is two oscillator clocks, leaving about 256.68 instruction
+cycles for each native 62.5 kHz YM sample. `make profile-dsp` arms Hatari's DSP
+profiler on a unique host-port marker, then measures command `$0b` from entry
+through completion of the first 1280-native-sample render. Listing symbols are
+resolved mechanically, and the generated report is written to
+`build/dsp-profile/report.txt`.
+
+The deterministic fixture enables a sustained four-operator algorithm-7 voice
+on all eight channels and deliberately uses the cached no-PM phase path. Hatari
+2.6.1 reports 32,918,534 oscillator clocks, or 16,459,267 instruction cycles,
+for the block. That is 12,858.80 instruction cycles per native sample and
+1,025.98 ms of modeled DSP time for audio consumed in 20.48 ms: a 50.10x
+real-time miss. The profile window does not include steady SSI interrupt or
+host-port service overhead, and a PM-modulated workload can only be more
+expensive. This replaces the earlier 8.6x estimate derived indirectly from a
+VBL throughput test.
+
+The result makes full-rate, ymfm-equivalent output from the current scalar
+kernel an untenable optimization target. The exact kernel remains useful as a
+conformance model, but a real-time Falcon renderer now requires an explicit
+compromise in output accuracy, synthesis rate, supported workload, or target
+hardware. Real Falcon cycle and underrun measurements are still required to
+validate transport behavior, but plausible emulator timing error cannot close
+a 50x gap.
+
+### Codec-rate lower-bound spike
+
+`make profile-dsp-rt` brackets protocol command `$10` between
+`rt_profile_loop_start` and `rt_profile_loop_done` and writes the independent
+report to `build/dsp-profile-rt/report.txt`. The command clocks 2,048 frames of
+one four-operator channel at the 49,169.921875 Hz codec cadence. Each oscillator
+retains a 16-bit fractional phase in an aligned internal-X modulo-4 ring while
+`r0-r3` retain the integer positions in the aligned external-Y 256-entry sine
+table. Fractional carry advances each integer pointer without long-term pitch
+drift.
+
+The optimized loop keeps the sine table at `Y:$1500` and four static gains in
+internal X, so each phase mask dual-fetches sine and gain while the following
+`MAC` overlaps its phase-ring store. Hatari reports 80,208 instruction cycles,
+or 39.16 cycles per channel/frame. A linear eight-channel pass is 313.31 cycles
+against the measured 326.27-cycle codec-frame budget, leaving only 12.96 cycles
+(4.0%). The four distinct gain multipliers exercise the algorithm-7 carrier
+path; the checksum is `$041ac9` and the normal smoke suite checks it.
+
+This is deliberately a strict floor: it omits envelope evolution,
+feedback, modulation routing, LFO/noise, write-event service, panning, SSI, and
+PDX/FM saturation. Consequently the result does not establish that a complete
+scalar engine fits. It establishes that drift-free oscillator/table arithmetic
+is viable only when organized around DSP parallel moves. The next feasibility
+kernel must be block-oriented and specialized by YM algorithm, allowing gain,
+modulation, and buffer traffic to share those parallel memory slots; a generic
+feature-by-feature extension of this loop has no credible cycle margin.
+
+## Embedded second-stage program loader
+
+The 68030 executable now embeds both a 111-word first-stage boot image and the
+sparse final P-memory image. XBIOS `Dsp_ExecBoot` resets the DSP and installs
+the first stage in internal P RAM. Its reset vector jumps to `P:$0040`; the
+final YM program deliberately begins at `P:$0080`, leaving
+`P:$0040-$007f` untouched while the loader receives the complete program
+through `Dsp_BlkUnpacked`.
+
+The generated stream starts with magic `$4d584c`, followed by a section count
+and address/count/data records. The current program contains 2,824 initialized
+words in five sparse P sections. After installing them, the loader replies
+`$4c4f41` and jumps through the replaced reset vector at `P:$0000`. The build
+generator rejects a bootstrap above the 512-word XBIOS limit, any overlap with
+the reserved loader gap, non-P sections, and sections outside 16-bit P memory.
+This removes the former 8 KiB converted-LOD ceiling from future specialized or
+unrolled kernels; the actual Falcon P-memory reservation is now the relevant
+limit.
