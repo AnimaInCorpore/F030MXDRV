@@ -170,6 +170,12 @@ table_slots:
 table_current:
         ds      1
 
+; Raw OPM register slot offsets indexed by logical operator, written once
+; at startup. Runtime initialization keeps the words out of the .LOD
+; image while making the hot ym_select_operator mapping a single fetch.
+ym_slot_offsets:
+        ds      4
+
 ; State used only by the codec-rate lower-bound profile. The four oscillators
 ; retain 16-bit fractional table positions while r0-r3 hold their modulo-256
 ; integer positions for the duration of the benchmark command. The phase ring
@@ -257,6 +263,18 @@ start:
         movep   #1,x:m_pbc              ; enable the Falcon host port
         movep   #$3000,x:m_ipr          ; SSI interrupt priority level 2
         move    #>-1,m0                 ; linear addressing for ym_regdata
+
+        ; MAME's raw register order is M1,C1,M2,C2: offsets 0,16,8,24.
+        move    #ym_slot_offsets,r0
+        clr     a
+        move    a1,x:(r0)+
+        move    #>16,a
+        move    a1,x:(r0)+
+        move    #>8,a
+        move    a1,x:(r0)+
+        move    #>24,a
+        move    a1,x:(r0)
+
         jsr     ym_reset
 
 command_loop:
@@ -2001,25 +2019,14 @@ ym_select_operator:
         move    a1,x:query_channel
         move    a1,x:synth_channel
 
-        ; The raw slot swaps the two operator bits into a 3-bit-aligned
-        ; field: offset = ((op&1)<<4) + ((op&2)<<2), giving 0,16,8,24.
-        move    b1,a
         move    #>3,y0
-        and     y0,a1
-        move    a1,x:synth_operator
-        move    a1,b
-        rep     #4
-        asl     a
-        move    #>$10,y0
-        and     y0,a1
-        rep     #2
-        asl     b
-        move    #>8,y0
         and     y0,b1
-        move    b1,x0
-        add     x0,a
-        move    x:query_channel,x0
-        add     x0,a
+        move    b1,x:synth_operator
+        move    b1,n1
+        move    #ym_slot_offsets,r1
+        move    a1,y1                  ; channel; also spaces the r1 load
+        move    x:(r1+n1),a
+        add     y1,a
         move    a1,x:query_raw_operator
         rts
 

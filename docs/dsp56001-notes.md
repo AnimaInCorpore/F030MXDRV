@@ -126,9 +126,9 @@ resolved mechanically, and the generated report is written to
 
 The deterministic fixture enables a sustained four-operator algorithm-7 voice
 on all eight channels and deliberately uses the cached no-PM phase path. Hatari
-2.6.1 reports 32,918,534 oscillator clocks, or 16,459,267 instruction cycles,
-for the block. That is 12,858.80 instruction cycles per native sample and
-1,025.98 ms of modeled DSP time for audio consumed in 20.48 ms: a 50.10x
+2.6.1 reports 30,778,274 oscillator clocks, or 15,389,137 instruction cycles,
+for the block. That is 12,022.76 instruction cycles per native sample and
+959.27 ms of modeled DSP time for audio consumed in 20.48 ms: a 46.84x
 real-time miss. The profile window does not include steady SSI interrupt or
 host-port service overhead, and a PM-modulated workload can only be more
 expensive. This replaces the earlier 8.6x estimate derived indirectly from a
@@ -140,7 +140,7 @@ conformance model, but a real-time Falcon renderer now requires an explicit
 compromise in output accuracy, synthesis rate, supported workload, or target
 hardware. Real Falcon cycle and underrun measurements are still required to
 validate transport behavior, but plausible emulator timing error cannot close
-a 50x gap.
+a nearly 47x gap.
 
 ### Codec-rate lower-bound spike
 
