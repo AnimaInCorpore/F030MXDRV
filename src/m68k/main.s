@@ -38,6 +38,40 @@ start:
         cmp.l   #DSP_REPLY_OK,d0
         bne     protocol_failed
 
+        bsr     mxdrv_query_status
+        cmpi.l  #$80,d0                ; every register write is busy for 64 clocks
+        bne     protocol_failed
+        moveq   #1,d3
+        bsr     clock_samples
+        bsr     mxdrv_query_status
+        tst.l   d0
+        bne     protocol_failed
+
+        ; Drive the saw LFO across its first phase boundary. At rate $ff the
+        ; fifth sample advances phase to 1; AM depth $7f yields $fc.
+        bsr     mxdrv_reset
+        tst.l   d0
+        bne     protocol_failed
+        moveq   #$18,d1
+        moveq   #-$01,d2               ; $ff
+        bsr     mxdrv_write_ym2151
+        tst.l   d0
+        bne     protocol_failed
+        moveq   #$19,d1
+        moveq   #$7f,d2
+        bsr     mxdrv_write_ym2151
+        tst.l   d0
+        bne     protocol_failed
+        moveq   #5,d3
+        bsr     clock_samples
+        bsr     mxdrv_query_lfo
+        cmpi.l  #$01fc00,d0
+        bne     protocol_failed
+
+        bsr     mxdrv_reset
+        tst.l   d0
+        bne     protocol_failed
+
         ; Configure the exact MAME oracle tuple: channel 0, note C4,
         ; DT1=0, MUL=1, DT2=0. Then compare the DSP's phase step.
         moveq   #$28,d1
@@ -172,6 +206,30 @@ start:
         cmpi.b  #8,d5
         bcs     .algorithm_loop
 
+        ; Channel 7 replaces operator 4's sine output with the noise LFSR.
+        ; Replay the fastest-rate oracle trace and compare sample 63.
+        bsr     mxdrv_reset
+        tst.l   d0
+        bne     protocol_failed
+        lea     noise_trace(pc),a3
+        moveq   #10,d3
+.write_noise_trace:
+        moveq   #0,d1
+        moveq   #0,d2
+        move.b  (a3)+,d1
+        move.b  (a3)+,d2
+        bsr     mxdrv_write_ym2151
+        tst.l   d0
+        bne     protocol_failed
+        dbra    d3,.write_noise_trace
+        moveq   #64,d3
+        bsr     clock_samples
+        cmp.l   #YM_REF_NOISE_63_LEFT,d0
+        bne     protocol_failed
+        bsr     mxdrv_query_right
+        cmp.l   #YM_REF_NOISE_63_RIGHT,d0
+        bne     protocol_failed
+
         ; Unique completion marker for the non-interactive Hatari trace gate.
         move.l  #DSP_CMD_PING+$c0de,d0
         bsr     dsp_exchange
@@ -243,6 +301,12 @@ attack_trace:
         dc.b    $c0,$00,$c8,$00,$d0,$00,$d8,$00
         dc.b    $e0,$0f,$e8,$0f,$f0,$0f,$f8,$0f
         dc.b    $08,$78
+        even
+
+noise_trace:
+        dc.b    $27,$c7,$2f,$4c,$37,$00
+        dc.b    $5f,$01,$7f,$00,$9f,$1c,$bf,$00,$df,$00,$ff,$0f
+        dc.b    $0f,$9f,$08,$47
         even
 
 algorithm_references:

@@ -64,7 +64,7 @@ uint32_t reference_phase_step()
     return chip.engine().debug_operator(0)->debug_cache().phase_step;
 }
 
-void emit_m68k_reference(const std::string &trace_path)
+void emit_m68k_reference(const std::string &trace_path, const std::string &noise_trace_path)
 {
     const auto events = load_trace(trace_path);
     oracle_interface intf;
@@ -131,6 +131,28 @@ void emit_m68k_reference(const std::string &trace_path)
         std::cout << "YM_REF_ALGORITHM_" << std::dec << algorithm << "_RIGHT equ $"
                   << std::hex << std::setw(6) << std::setfill('0') << right << "\n";
     }
+
+    const auto noise_events = load_trace(noise_trace_path);
+    oracle_interface noise_intf;
+    inspectable_ym2151 noise_chip(noise_intf);
+    noise_chip.reset();
+    size_t noise_event = 0;
+    inspectable_ym2151::output_data noise_output;
+    for (uint32_t sample = 0; sample <= 63; ++sample)
+    {
+        while (noise_event < noise_events.size() && noise_events[noise_event].sample == sample)
+        {
+            const auto &event = noise_events[noise_event++];
+            write_register(noise_chip, event.reg, event.data);
+        }
+        noise_chip.generate(&noise_output);
+    }
+    const uint32_t noise_left = uint32_t(noise_output.data[0]) & 0x00ffffff;
+    const uint32_t noise_right = uint32_t(noise_output.data[1]) & 0x00ffffff;
+    std::cout << "YM_REF_NOISE_63_LEFT equ     $" << std::hex << std::setw(6)
+              << std::setfill('0') << noise_left << "\n";
+    std::cout << "YM_REF_NOISE_63_RIGHT equ    $" << std::hex << std::setw(6)
+              << std::setfill('0') << noise_right << "\n";
 }
 
 std::vector<trace_event> load_trace(const std::string &path)
@@ -212,9 +234,9 @@ int main(int argc, char **argv)
 {
     try
     {
-        if (argc == 3 && std::string(argv[1]) == "--emit-m68k")
+        if (argc == 4 && std::string(argv[1]) == "--emit-m68k")
         {
-            emit_m68k_reference(argv[2]);
+            emit_m68k_reference(argv[2], argv[3]);
             return 0;
         }
         if (argc == 2 && std::string(argv[1]) == "--phase-hex")
@@ -230,7 +252,7 @@ int main(int argc, char **argv)
         }
 
         std::cerr << "usage:\n"
-                  << "  ym2151_oracle --emit-m68k TRACE\n"
+                  << "  ym2151_oracle --emit-m68k ATTACK_TRACE NOISE_TRACE\n"
                   << "  ym2151_oracle --phase-hex\n"
                   << "  ym2151_oracle --vectors TRACE SAMPLES\n";
         return 2;

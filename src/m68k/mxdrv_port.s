@@ -6,6 +6,8 @@
         global  mxdrv_clock_sample
         global  mxdrv_query_right
         global  mxdrv_query_envelope
+        global  mxdrv_query_status
+        global  mxdrv_query_lfo
         global  mxdrv_opm_buffer
 
         text
@@ -67,6 +69,16 @@ mxdrv_query_envelope:
         moveq   #0,d0
         move.b  d1,d0
         ori.l   #DSP_CMD_QUERY_ENV,d0
+        bra     dsp_exchange
+
+; Fetch the YM2151 status byte (timer flags plus bit 7 while write-busy).
+mxdrv_query_status:
+        move.l  #DSP_CMD_QUERY_STATUS,d0
+        bra     dsp_exchange
+
+; Fetch phase:AM:PM as three packed bytes for conformance tests.
+mxdrv_query_lfo:
+        move.l  #DSP_CMD_QUERY_LFO,d0
         bra     dsp_exchange
 
         bss

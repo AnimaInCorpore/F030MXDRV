@@ -72,18 +72,19 @@ multiplier, LFO PM, key scaling, and envelope rates must remain in the same
 integer domains as ymfm until the final DSP fixed-point conversion is defined.
 
 The build mechanically imports ymfm's phase-step, DT1, log-sine, power, and
-envelope-increment tables. The larger phase and envelope tables are
-nibble-packed in the `.lod` and expanded exactly at DSP startup to stay within
-the TOS 4.02 loader's practical record-size limit. The frequency path removes
+envelope-increment tables. Fixed-width and delta packing keep the converted
+DSP image below TOS 4.02's 8 KiB practical limit; every runtime table is
+expanded exactly at DSP startup. The frequency path removes
 the gaps from OPM key codes, applies the DT2 deltas `[0, 384, 500, 608]`, handles
 octave overflow/clamping, adds signed DT1, and applies the x.1 multiplier
 (`MUL=0` means 0.5). Protocol commands `05 cc oo` and `07 00 ii` expose phase
 and envelope intermediates for exact conformance tests.
 
-The LFO uses 256-entry saw, square, triangle, or noise waveforms, a 4.4-style
-rate, separate 7-bit AM/PM depth, channel sensitivities, and per-operator AM
-enable. Copying only the register surface without these clocking rules will not
-produce compatible replay.
+The implemented LFO uses 256-entry saw, square, triangle, or noise waveforms, a
+4.4-style rate, separate 7-bit AM/PM depth, channel sensitivities, and
+per-operator AM enable. The same global clock advances the 25-bit noise LFSR
+twice per native sample and substitutes its latched sign for channel 7 operator
+4 when enabled.
 
 ## Executable oracle
 
@@ -92,8 +93,8 @@ its existing debug operator state. It is linked directly with `ymfm_opm.cpp`;
 there is no independent host reimplementation of the chip math. The build uses
 it in two ways:
 
-- `--emit-m68k TRACE` produces the expected phase-step and stereo checkpoint
-  constants included by the TOS smoke program;
+- `--emit-m68k ATTACK_TRACE NOISE_TRACE` produces the expected phase-step and
+  stereo tone/noise checkpoint constants included by the TOS smoke program;
 - `--vectors TRACE SAMPLES` produces stereo output plus phase, phase step,
   envelope attenuation, and envelope state for all four channel operators.
 

@@ -12,26 +12,29 @@ routine receives the register in `d1.b` and data in `d2.b`, mirrors the byte in
 `OPMBuf`, then writes the X68000 OPM ports. `src/m68k/mxdrv_port.s` preserves
 those input conventions and replaces the hardware write with one DSP word.
 
-## Host/DSP protocol v3
+## Host/DSP protocol v4
 
 Every transport unit is one DSP/host 24-bit word. The upper byte is an opcode.
 
 | Word | Meaning | Reply |
 | --- | --- | --- |
-| `01 00 00` | ping/protocol query | `4d 58 03` (`MX`, version 3) |
+| `01 00 00` | ping/protocol query | `4d 58 04` (`MX`, version 4) |
 | `02 rr dd` | write YM2151 register `rr = dd` | `00 00 00` |
 | `03 00 00` | reset YM2151 state | `00 00 00` |
 | `04 00 00` | clock one native 62.5 kHz sample | signed left sample |
 | `05 cc oo` | query phase step for channel `cc`, logical operator `oo` | 20-bit phase step |
 | `06 00 00` | query the last generated right sample | signed right sample |
 | `07 00 ii` | query logical operator `ii` | 10-bit envelope attenuation |
+| `08 00 00` | query chip status | timer flags plus busy in bit 7 |
+| `09 00 00` | query LFO state | packed phase, AM, signed PM bytes |
 | anything else | unsupported command | `ff ff ff` |
 
-The synchronous acknowledgement intentionally provides back-pressure. It keeps
-conformance replay deterministic and avoids reproducing the physical YM2151's
-busy pin in the transport. Command `04` is a testable sample clock, not the
-eventual real-time audio path. A bounded write FIFO plus an SSI-driven synthesis
-loop should replace per-write/per-sample exchanges once playback is running.
+The synchronous acknowledgement intentionally provides back-pressure and keeps
+conformance replay deterministic. The emulated YM2151 busy flag remains set
+until command `04` advances the 64 input clocks represented by one native
+sample. Command `04` is a testable sample clock, not the eventual real-time
+audio path. A bounded write FIFO plus an SSI-driven synthesis loop should
+replace per-write/per-sample exchanges once playback is running.
 
 The constants are duplicated in `src/m68k/protocol.i` and
 `src/dsp/protocol.inc` because the two assemblers do not share syntax. Keep the
@@ -51,9 +54,10 @@ protocol version in the ping reply whenever either side changes incompatibly.
    DSP. The checked attack trace is bit-exact with ymfm at the phase, envelope,
    and rounded-output boundaries; a second sweep covers all eight algorithms
    with operator feedback enabled.
-4. **Chip globals (partial):** register reset, key edges, pan, and YM3012
-   10.3-float round-trip behavior are implemented. LFO waveforms, AM/PM, timers,
-   CSM, busy/status behavior, and channel 7 noise remain.
+4. **Chip globals (partial):** register reset, key edges, pan, YM3012
+   10.3-float round-trip behavior, all LFO waveforms, AM/PM modulation,
+   channel-7 noise, and the write-busy status bit are implemented. Timer A/B
+   flags and CSM remain.
 5. **Falcon audio:** clock the DSP synthesis kernel, resample the X68000's
    62.5 kHz OPM stream for a supported Falcon codec rate, and transmit stereo
    through SSI/crossbar. Restore all locked audio/DSP resources on exit.

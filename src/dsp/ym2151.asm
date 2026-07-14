@@ -38,6 +38,8 @@ query_dtmul:
         dc      0
 query_detune:
         dc      0
+query_pm_delta:
+        dc      0
 
 ; Operator state uses logical per-channel order M1,C1,M2,C2. Phases are the
 ; native 10.10 ymfm values; modulo-24-bit storage preserves the low 10 waveform
@@ -69,6 +71,47 @@ ym_last_left:
 ym_last_right:
         dc      0
 
+; OPM global state. The 30-bit LFO counter is split at bit 22 so both pieces
+; remain positive native integers. The noise history needs 25 bits because the
+; LFO noise waveform consumes bits 17-24.
+ym_lfo_fraction:
+        dc      0
+ym_lfo_phase:
+        dc      0
+ym_lfo_am:
+        dc      0
+ym_lfo_pm:
+        dc      0
+ym_lfo_raw_am:
+        dc      0
+ym_lfo_raw_pm:
+        dc      0
+ym_noise_lfsr_low:
+        dc      0
+ym_noise_lfsr_high:
+        dc      0
+ym_noise_counter:
+        dc      0
+ym_noise_frequency:
+        dc      0
+ym_noise_state:
+        dc      0
+ym_noise_newbit:
+        dc      0
+
+ym_status:
+        dc      0
+ym_busy:
+        dc      0
+ym_timer_a_running:
+        dc      0
+ym_timer_b_running:
+        dc      0
+ym_timer_a_counter:
+        dc      0
+ym_timer_b_counter:
+        dc      0
+
 ; Scratch state. Keeping it explicit makes subroutine register clobbers safe
 ; and leaves the protocol probes useful while the real-time loop evolves.
 synth_index:
@@ -85,6 +128,8 @@ synth_algorithm:
         dc      0
 synth_result:
         dc      0
+synth_am_offset:
+        dc      0
 volume_phase:
         dc      0
 volume_sign:
@@ -97,14 +142,17 @@ volume_sine:
 synth_opout:
         ds      8
 
+ym_lfo_noise_wave:
+        ds      256
+
 table_remaining:
-        dc      0
+        ds      1
 table_packed:
-        dc      0
+        ds      1
 table_slots:
-        dc      0
+        ds      1
 table_current:
-        dc      0
+        ds      1
 
 ; -----------------------------------------------------------------------------
 ; Program
@@ -155,6 +203,14 @@ command_loop:
         cmp     x0,a
         jeq     command_query_envelope
 
+        move    #>DSP_CMD_QUERY_STATUS,x0
+        cmp     x0,a
+        jeq     command_query_status
+
+        move    #>DSP_CMD_QUERY_LFO,x0
+        cmp     x0,a
+        jeq     command_query_lfo
+
         move    #>DSP_REPLY_ERROR,a
         jsr     send_reply
         jmp     command_loop
@@ -203,6 +259,33 @@ command_query_envelope:
         jsr     send_reply
         jmp     command_loop
 
+command_query_status:
+        move    x:ym_status,a
+        move    x:ym_busy,b
+        tst     b
+        jeq     command_query_status_ready
+        move    #>$80,x0
+        or      x0,a
+command_query_status_ready:
+        jsr     send_reply
+        jmp     command_loop
+
+command_query_lfo:
+        move    x:ym_lfo_phase,a
+        rep     #8
+        asl     a
+        move    x:ym_lfo_am,x0
+        add     x0,a
+        rep     #8
+        asl     a
+        move    x:ym_lfo_pm,b
+        move    #>$ff,y0
+        and     y0,b1
+        move    b1,x0
+        add     x0,a
+        jsr     send_reply
+        jmp     command_loop
+
 ; Send a single 24-bit reply from a1.
 send_reply:
         jclr    #1,x:m_hsr,*            ; wait for host transmit data empty
@@ -247,6 +330,19 @@ ym_reset_envelope_state:
         do      #88,ym_reset_runtime_loop
         move    a1,x:(r0)+
 ym_reset_runtime_loop:
+        move    #ym_env_counter,r0
+        clr     a
+        do      #22,ym_reset_global_loop
+        move    a1,x:(r0)+
+ym_reset_global_loop:
+        move    #>1,a
+        move    a1,x:ym_noise_lfsr_low
+
+        move    #ym_lfo_noise_wave,r0
+        clr     a
+        do      #256,ym_reset_lfo_noise_loop
+        move    a1,x:(r0)+
+ym_reset_lfo_noise_loop:
         rts
 
 ; Apply command 02 rr dd from x1 to the register image.
@@ -264,6 +360,9 @@ ym_write_packed:
         move    #>$0000ff,y0
         and     y0,a1
         move    a1,x0                   ; x0 = data
+
+        move    #>1,a
+        move    a1,x:ym_busy
 
         move    n0,a
         move    #>$1a,y0
@@ -416,6 +515,49 @@ ym_compute_phase_step:
         move    #opm_dt2_delta,r1
         nop
         move    y:(r1+n1),y1
+        move    y1,x:query_pm_delta
+
+        ; Add channel PM sensitivity to DT2. ym_lfo_pm is the signed raw PM
+        ; value after waveform depth, in the same -127..128 domain as ymfm.
+        move    x:query_channel,n0
+        move    #ym_regdata+$38,r0
+        nop
+        move    x:(r0+n0),a
+        rep     #4
+        lsr     a
+        move    #>7,y0
+        and     y0,a1
+        tst     a
+        jeq     ym_query_pm_ready
+        move    a1,b
+        move    #>6,x0
+        cmp     x0,b
+        jge     ym_query_pm_high
+
+        move    #>6,a
+        move    b1,y1
+        sub     y1,a
+        move    a1,y0
+        move    x:ym_lfo_pm,a
+        do      y0,ym_query_pm_shift_right
+        asr     a
+ym_query_pm_shift_right:
+        jmp     ym_query_pm_add
+
+ym_query_pm_high:
+        move    b1,a
+        move    #>5,x0
+        sub     x0,a
+        move    a1,y0
+        move    x:ym_lfo_pm,a
+        do      y0,ym_query_pm_shift_left
+        asl     a
+ym_query_pm_shift_left:
+ym_query_pm_add:
+        move    x:query_pm_delta,x0
+        add     x0,a
+        move    a1,x:query_pm_delta
+ym_query_pm_ready:
 
         ; Remove the gaps from the 4-bit OPM key code, restore the fraction,
         ; then add the coarse detune delta.
@@ -442,19 +584,42 @@ ym_compute_phase_step:
         move    #>$3f,y0
         and     y0,a1
         add     x0,a
+        move    x:query_pm_delta,y1
         add     y1,a
 
-        ; With PM disabled, DT2 can overflow by at most one octave.
+        ; PM can underflow one octave or overflow two. Adjust the block with
+        ; the same boundary/clamp order as opm_key_code_to_phase_step().
+        tst     a
+        jlt     ym_query_eff_underflow
         move    #>768,x0
         cmp     x0,a
         jlt     ym_query_eff_ready
         sub     x0,a
+        cmp     x0,a
+        jlt     ym_query_eff_overflow_once
+        sub     x0,a
+        move    x:query_block,b
+        move    #>1,y1
+        add     y1,b
+        move    b1,x:query_block
+ym_query_eff_overflow_once:
         move    x:query_block,b
         move    #>7,x0
         cmp     x0,b
         jge     ym_query_phase_clamp
         move    #>1,x0
         add     x0,b
+        move    b1,x:query_block
+        jmp     ym_query_eff_ready
+
+ym_query_eff_underflow:
+        move    #>768,x0
+        add     x0,a
+        move    x:query_block,b
+        tst     b
+        jeq     ym_query_phase_clamp_low
+        move    #>1,x0
+        sub     x0,b
         move    b1,x:query_block
 
 ym_query_eff_ready:
@@ -479,6 +644,14 @@ ym_query_phase_clamp:
         move    #opm_phase_step+767,r1
         nop
         move    y:(r1),a
+        jmp     ym_query_phase_shifted
+
+ym_query_phase_clamp_low:
+        move    #opm_phase_step,r1
+        nop
+        move    y:(r1),a
+        rep     #7
+        lsr     a
 
 ym_query_phase_shifted:
         ; DT1 table index = keycode * 4 + (detune & 3).
@@ -567,17 +740,17 @@ ym_expand_tables:
 ym_expand_phase_word:
         move    x:table_remaining,a
         tst     a
-        jeq     ym_expand_envelope_start
+        jeq     ym_expand_detune_start
         move    y:(r1)+,a
         move    a1,x:table_packed
-        move    #>6,a
+        move    #>8,a
         move    a1,x:table_slots
 ym_expand_phase_nibble:
         move    x:table_remaining,a
         tst     a
-        jeq     ym_expand_envelope_start
+        jeq     ym_expand_detune_start
         move    x:table_packed,a
-        move    #>$0f,y0
+        move    #>7,y0
         and     y0,a1
         rep     #5
         asl     a
@@ -587,7 +760,7 @@ ym_expand_phase_nibble:
         move    a1,y:(r0)+
 
         move    x:table_packed,a
-        rep     #4
+        rep     #3
         lsr     a
         move    a1,x:table_packed
         move    x:table_remaining,a
@@ -601,6 +774,37 @@ ym_expand_phase_nibble:
         jne     ym_expand_phase_nibble
         jmp     ym_expand_phase_word
 
+ym_expand_detune_start:
+        move    #opm_detune_adjustment_packed,r1
+        move    #opm_detune_adjustment,r0
+        move    #>128,a
+        move    a1,x:table_remaining
+ym_expand_detune_word:
+        move    y:(r1)+,a
+        move    a1,x:table_packed
+        move    #>4,a
+        move    a1,x:table_slots
+ym_expand_detune_value:
+        move    x:table_packed,a
+        move    #>$1f,y0
+        and     y0,a1
+        move    a1,y:(r0)+
+        move    x:table_packed,a
+        rep     #5
+        lsr     a
+        move    a1,x:table_packed
+        move    x:table_remaining,a
+        move    #>1,x0
+        sub     x0,a
+        move    a1,x:table_remaining
+        jeq     ym_expand_envelope_start
+        move    x:table_slots,a
+        move    #>1,x0
+        sub     x0,a
+        move    a1,x:table_slots
+        jne     ym_expand_detune_value
+        jmp     ym_expand_detune_word
+
 ym_expand_envelope_start:
         move    #opm_envelope_increment_packed,r1
         move    #opm_envelope_increment,r0
@@ -609,7 +813,7 @@ ym_expand_envelope_start:
 ym_expand_envelope_word:
         move    x:table_remaining,a
         tst     a
-        jeq     ym_expand_done
+        jeq     ym_expand_sine_start
         move    y:(r1)+,a
         move    a1,x:table_packed
         move    #>6,a
@@ -627,15 +831,380 @@ ym_expand_envelope_nibble:
         move    #>1,x0
         sub     x0,a
         move    a1,x:table_remaining
-        jeq     ym_expand_done
+        jeq     ym_expand_sine_start
         move    x:table_slots,a
         move    #>1,x0
         sub     x0,a
         move    a1,x:table_slots
         jne     ym_expand_envelope_nibble
         jmp     ym_expand_envelope_word
+
+; Sine attenuation is monotonic. Keep its first five large deltas verbatim,
+; then unpack the remaining 6-bit deltas four per word.
+ym_expand_sine_start:
+        move    #opm_sine_attenuation_packed,r1
+        move    #opm_sine_attenuation,r0
+        nop
+        move    y:(r1)+,a
+        move    a1,x:table_current
+        move    a1,y:(r0)+
+        move    #>5,a
+        move    a1,x:table_remaining
+ym_expand_sine_large:
+        move    y:(r1)+,a
+        move    a1,x0
+        move    x:table_current,a
+        sub     x0,a
+        move    a1,x:table_current
+        move    a1,y:(r0)+
+        move    x:table_remaining,a
+        move    #>1,x0
+        sub     x0,a
+        move    a1,x:table_remaining
+        jne     ym_expand_sine_large
+
+        move    #>250,a
+        move    a1,x:table_remaining
+ym_expand_sine_word:
+        move    y:(r1)+,a
+        move    a1,x:table_packed
+        move    #>4,a
+        move    a1,x:table_slots
+ym_expand_sine_delta:
+        move    x:table_packed,a
+        move    #>$3f,y0
+        and     y0,a1
+        move    a1,x0
+        move    x:table_current,a
+        sub     x0,a
+        move    a1,x:table_current
+        move    a1,y:(r0)+
+        move    x:table_packed,a
+        rep     #6
+        lsr     a
+        move    a1,x:table_packed
+        move    x:table_remaining,a
+        move    #>1,x0
+        sub     x0,a
+        move    a1,x:table_remaining
+        jeq     ym_expand_power_start
+        move    x:table_slots,a
+        move    #>1,x0
+        sub     x0,a
+        move    a1,x:table_slots
+        jne     ym_expand_sine_delta
+        jmp     ym_expand_sine_word
+
+ym_expand_power_start:
+        move    #opm_power_packed,r1
+        move    #opm_power,r0
+        nop
+        move    y:(r1)+,a
+        move    a1,x:table_current
+        rep     #2
+        asl     a
+        move    a1,y:(r0)+
+        move    #>255,a
+        move    a1,x:table_remaining
+ym_expand_power_word:
+        move    y:(r1)+,a
+        move    a1,x:table_packed
+        move    #>8,a
+        move    a1,x:table_slots
+ym_expand_power_delta:
+        move    x:table_packed,a
+        move    #>7,y0
+        and     y0,a1
+        move    a1,x0
+        move    x:table_current,a
+        sub     x0,a
+        move    a1,x:table_current
+        rep     #2
+        asl     a
+        move    a1,y:(r0)+
+
+        move    x:table_packed,a
+        rep     #3
+        lsr     a
+        move    a1,x:table_packed
+        move    x:table_remaining,a
+        move    #>1,x0
+        sub     x0,a
+        move    a1,x:table_remaining
+        jeq     ym_expand_done
+        move    x:table_slots,a
+        move    #>1,x0
+        sub     x0,a
+        move    a1,x:table_slots
+        jne     ym_expand_power_delta
+        jmp     ym_expand_power_word
+
 ym_expand_done:
         rts
+
+; The Falcon maps external P over the X/Y SRAM. Emit the larger global-clock
+; helpers after the main kernel so the LOD records stay small and monotonic.
+ym_lfo_code macro
+
+; Multiply signed x0 by unsigned y0 (only bits 0-7 are consumed). The 56001
+; multiplier is fractional, so this counted add keeps ymfm's integer domain
+; explicit and returns the unscaled product in a1.
+ym_multiply_s8_u8:
+        clr     a
+        move    y0,b
+        tst     b
+        jeq     ym_multiply_done
+        do      y0,ym_multiply_done
+        add     x0,a
+ym_multiply_done:
+        rts
+
+; Sign-extend the low byte of a1 to a 24-bit integer.
+ym_sign_extend_byte:
+        move    #>$ff,y0
+        and     y0,a1
+        jclr    #7,a1,ym_sign_extend_done
+        move    #>$ffff00,y0
+        or      y0,a
+ym_sign_extend_done:
+        rts
+
+; Advance the continually-running 25-bit noise history once.
+ym_clock_noise_once:
+        move    x:ym_noise_lfsr_low,a
+        move    a1,b
+        rep     #16
+        lsr     a
+        rep     #13
+        lsr     b
+        move    #>1,y0
+        and     y0,a1
+        and     y0,b1
+        move    b1,y1
+        add     y1,a
+        move    #>1,x0
+        add     x0,a
+        and     y0,a1
+        move    a1,x:ym_noise_newbit
+
+        move    x:ym_noise_lfsr_low,a
+        rep     #23
+        lsr     a
+        and     y0,a1
+        move    a1,x:ym_noise_lfsr_high
+
+        move    x:ym_noise_lfsr_low,a
+        asl     a
+        move    x:ym_noise_newbit,x0
+        add     x0,a
+        move    a1,x:ym_noise_lfsr_low
+
+        ; C++ post-increment semantics: compare the old counter, then either
+        ; latch/reset or increment it.
+        move    x:ym_noise_counter,a
+        move    x:ym_noise_frequency,x0
+        cmp     x0,a
+        jlt     ym_clock_noise_increment
+        clr     a
+        move    a1,x:ym_noise_counter
+        move    x:ym_noise_lfsr_low,a
+        rep     #17
+        lsr     a
+        move    #>1,y0
+        and     y0,a1
+        move    a1,x:ym_noise_state
+        rts
+ym_clock_noise_increment:
+        move    #>1,x0
+        add     x0,a
+        move    a1,x:ym_noise_counter
+        rts
+
+; Clock OPM noise and LFO state once per native sample and publish the raw PM
+; value plus the channel-independent AM value used during operator output.
+ym_clock_noise_lfo:
+        move    #ym_regdata+$0f,r0
+        nop
+        move    x:(r0),a
+        move    #>$1f,y0
+        and     y0,a1
+        move    a1,x0
+        move    #>$1f,a
+        sub     x0,a
+        move    a1,x:ym_noise_frequency
+        jsr     ym_clock_noise_once
+        jsr     ym_clock_noise_once
+
+        ; (0x10 | rate.lo) << rate.hi, accumulated as low 22 + phase 8.
+        move    #ym_regdata+$18,r0
+        nop
+        move    x:(r0),a
+        move    a1,b
+        move    #>$0f,y0
+        and     y0,a1
+        move    #>$10,x0
+        add     x0,a
+        rep     #4
+        lsr     b
+        and     y0,b1
+        tst     b
+        jeq     ym_lfo_increment_ready
+        move    b1,y0
+        do      y0,ym_lfo_increment_shift
+        asl     a
+ym_lfo_increment_shift:
+ym_lfo_increment_ready:
+        move    x:ym_lfo_fraction,x0
+        add     x0,a
+        move    #>$400000,x0
+        cmp     x0,a
+        jlt     ym_lfo_store_fraction
+        sub     x0,a
+        move    a1,x:ym_lfo_fraction
+        move    x:ym_lfo_phase,a
+        move    #>1,x0
+        add     x0,a
+        move    #>$ff,y0
+        and     y0,a1
+        move    a1,x:ym_lfo_phase
+        jmp     ym_lfo_check_reset
+ym_lfo_store_fraction:
+        move    a1,x:ym_lfo_fraction
+
+ym_lfo_check_reset:
+        move    #ym_regdata+$01,r0
+        nop
+        move    x:(r0),a
+        jclr    #1,a1,ym_lfo_latch_noise
+        clr     a
+        move    a1,x:ym_lfo_fraction
+        move    a1,x:ym_lfo_phase
+
+ym_lfo_latch_noise:
+        ; Noise waveform writes one phase slot ahead, then reads the current
+        ; slot, matching ymfm's stable-per-LFO-clock latch.
+        move    x:ym_noise_lfsr_low,a
+        rep     #17
+        lsr     a
+        move    #>$7f,y0
+        and     y0,a1
+        move    a1,b
+        move    x:ym_noise_lfsr_high,a
+        rep     #7
+        asl     a
+        move    b1,y1
+        add     y1,a
+        move    a1,x0
+
+        move    x:ym_lfo_phase,a
+        move    #>1,y1
+        add     y1,a
+        move    #>$ff,y0
+        and     y0,a1
+        move    a1,n0
+        move    #ym_lfo_noise_wave,r0
+        nop
+        move    x0,x:(r0+n0)
+
+        move    #ym_regdata+$1b,r0
+        nop
+        move    x:(r0),a
+        move    #>3,y0
+        and     y0,a1
+        tst     a
+        jeq     ym_lfo_wave_saw
+        move    #>1,x0
+        cmp     x0,a
+        jeq     ym_lfo_wave_square
+        move    #>2,x0
+        cmp     x0,a
+        jeq     ym_lfo_wave_triangle
+        jmp     ym_lfo_wave_noise
+
+ym_lfo_wave_saw:
+        move    x:ym_lfo_phase,x0
+        move    #>$ff,a
+        sub     x0,a
+        move    a1,x:ym_lfo_raw_am
+        move    x:ym_lfo_phase,a
+        jsr     ym_sign_extend_byte
+        move    a1,x:ym_lfo_raw_pm
+        jmp     ym_lfo_apply_depth
+
+ym_lfo_wave_square:
+        move    x:ym_lfo_phase,a
+        jset    #7,a1,ym_lfo_square_high
+        move    #>$ff,a
+        move    a1,x:ym_lfo_raw_am
+        move    #>$7f,a
+        move    a1,x:ym_lfo_raw_pm
+        jmp     ym_lfo_apply_depth
+ym_lfo_square_high:
+        clr     a
+        move    a1,x:ym_lfo_raw_am
+        move    #>$ffff80,a
+        move    a1,x:ym_lfo_raw_pm
+        jmp     ym_lfo_apply_depth
+
+ym_lfo_wave_triangle:
+        move    x:ym_lfo_phase,a
+        jset    #7,a1,ym_lfo_triangle_high
+        move    #>$ff,b
+        move    a1,x0
+        sub     x0,b
+        move    b1,a
+ym_lfo_triangle_high:
+        asl     a
+        move    #>$ff,y0
+        and     y0,a1
+        move    a1,x:ym_lfo_raw_am
+
+        move    x:ym_lfo_phase,b
+        jset    #6,b1,ym_lfo_triangle_pm_ready
+        move    a1,x0
+        move    #>$ff,a
+        sub     x0,a
+ym_lfo_triangle_pm_ready:
+        jsr     ym_sign_extend_byte
+        move    a1,x:ym_lfo_raw_pm
+        jmp     ym_lfo_apply_depth
+
+ym_lfo_wave_noise:
+        move    x:ym_lfo_phase,n0
+        move    #ym_lfo_noise_wave,r0
+        nop
+        move    x:(r0+n0),a
+        move    a1,x:ym_lfo_raw_am
+        jsr     ym_sign_extend_byte
+        move    a1,x:ym_lfo_raw_pm
+
+ym_lfo_apply_depth:
+        move    #ym_regdata+$19,r0
+        nop
+        move    x:(r0),a
+        move    #>$7f,y0
+        and     y0,a1
+        move    a1,y0
+        move    x:ym_lfo_raw_am,x0
+        jsr     ym_multiply_s8_u8
+        rep     #7
+        lsr     a
+        move    a1,x:ym_lfo_am
+
+        move    #ym_regdata+$1a,r0
+        nop
+        move    x:(r0),a
+        move    #>$7f,y0
+        and     y0,a1
+        move    a1,y0
+        move    x:ym_lfo_raw_pm,x0
+        jsr     ym_multiply_s8_u8
+        rep     #7
+        asr     a
+        move    a1,x:ym_lfo_pm
+        rts
+
+        endm
 
 ; Convert synth_index (channel*4 + logical operator) to the channel and raw OPM
 ; register slot used by ymfm: M1,C1,M2,C2 = +0,+16,+8,+24.
@@ -1039,6 +1608,15 @@ ym_volume_sine_index:
         asl     a
         move    x:volume_envelope,y1
         add     y1,a
+
+        move    x:query_raw_operator,n0
+        move    #ym_regdata+$a0,r0
+        nop
+        move    x:(r0+n0),b
+        jclr    #7,b1,ym_volume_no_am
+        move    x:synth_am_offset,y1
+        add     y1,a
+ym_volume_no_am:
         move    #>$3ff,y0
         cmp     y0,a
         jle     ym_volume_env_ready
@@ -1076,6 +1654,50 @@ ym_volume_zero:
         clr     a
         rts
 
+; Return channel-7 operator-4 noise output using its raw effective envelope.
+; The OPM bypasses the logarithmic sine/power transform for this path.
+ym_compute_noise_volume:
+        move    x:synth_index,n0
+        move    #ym_envelope,r0
+        nop
+        move    x:(r0+n0),a
+        move    a1,x:volume_envelope
+
+        jsr     ym_select_operator
+        move    x:query_raw_operator,n0
+        move    #ym_regdata+$60,r0
+        nop
+        move    x:(r0+n0),a
+        move    #>$7f,y0
+        and     y0,a1
+        rep     #3
+        asl     a
+        move    x:volume_envelope,y1
+        add     y1,a
+
+        move    #ym_regdata+$a0,r0
+        nop
+        move    x:(r0+n0),b
+        jclr    #7,b1,ym_noise_volume_no_am
+        move    x:synth_am_offset,y1
+        add     y1,a
+ym_noise_volume_no_am:
+        move    #>$3ff,y0
+        cmp     y0,a
+        jle     ym_noise_volume_invert
+        move    y0,a
+ym_noise_volume_invert:
+        move    a1,x0
+        move    #>$3ff,a
+        sub     x0,a
+        asl     a
+        move    x:ym_noise_state,b
+        tst     b
+        jeq     ym_noise_volume_done
+        neg     a
+ym_noise_volume_done:
+        rts
+
 ; Clamp one channel's carrier sum to signed 16-bit, as output_4op does after
 ; each optional carrier addition.
 ym_clamp_channel:
@@ -1093,11 +1715,39 @@ ym_clamp_done:
         rts
 
 ; Synthesize synth_channel and accumulate it into the stereo mix.
+ym_compute_am_offset:
+        move    x:synth_channel,n0
+        move    #ym_regdata+$38,r0
+        nop
+        move    x:(r0+n0),a
+        move    #>3,y0
+        and     y0,a1
+        tst     a
+        jeq     ym_compute_am_zero
+        move    #>1,x0
+        sub     x0,a
+        move    a1,y0
+        move    x:ym_lfo_am,a
+        move    y0,b
+        tst     b
+        jeq     ym_compute_am_store
+        do      y0,ym_compute_am_shift
+        asl     a
+ym_compute_am_shift:
+ym_compute_am_store:
+        move    a1,x:synth_am_offset
+        rts
+ym_compute_am_zero:
+        clr     a
+        move    a1,x:synth_am_offset
+        rts
+
 ym_output_channel:
         move    x:synth_channel,a
         rep     #2
         asl     a
         move    a1,x:synth_index
+        jsr     ym_compute_am_offset
 
         ; Operator 1 feedback uses the two prior outputs.
         move    x:synth_channel,n0
@@ -1239,7 +1889,19 @@ ym_output_op2_mod:
         jsr     ym_operator_phase
         move    b1,y1
         add     y1,a
+        move    x:synth_channel,b
+        move    #>7,x0
+        cmp     x0,b
+        jne     ym_output_op4_sine
+        move    #ym_regdata+$0f,r0
+        nop
+        move    x:(r0),b
+        jclr    #7,b1,ym_output_op4_sine
+        jsr     ym_compute_noise_volume
+        jmp     ym_output_op4_ready
+ym_output_op4_sine:
         jsr     ym_compute_volume
+ym_output_op4_ready:
         move    a1,x:synth_result
 
         ; Add any additional carriers, clipping after each one.
@@ -1280,6 +1942,9 @@ ym_output_no_left:
         move    a1,x:ym_last_right
 ym_output_channel_done:
         rts
+
+        ; Keep each initialized P record within TOS 4.02's converter limit.
+        ds      1
 
 ; Simulate the YM3012's 10.3-float encode/decode truncation.
 ym_roundtrip_fp:
@@ -1371,6 +2036,8 @@ ym_clock_envelope_loop:
         jlt     ym_clock_envelope_loop
 
 ym_clock_phase_all:
+        jsr     ym_clock_noise_lfo
+
         clr     a
         move    a1,x:synth_index
 ym_clock_phase_loop:
@@ -1413,7 +2080,11 @@ ym_clock_channel_loop:
         move    x:ym_last_right,a
         jsr     ym_roundtrip_fp
         move    a1,x:ym_last_right
+        clr     a                       ; one sample is the 64-clock busy time
+        move    a1,x:ym_busy
         rts
+
+        ym_lfo_code
 
         include 'ymtables.inc'          ; DOS assembler requires an 8.3 name
 

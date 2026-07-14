@@ -66,9 +66,11 @@ $(YM2151_ORACLE): tools/ym2151_oracle.cpp $(YMFM_SOURCE)/ymfm_opm.cpp \
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -std=c++17 -O2 -I$(YMFM_SOURCE) \
 		tools/ym2151_oracle.cpp $(YMFM_SOURCE)/ymfm_opm.cpp -o $@
 
-$(YM2151_REFERENCE): $(YM2151_ORACLE) tests/traces/attack_all_carriers.trace
+$(YM2151_REFERENCE): $(YM2151_ORACLE) tests/traces/attack_all_carriers.trace \
+		tests/traces/noise_channel7.trace
 	@mkdir -p $(GENERATED_BUILD)
-	$(YM2151_ORACLE) --emit-m68k tests/traces/attack_all_carriers.trace > $@
+	$(YM2151_ORACLE) --emit-m68k tests/traces/attack_all_carriers.trace \
+		tests/traces/noise_channel7.trace > $@
 
 $(YM2151_TABLES): tools/generate_ym2151_tables.py $(YMFM_SOURCE)/ymfm_fm.ipp
 	@mkdir -p $(GENERATED_BUILD)
@@ -132,7 +134,9 @@ smoke: check
 		--trace-file build/hatari-smoke.trace \
 		--trace gemdos,dsp_host_interface,xbios \
 		$(RELEASE_DIR)/f030mxdrv.tos
-	@rg -q "Transfer 0x4d5803" build/hatari-smoke.trace
+	@rg -q "Transfer 0x4d5804" build/hatari-smoke.trace
+	@rg -q "Transfer 0x000080" build/hatari-smoke.trace
+	@rg -q "Transfer 0x01fc00" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x021b00" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x050000" build/hatari-smoke.trace
 	@phase=$$($(YM2151_ORACLE) --phase-hex); \

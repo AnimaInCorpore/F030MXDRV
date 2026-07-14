@@ -48,6 +48,26 @@ def pack_nibbles(values: list[int]) -> list[int]:
     return packed
 
 
+def pack_pairs_12(values: list[int]) -> list[int]:
+    if len(values) % 2 or any(value < 0 or value > 0x0FFF for value in values):
+        raise ValueError("12-bit pair-packed values are invalid")
+    return [left | (right << 12) for left, right in zip(values[::2], values[1::2])]
+
+
+def pack_fixed(values: list[int], bits: int) -> list[int]:
+    per_word = 24 // bits
+    limit = (1 << bits) - 1
+    if any(value < 0 or value > limit for value in values):
+        raise ValueError(f"{bits}-bit packed value out of range")
+    packed: list[int] = []
+    for offset in range(0, len(values), per_word):
+        word = 0
+        for shift, value in enumerate(values[offset : offset + per_word]):
+            word |= value << (bits * shift)
+        packed.append(word)
+    return packed
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         print(f"usage: {Path(sys.argv[0]).name} path/to/ymfm_fm.ipp", file=sys.stderr)
@@ -83,9 +103,9 @@ def main() -> int:
     print("; The source tables are BSD-3-Clause licensed by their ymfm authors.")
     print("; Do not edit this build artifact by hand.")
     print()
-    # Falcon external P memory aliases external X/Y RAM. Keep the lookup block
-    # above the command kernel's P footprint so Dsp_LoadProg can reserve both.
-    print("        org     y:$800")
+    # Falcon external P memory aliases external X/Y RAM. Keep the generated
+    # lookup block above the complete command kernel and its clock helpers.
+    print("        org     y:$c00")
     print()
     phase_deltas = [(right - left) // 32 for left, right in zip(phase, phase[1:])]
     if any((right - left) % 32 for left, right in zip(phase, phase[1:])):
@@ -94,13 +114,31 @@ def main() -> int:
     print("opm_phase_step:")
     print(f"        ds      {len(phase)}")
     print()
-    emit_table("opm_phase_step_packed", [phase[0], *pack_nibbles(phase_deltas)])
-    emit_table("opm_detune_adjustment", detune)
-    emit_table("opm_sine_attenuation", sine)
-    emit_table("opm_power", power)
     print("opm_envelope_increment:")
     print(f"        ds      {len(increments)}")
     print()
+    print("opm_detune_adjustment:")
+    print(f"        ds      {len(detune)}")
+    print()
+    print("opm_sine_attenuation:")
+    print(f"        ds      {len(sine)}")
+    print()
+    print("opm_power:")
+    print(f"        ds      {len(power)}")
+    print()
+
+    emit_table("opm_phase_step_packed", [phase[0], *pack_fixed(phase_deltas, 3)])
+    emit_table("opm_detune_adjustment_packed", pack_fixed(detune, 5))
+    sine_deltas = [left - right for left, right in zip(sine, sine[1:])]
+    emit_table(
+        "opm_sine_attenuation_packed",
+        [sine[0], *sine_deltas[:5], *pack_fixed(sine_deltas[5:], 6)],
+    )
+    if any(value & 3 for value in power):
+        raise RuntimeError("power table is no longer exactly quarter-packable")
+    quarter_power = [value >> 2 for value in power]
+    power_deltas = [left - right for left, right in zip(quarter_power, quarter_power[1:])]
+    emit_table("opm_power_packed", [quarter_power[0], *pack_fixed(power_deltas, 3)])
     emit_table("opm_envelope_increment_packed", pack_nibbles(increments))
     # Packed exactly like fm_channel::output_4op's s_algorithm_ops table.
     emit_table("opm_algorithm_ops", [0x035, 0x03A, 0x064, 0x071, 0x131, 0x313, 0x301, 0x380])
