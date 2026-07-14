@@ -6,11 +6,50 @@
         addq.l  #2,sp
         endm
 
+        macro   Cconis
+        move.w  #11,-(sp)
+        trap    #1
+        addq.l  #2,sp
+        endm
+
         macro   Cconws string
         pea     \1
         move.w  #9,-(sp)
         trap    #1
         addq.l  #6,sp
+        endm
+
+        macro   Fclose handle
+        move.w  \1,-(sp)
+        move.w  #62,-(sp)
+        trap    #1
+        addq.l  #4,sp
+        endm
+
+        macro   Fopen filename,mode
+        move.w  \2,-(sp)
+        pea     \1
+        move.w  #61,-(sp)
+        trap    #1
+        addq.l  #8,sp
+        endm
+
+        macro   Fread handle,count,buffer
+        pea     \3
+        move.l  \2,-(sp)
+        move.w  \1,-(sp)
+        move.w  #63,-(sp)
+        trap    #1
+        lea     12(sp),sp
+        endm
+
+        macro   Fseek offset,handle,mode
+        move.w  \3,-(sp)
+        move.w  \2,-(sp)
+        move.l  \1,-(sp)
+        move.w  #66,-(sp)
+        trap    #1
+        lea     10(sp),sp
         endm
 
         macro   Pterm0

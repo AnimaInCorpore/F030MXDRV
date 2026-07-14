@@ -26,6 +26,7 @@ YM2151_VECTORS := $(REFERENCE_BUILD)/attack_all_carriers.tsv
 
 M68K_SOURCES := \
 	src/m68k/main.s \
+	src/m68k/player.s \
 	src/m68k/dsp_link.s \
 	src/m68k/mxdrv_core.s \
 	src/m68k/mxdrv_port.s \
@@ -41,7 +42,7 @@ DOSBOX_FLAGS ?= --noprimaryconf --set output=texture
 
 all: host dsp
 
-host: $(RELEASE_DIR)/f030mxdrv.tos
+host: $(RELEASE_DIR)/f030mxdrv.tos $(RELEASE_DIR)/f030mxdrv.ttp
 
 dsp: $(RELEASE_DIR)/ym2151.lod
 
@@ -110,6 +111,9 @@ $(RELEASE_DIR)/f030mxdrv.tos: $(M68K_OBJECTS) $(VLINK)
 	@mkdir -p $(RELEASE_DIR)
 	$(VLINK) $(M68K_OBJECTS) -tos-fastload -b ataritos -s -e start -o $@
 
+$(RELEASE_DIR)/f030mxdrv.ttp: $(RELEASE_DIR)/f030mxdrv.tos
+	cp $< $@
+
 $(DSP_BUILD)/BUILD.BAT: tools/BUILD_DSP.BAT src/dsp/ym2151.asm \
 		src/dsp/protocol.inc $(YM2151_TABLES)
 	@mkdir -p $(DSP_BUILD)
@@ -133,6 +137,7 @@ $(RELEASE_DIR)/ym2151.lod: $(DSP_BUILD)/BUILD.BAT
 
 check: all reference
 	@test -s $(RELEASE_DIR)/f030mxdrv.tos
+	@test -s $(RELEASE_DIR)/f030mxdrv.ttp
 	@test -s $(RELEASE_DIR)/ym2151.lod
 	@test -s $(YM2151_VECTORS)
 	@rg -q "^0 +Errors" $(DSP_BUILD)/YM2151.LST
@@ -163,6 +168,8 @@ smoke: check
 		--trace gemdos,dsp_host_interface,xbios \
 		$(RELEASE_DIR)/f030mxdrv.tos
 	@rg -q "Transfer 0x4d5809" build/hatari-smoke.trace
+	@rg -q "GEMDOS 0x42 Fseek\\(0, [0-9]+, 2\\)" build/hatari-smoke.trace
+	@rg -q "GEMDOS 0x42 Fseek\\(0, [0-9]+, 0\\)" build/hatari-smoke.trace
 	@rg -q "Transfer 0x000080" build/hatari-smoke.trace
 	@rg -q "Transfer 0x01fc00" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x021b00" build/hatari-smoke.trace

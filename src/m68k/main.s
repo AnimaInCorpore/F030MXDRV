@@ -22,6 +22,12 @@ SOUND_NO_SHAKE  equ     1
 start:
         Cconws  banner
 
+        movea.l 4(sp),a0              ; TOS basepage pointer at process entry
+        lea     $80(a0),a0            ; length-prefixed command tail
+        bsr     player_parse_tail
+        move.l  d0,player_mode
+        bmi     usage_failed
+
         Dsp_Reserve #DSP_X_WORDS,#DSP_Y_WORDS
         tst.l   d0
         bmi     reserve_failed
@@ -44,6 +50,16 @@ start:
         moveq   #0,d0                  ; MXDRV call $00: reset
         bsr     mxdrv_call
         cmp.l   #DSP_REPLY_OK,d0
+        bne     protocol_failed
+
+        tst.l   player_mode
+        beq     run_conformance
+        bsr     player_run
+        bra     clean_exit
+
+run_conformance:
+        bsr     player_selftest
+        tst.l   d0
         bne     protocol_failed
 
         ; Load a standard 96-entry PDX bank through MXDRV call $03, validate
@@ -1010,6 +1026,10 @@ clean_exit:
         Dsp_Unlock
         Pterm0
 
+usage_failed:
+        Cconws  usage_text
+        Pterm0
+
 reserve_failed:
         Cconws  reserve_error_text
         Cconin
@@ -1039,6 +1059,9 @@ audio_text:
 
 live_audio_text:
         dc.b    'Measuring one second of fresh DSP YM2151 synthesis...',13,10,0
+
+usage_text:
+        dc.b    'Usage: F030MXDRV.TTP song.mdx [bank.pdx]',13,10,0
 
 reserve_error_text:
         dc.b    'Error: unable to reserve the Falcon DSP.',13,10
@@ -1229,6 +1252,8 @@ algorithm_references:
 dsp_load_buffer:
         ds.b    DSP_LOAD_BUFFER
 dsp_table_reply:
+        ds.l    1
+player_mode:
         ds.l    1
 
         end

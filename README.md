@@ -18,7 +18,10 @@ the original mutable in-stream counter layout with bounds checks. A guarded
 timer-service entry reports exact YM Timer-B periods in native sample units,
 and public play connects it to an otherwise-idle MFP Timer A. Its 1024 Hz ISR
 only accumulates pending ticks; a foreground pump performs the XBIOS/DSP work
-and stop restores timer/vector ownership. Standard raw PDX banks now have validated 96-entry sample
+and stop restores timer/vector ownership. A TTP command-line mode now loads an
+MDX plus an optional PDX through GEMDOS, runs that pump once per VBL, accepts a
+key to stop, and restores MFP, DSP SSI, crossbar, and sound-lock ownership on
+every exit path. Standard raw PDX banks now have validated 96-entry sample
 lookup and eight streaming decoder voices that match the X68000 MSM6258
 predictor, step, clamping, and nibble order. The host-side PCM8 layer applies
 all five playback rates, the 16 volume steps, common hardware pan, and saturating
@@ -54,9 +57,11 @@ produced 5,679 fresh frames in a nominal one-second interval, versus about
 49,170 required by the codec.
 
 This is not a complete music driver yet. MDX synchronization/modulation,
-full FM volume handling, integration of the foreground clock pump into a real
-player loop, continuous mixed-block production, and underrun-free live synthesis
-remain. PDX lookup, decoding, rate conversion,
+full FM volume handling, continuous mixed-block production, and underrun-free
+live synthesis remain. The command-line player uses the experimental live DSP
+mode, so FM follows sequencer writes but currently underruns. PDX files load and
+their voices are sequenced/decoded on the 68030, but those PCM frames are not
+yet continuously delivered to the DAC. PDX lookup, decoding, rate conversion,
 gain, pan, eight-voice host mixing, and bounded PCM/FM output to the DAC are
 verified, but only in the explicit integration harness. The buffered SSI mode
 still supplies the
@@ -114,17 +119,30 @@ The outputs are:
 
 ```text
 release/f030mxdrv.tos
+release/f030mxdrv.ttp
 release/ym2151.lod
 ```
 
-Keep both files in the same Falcon directory. `f030mxdrv.tos` loads
+Keep the executable and `ym2151.lod` in the same Falcon directory.
+`f030mxdrv.tos` loads
 `ym2151.lod`, runs the conformance checks plus buffered and live SSI probes, and
-reports the result on the TOS console. `make run` starts it in Hatari when
-Hatari is installed. It is a test harness at this stage, not yet an MDX player.
+reports the result on the TOS console. `f030mxdrv.ttp` is the same executable
+with a Desktop command-line entry point:
+
+```text
+F030MXDRV.TTP song.mdx [bank.pdx]
+```
+
+The MDX is limited to 65,536 bytes and the optional raw PDX bank to 319,488
+bytes. Filenames are whitespace-delimited TOS paths. Press any key during
+playback to stop. This is an integration player rather than a finished audio
+path: live FM is below real-time and continuous PDX output is still pending.
+`make run` starts the no-argument conformance mode in Hatari.
 
 ## Source map
 
 - `src/m68k/main.s`: Falcon loader and smoke test.
+- `src/m68k/player.s`: TTP argument parser, GEMDOS loader, and player loop.
 - `src/m68k/mxdrv_core.s`: resident-independent 32-call MXDRV API foundation.
 - `src/m68k/mxdrv_port.s`: replacement seam for MXDRV's original `WriteOPM`.
 - `src/m68k/mdx.s`: bounded 16-track MDX initialization and tick executor.

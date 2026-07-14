@@ -63,7 +63,10 @@ the repeated block was rendered before SSI starts, so later writes cannot alter
 that block. In direct mode, the phase cache is refreshed immediately and queued
 writes are consumed as fresh frames advance native time. The rolling clock is
 not reset by any start command, so buffered and live sessions share one
-continuous event timeline; only chip reset returns it to zero.
+continuous event timeline; only chip reset returns it to zero. The first
+command-line player uses this live mode so MDX writes affect synthesis while
+the song advances, but it inherits the measured underrun and is not yet the
+production transport.
 
 The constants are duplicated in `src/m68k/protocol.i` and
 `src/dsp/protocol.inc` because the two assemblers do not share syntax. Keep the
@@ -85,8 +88,10 @@ protocol version in the ping reply whenever either side changes incompatibly.
    units. Public play now claims an otherwise-idle MFP Timer A at 1024 Hz; its
    interrupt performs exact 16.16 phase accumulation into pending ticks, while
    a foreground pump performs all XBIOS/DSP work. Stop restores timer/vector
-   ownership. An application event loop still needs to call that pump regularly;
-   modulation and full FM volume handling remain.
+   ownership. The TTP player loads one MDX and optional PDX through GEMDOS and
+   drains that pump after each VBL until the tracks end or a key is pressed.
+   Command-tail parsing has a Hatari-covered boundary self-test. Modulation and
+   full FM volume handling remain.
 3. **Operator kernel (present):** KC/KF, DT1, DT2, octave, multiplier, phase
    accumulation, log-sine/power conversion, ADSR, operator mapping, feedback,
    all eight algorithms, panning, and stereo sample generation now run on the
@@ -131,7 +136,9 @@ protocol version in the ping reply whenever either side changes incompatibly.
    the block through the Falcon SSI path. MDX PCM notes now bind tracks 8-15 to
    PDX voices 0-7 with encoded durations and default rate/gain/pan. Continuous
    mixed-block scheduling and compatibility tests with real MDX/PDX pairs
-   remain.
+   remain. The TTP player accepts and validates a PDX file, so the host-side
+   voices advance, but the live DSP path does not yet receive their continuous
+   PCM stream.
 
 ## Validation strategy
 
