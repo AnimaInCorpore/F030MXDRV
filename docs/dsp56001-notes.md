@@ -59,7 +59,7 @@ Phase, key edges, feedback history, LFO/noise, and timers continue to clock.
 Frequently accessed scalar state now occupies internal `X:$0000-$003e`.
 Short-address loads and stores remove an extension word and avoid external RAM;
 this reduced the initialized loader payload from 8,100 to 7,113 bytes before
-adding protocol v6. The build checks the converted payload against the 8 KiB
+adding the FIFO code. The build checks the converted payload against the 8 KiB
 TOS limit.
 
 ## Falcon SSI staging path
@@ -84,8 +84,9 @@ block, the write changes only the retained YM state; the phase cache is rebuilt
 after transmit is disabled. Continuous rendering will instead consume
 timestamped writes at native-sample boundaries.
 
-Protocol v6 implements that event shape for bounded rendering. A 32-entry FIFO
-stores a 16-bit native-sample offset beside each packed register write. Entries
-must be ordered and within samples 0-1279; all writes due at a boundary are
-applied before clocking that YM sample. FIFO transactions received during SSI
-are retained for the next render, where the native counter restarts at zero.
+Protocol v7 implements that event shape with a rolling clock. A 32-entry FIFO
+stores an absolute 16-bit native-sample time beside each packed register write.
+Entries must be in nondecreasing modular order and within the 32,767-sample
+future horizon; all writes due at a boundary are applied before clocking that
+YM sample. FIFO and clock-query transactions are serviced during SSI, and the
+clock continues across renders instead of restarting at zero.

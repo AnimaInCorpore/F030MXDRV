@@ -147,7 +147,7 @@ smoke: check
 		--trace-file build/hatari-smoke.trace \
 		--trace gemdos,dsp_host_interface,xbios \
 		$(RELEASE_DIR)/f030mxdrv.tos
-	@rg -q "Transfer 0x4d5806" build/hatari-smoke.trace
+	@rg -q "Transfer 0x4d5807" build/hatari-smoke.trace
 	@rg -q "Transfer 0x000080" build/hatari-smoke.trace
 	@rg -q "Transfer 0x01fc00" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x021b00" build/hatari-smoke.trace
@@ -173,8 +173,12 @@ smoke: check
 	@rg -q "Direct Transfer 0x0e0040" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x02284c" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x027e5a" build/hatari-smoke.trace
-	@rg -q "Direct Transfer 0x0e0010" build/hatari-smoke.trace
-	@rg -q "Direct Transfer 0x027d55" build/hatari-smoke.trace
+	@rg -q "Direct Transfer 0x0f0000" build/hatari-smoke.trace
+	@rg -q "Transfer 0x000500" build/hatari-smoke.trace
+	@rg -q "Direct Transfer 0x0e0500" build/hatari-smoke.trace
+	@rg -q "Direct Transfer 0x02284a" build/hatari-smoke.trace
+	@rg -q "Direct Transfer 0x0e0540" build/hatari-smoke.trace
+	@rg -q "Transfer 0x000a00" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x0c0000" build/hatari-smoke.trace
 	@rg -q "XBIOS 0x89 Dsptristate\\(0x0, 0x0\\)" build/hatari-smoke.trace
 	@rg -q "XBIOS 0x81 Unlocksnd" build/hatari-smoke.trace

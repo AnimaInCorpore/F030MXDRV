@@ -465,6 +465,13 @@ start:
         cmp.l   #DSP_REPLY_OK,d0
         bne     audio_protocol_failed
 
+        ; The first render advances the rolling native clock by exactly 1280
+        ; samples. Query it while the bounded SSI stream is active.
+        move.l  #DSP_CMD_QUERY_TIME,d0
+        bsr     dsp_exchange
+        cmpi.l  #1280,d0
+        bne     audio_protocol_failed
+
         ; Prove that the normal MXDRV WriteOPM seam remains serviced while SSI
         ; is active. This changes DSP state for the next render; the current
         ; bounded block was deliberately rendered before transmit started.
@@ -474,11 +481,18 @@ start:
         cmp.l   #DSP_REPLY_OK,d0
         bne     audio_protocol_failed
 
-        ; Queue another event through the same two-word FIFO transaction while
-        ; SSI is active. It is retained for the next bounded render.
-        moveq   #16,d0
-        moveq   #$7d,d1
-        moveq   #$55,d2
+        ; Queue two rolling-clock events while SSI is active. The next render
+        ; will consume them at absolute native times 1280 and 1344.
+        move.l  #1280,d0
+        moveq   #$28,d1
+        moveq   #$4a,d2
+        bsr     dsp_queue_write
+        cmp.l   #DSP_REPLY_OK,d0
+        bne     audio_protocol_failed
+
+        move.l  #1344,d0
+        moveq   #$28,d1
+        moveq   #$4c,d2
         bsr     dsp_queue_write
         cmp.l   #DSP_REPLY_OK,d0
         bne     audio_protocol_failed
@@ -504,6 +518,30 @@ start:
         bsr     dsp_exchange
         cmpi.l  #100000,d0             ; reject a stalled/underrunning SSI path
         bcs     audio_protocol_failed
+
+        ; Render a second consecutive block. The queued rolling-clock events
+        ; must be consumed without resetting time, ending at native sample 2560.
+        move.l  #DSP_CMD_START_AUDIO,d0
+        bsr     dsp_exchange
+        cmp.l   #DSP_REPLY_OK,d0
+        bne     audio_protocol_failed
+
+        move.l  #DSP_CMD_QUERY_TIME,d0
+        bsr     dsp_exchange
+        cmpi.l  #2560,d0
+        bne     audio_protocol_failed
+
+        move.l  #DSP_CMD_STOP_AUDIO,d0
+        bsr     dsp_exchange
+        cmp.l   #DSP_REPLY_OK,d0
+        bne     audio_protocol_failed
+
+        moveq   #0,d1
+        moveq   #0,d2
+        bsr     mxdrv_query_phase_step
+        cmp.l   #YM_REF_PHASE_CH0_OP0,d0
+        bne     audio_protocol_failed
+
         Dsptristate #0,#0
         Unlocksnd
 

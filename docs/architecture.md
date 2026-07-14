@@ -12,13 +12,13 @@ routine receives the register in `d1.b` and data in `d2.b`, mirrors the byte in
 `OPMBuf`, then writes the X68000 OPM ports. `src/m68k/mxdrv_port.s` preserves
 those input conventions and replaces the hardware write with one DSP word.
 
-## Host/DSP protocol v6
+## Host/DSP protocol v7
 
 Every transport unit is one DSP/host 24-bit word. The upper byte is an opcode.
 
 | Word | Meaning | Reply |
 | --- | --- | --- |
-| `01 00 00` | ping/protocol query | `4d 58 06` (`MX`, version 6) |
+| `01 00 00` | ping/protocol query | `4d 58 07` (`MX`, version 7) |
 | `02 rr dd` | write YM2151 register `rr = dd`, including during bounded SSI playback | `00 00 00` |
 | `03 00 00` | reset YM2151 state | `00 00 00` |
 | `04 00 00` | clock one native 62.5 kHz sample | signed left sample |
@@ -31,16 +31,19 @@ Every transport unit is one DSP/host 24-bit word. The upper byte is an opcode.
 | `0b 00 00` | pre-render and start the bounded SSI block | `00 00 00` before transmit starts |
 | `0c 00 00` | stop and disable DSP SSI transmit | `00 00 00` |
 | `0d 00 00` | query completed SSI stereo frames | unsigned 24-bit frame count |
-| `0e tt tt` + `02 rr dd` | queue `rr = dd` at native-sample offset `tttt` in the next bounded render | `00 00 00`, or error if invalid/full/out of order |
+| `0e tt tt` + `02 rr dd` | queue `rr = dd` at absolute rolling native time `tttt` | `00 00 00`, or error if invalid/full/out of order |
+| `0f 00 00` | query the rolling 16-bit native-sample clock | unsigned 16-bit time |
 | anything else | unsupported command | `ff ff ff` |
 
 The synchronous acknowledgement intentionally provides back-pressure and keeps
 conformance replay deterministic. The emulated YM2151 busy flag remains set
 until command `04` advances the 64 input clocks represented by one native
 sample. Command `04` is a testable sample clock, not the eventual real-time
-audio path. Command `0e` establishes the bounded event transport needed by the
-future SSI-driven synthesis loop: up to 32 writes are accepted in
-nondecreasing timestamp order and applied before the exact native sample.
+audio path. Command `0e` establishes the event transport needed by the future
+SSI-driven synthesis loop: up to 32 writes are accepted in nondecreasing
+modular order and applied before the exact native sample. The 16-bit clock
+wraps naturally; entries must be no more than 32,767 samples ahead. Command
+`0f` exposes the current scheduling position to the host.
 
 Command `0a` is the one bootstrap exception to the single-word transaction
 shape: it consumes exactly 329 following host words before replying. Moving
@@ -50,9 +53,9 @@ stream loop accepts synchronous command `02` writes and command `0c`. Because
 the repeated block was rendered before SSI starts, writes update chip state for
 the next render and the static phase cache is rebuilt after SSI stops; they do
 not retroactively change the active block. It also accepts `0e` transactions,
-which remain queued for the next render. Continuous synthesis must consume the
-same FIFO against a rolling timebase instead of the bounded render's zero-based
-0-1279 sample offsets.
+which remain queued for the next render. The rolling clock is not reset by
+`0b`, so consecutive renders consume one continuous event timeline; only chip
+reset returns it to zero.
 
 The constants are duplicated in `src/m68k/protocol.i` and
 `src/dsp/protocol.inc` because the two assemblers do not share syntax. Keep the
@@ -88,9 +91,9 @@ protocol version in the ping reply whenever either side changes incompatibly.
    phase/cache fetch plus add/store, and bypasses terminal envelopes and fully
    silent channels without changing the exact sample vectors. The SSI loop also
    services synchronous writes through the real MXDRV `WriteOPM` seam and
-   preserves them for the next render. Protocol v6 adds a checked 32-entry FIFO
-   and applies writes at exact native-sample offsets during pre-rendering. More
-   operator specialization, cycle measurement, and a rolling FIFO timebase are
+   preserves them for the next render. Protocol v7 adds a checked 32-entry FIFO,
+   a queryable rolling native clock, and exact sample-boundary writes across
+   consecutive renders. More operator specialization and cycle measurement are
    still required before the pre-rendered block can be replaced by continuous
    live synthesis.
 6. **PCM/PDX:** add the X68000 ADPCM path and mixer, then compatibility tests

@@ -38,9 +38,10 @@ This is not a complete music driver yet. MDX command replay and timer service,
 PDX mixing, and continuous underrun-free synthesis remain. The current SSI path
 loops a pre-rendered validation block. It now services synchronous MXDRV
 register writes while streaming and preserves them for the next render, but
-those writes cannot alter audio that was already rendered. Protocol v6 also
-provides a 32-entry FIFO of exact native-sample register events for the next
-1280-sample render; the same FIFO transaction is accepted while SSI is active.
+those writes cannot alter audio that was already rendered. Protocol v7 also
+provides a 32-entry FIFO of exact register events on a rolling 16-bit native
+sample clock; the same FIFO and clock-query transactions work while SSI is
+active, and the clock persists across consecutive renders.
 The exact boundary between implemented and pending work is kept in
 [the architecture notes](docs/architecture.md).
 

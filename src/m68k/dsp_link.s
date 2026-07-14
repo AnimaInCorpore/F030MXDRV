@@ -16,10 +16,10 @@ dsp_exchange:
         move.l  dsp_rx_word,d0
         rts
 
-; Queue one YM2151 write at an exact native-sample offset in the next bounded
-; render. The DSP transaction is a timestamp header followed by a normal packed
+; Queue one YM2151 write at an absolute position on the rolling native-sample
+; clock. The DSP transaction is a timestamp header followed by a normal packed
 ; write word.
-; in:  d0.w = timestamp (0-1279), d1.b = register, d2.b = data
+; in:  d0.w = rolling timestamp, d1.b = register, d2.b = data
 ; out: d0.l = DSP reply
 dsp_queue_write:
         move.l  d0,d3

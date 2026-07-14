@@ -92,6 +92,8 @@ ym_timer_b_phase:
         ds      1
 ym_queue_count:
         ds      1
+ssi_native_sample_count:
+        ds      1
 
 ; The no-PM phase increments are expensive to derive from the OPM key-code,
 ; detune, and multiplier tables. Keep a copy across samples and rebuild it only
@@ -110,8 +112,6 @@ ssi_resample_phase:
 ssi_frame_count:
         ds      1
 ssi_buffer_remaining:
-        ds      1
-ssi_native_sample_count:
         ds      1
 ym_queue_read_index:
         ds      1
@@ -186,7 +186,7 @@ ym_feedback_in:
 ym_lfo_noise_wave:
         ds      256
 
-; Up to 32 exact native-sample register events for the next 1280-sample render.
+; Up to 32 exact register events on the rolling 16-bit native-sample clock.
 ym_write_queue_times:
         ds      32
 ym_write_queue_commands:
@@ -276,6 +276,10 @@ command_loop:
         move    #>DSP_CMD_QUEUE_WRITE,x0
         cmp     x0,a
         jeq     command_queue_write
+
+        move    #>DSP_CMD_QUERY_TIME,x0
+        cmp     x0,a
+        jeq     command_query_time
 
         move    #>DSP_REPLY_ERROR,a
         jsr     send_reply
@@ -383,7 +387,6 @@ command_start_audio:
         clr     a
         move    a1,x:ssi_resample_phase
         move    a1,x:ssi_frame_count
-        move    a1,x:ssi_native_sample_count
         move    a1,x:ym_queue_read_index
         move    #>1007,a
         move    a1,x:ssi_buffer_remaining
@@ -438,7 +441,16 @@ ssi_stream_loop:
 
         move    #>DSP_CMD_QUEUE_WRITE,x0
         cmp     x0,a
+        jeq     ssi_stream_queue_write
+
+        move    #>DSP_CMD_QUERY_TIME,x0
+        cmp     x0,a
         jne     ssi_stream_command_error
+        move    x:ssi_native_sample_count,a
+        jsr     send_reply
+        jmp     ssi_stream_data
+
+ssi_stream_queue_write:
         jsr     ym_enqueue_write
         jsr     send_reply
         jmp     ssi_stream_data
@@ -503,12 +515,17 @@ command_query_audio:
         jsr     send_reply
         jmp     command_loop
 
-; Queue transaction: 0e tt tt followed by 02 rr dd. The 16-bit timestamp is
-; the exact native-sample offset in the next 1280-sample bounded render. The
-; host sends entries in nondecreasing order; invalid/full transactions consume
-; both words and return an error so the host port remains synchronized.
+; Queue transaction: 0e tt tt followed by 02 rr dd. The 16-bit timestamp is an
+; absolute position on the rolling native-sample clock, with a 32767-sample
+; scheduling horizon. The host sends entries in nondecreasing modular order;
+; invalid/full transactions still consume both words to preserve framing.
 command_queue_write:
         jsr     ym_enqueue_write
+        jsr     send_reply
+        jmp     command_loop
+
+command_query_time:
+        move    x:ssi_native_sample_count,a
         jsr     send_reply
         jmp     command_loop
 
@@ -529,6 +546,8 @@ ssi_render_frame_loop:
         move    x:ssi_native_sample_count,a
         move    #>1,x0
         add     x0,a
+        move    #>$00ffff,y0
+        and     y0,a1
         move    a1,x:ssi_native_sample_count
         move    x:ssi_resample_phase,a
         jmp     ssi_render_frame_loop
@@ -561,10 +580,15 @@ ym_enqueue_write:
         cmp     x0,a
         jne     ym_enqueue_error
 
+        ; Convert the timestamp to an unsigned modular distance from now.
+        ; Bit 15 set means it is in the past or beyond the supported horizon.
         move    x:ym_queue_timestamp,a
-        move    #>1280,x0
-        cmp     x0,a
-        jge     ym_enqueue_error
+        move    x:ssi_native_sample_count,x0
+        sub     x0,a
+        move    #>$00ffff,y0
+        and     y0,a1
+        move    a1,x:synth_result
+        jset    #15,a1,ym_enqueue_error
 
         move    x:ym_queue_count,a
         move    #>32,x0
@@ -579,7 +603,11 @@ ym_enqueue_write:
         move    #ym_write_queue_times,r0
         nop
         move    x:(r0+n0),b
-        move    x:ym_queue_timestamp,a
+        move    x:ssi_native_sample_count,x0
+        sub     x0,b
+        move    #>$00ffff,y0
+        and     y0,b1
+        move    x:synth_result,a
         move    b1,x0
         cmp     x0,a
         jlt     ym_enqueue_error
@@ -605,8 +633,8 @@ ym_enqueue_error:
         move    #>DSP_REPLY_ERROR,a
         rts
 
-; Apply every queued write due at or before the next native sample. Entries are
-; ordered by the host, so the first future timestamp terminates the scan.
+; Apply every queued write due at or before the next native sample. The signed
+; half of the 16-bit modular delta distinguishes future from already-due times.
 ym_apply_queued_writes:
         move    x:ym_queue_count,a
         tst     a
@@ -619,9 +647,14 @@ ym_apply_queued_writes:
         nop
         move    x:(r0+n0),a
         move    x:ssi_native_sample_count,x0
-        cmp     x0,a
-        jgt     ym_apply_queued_done
+        sub     x0,a
+        move    #>$00ffff,y0
+        and     y0,a1
+        tst     a
+        jeq     ym_apply_queued_due
+        jclr    #15,a1,ym_apply_queued_done
 
+ym_apply_queued_due:
         move    x:(r1+n1),x1
         move    x1,x:last_command
         jsr     ym_write_packed
@@ -679,7 +712,7 @@ ym_reset_envelope_state:
 ym_reset_runtime_loop:
         move    #ym_env_counter,r0
         clr     a
-        do      #23,ym_reset_global_loop
+        do      #24,ym_reset_global_loop
         move    a1,x:(r0)+
 ym_reset_global_loop:
         move    #>1,a
