@@ -170,6 +170,32 @@ kernel must be block-oriented and specialized by YM algorithm, allowing gain,
 modulation, and buffer traffic to share those parallel memory slots; a generic
 feature-by-feature extension of this loop has no credible cycle margin.
 
+### Algorithm-0 block spike
+
+`make profile-dsp-rt2` brackets protocol command `$14` between
+`rt2_profile_loop_start` and `rt2_profile_loop_done` and writes its report to
+`build/dsp-profile-rt2/report.txt`. The command renders one serial
+M1(feedback)->C1->M2->C2 channel for 2048 codec frames in operator-major
+64-frame blocks: each stage keeps its 8.16 phase and fractional gain in
+registers, writes a 64-word internal-X modulator ring, and the next stage
+consumes that ring in place. Feedback and modulation are applied on every
+frame by adding the previous output into the phase word before a single MPY
+extracts the sine-table index; envelope gains step once per 64-frame block.
+The carrier stage writes interleaved stereo into the reused audio buffers,
+and the reply is that block's checksum (`$000eb5`), gated by the smoke suite.
+
+Hatari measures 123,076 instruction cycles for the block, or 60.10 cycles
+per channel/frame — a 1.53x surcharge over the 39.16-cycle four-carrier
+floor for the full modulation topology. The linear eight-channel projection
+is 480.77 cycles against the 326.27-cycle codec-frame budget: the worst-case
+all-algorithm-0 workload misses real time by 1.47x, compared to the exact
+kernel's 46.84x. The remaining gap is addressable with dual X:Y parallel
+moves in the modulated stages (currently unpacked), cheaper carrier-only
+stages for parallel algorithms, and shared block overhead; the spike's
+block-rate envelope gains must also become per-frame slopes with block-rate
+segment derivation to satisfy the compatibility contract's codec-frame
+quantization bound.
+
 ## Embedded second-stage program loader
 
 The 68030 executable now embeds both a 111-word first-stage boot image and the

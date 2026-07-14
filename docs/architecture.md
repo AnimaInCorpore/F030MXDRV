@@ -37,6 +37,7 @@ Every transport unit is one DSP/host 24-bit word. The upper byte is an opcode.
 | `11 00 00` + 2014 words | upload 1007 interleaved stereo PCM frames, mix with a new FM period, and start interrupt-fed SSI | `00 00 00` before transmit starts |
 | `12 00 00` | query the first nonzero mixed stereo probe | signed left+right sample sum |
 | `13 00 00` + 2014 words | upload PCM to the inactive buffer, render FM in place, and switch at a stereo boundary | `00 00 00` after the switch |
+| `14 00 00` | run the 2048-frame block-oriented algorithm-0 channel spike | deterministic checksum `00 0e b5` |
 | anything else | unsupported command | `ff ff ff` |
 
 The synchronous acknowledgement intentionally provides back-pressure and keeps
@@ -76,6 +77,14 @@ It owns `r0-r5`, `m0-m5`, and `n0-n3` while SSI is stopped, restores linear
 addressing before returning, and lets Hatari bracket only its hot loop through
 listing-resolved symbols. Its checksum is gated so address-ring or parallel-
 move regressions cannot silently invalidate the timing result.
+
+Command `14` is the block-oriented successor spike. It renders one serial
+M1(feedback)->C1->M2->C2 channel for 2048 codec frames in operator-major
+64-frame blocks, with per-frame feedback and modulation, block-rate envelope
+gains, and interleaved stereo output. It owns `r0-r5`, `m0/m3/m5`, and `n0`
+while SSI is stopped, reuses both audio buffers as its stereo output block,
+and replies with that block's deterministic checksum, which the smoke suite
+gates like command `10`'s.
 
 The constants are duplicated in `src/m68k/protocol.i` and
 `src/dsp/protocol.inc` because the two assemblers do not share syntax. Keep the
@@ -205,11 +214,15 @@ feed later operator state.
 
 ## Remaining roadmap
 
-1. Expand the measured codec-rate floor into a block-oriented, algorithm-
-   specialized channel spike. The optimized four-operator floor is 39.16
-   cycles/frame, or 313.31 cycles for eight channels against a 326.27-cycle
-   budget; the new spike must cover envelopes, feedback, modulation, stereo
-   accumulation, and SSI without losing that parallelism.
+1. Close the measured 1.47x block-spike gap. Command `14` now renders one
+   complete serial algorithm-0 channel — operator-1 feedback, per-frame
+   modulation, block-rate envelope gains, and interleaved stereo — in 60.10
+   cycles per codec frame, a 1.53x surcharge over the 39.16-cycle four-carrier
+   floor. The linear eight-channel projection is 480.77 cycles against the
+   326.27-cycle budget. Recover the difference with dual X:Y parallel moves in
+   the modulated stages, cheaper carrier-only stages for parallel algorithms,
+   per-frame envelope slopes with block-rate segment derivation, and SSI/event
+   service costs measured in place.
 2. Add exact-to-perceptual comparison vectors for pitch, key/write timing,
    envelopes, LFO/noise rates, feedback spectra, and all eight algorithms.
 3. Integrate the selected real-time kernel with the rolling write FIFO and

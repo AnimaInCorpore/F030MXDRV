@@ -948,6 +948,21 @@ run_conformance:
         cmp.l   #DSP_REPLY_HELLO,d0
         bne     protocol_failed
 
+        ; Run the block-oriented algorithm-0 channel spike behind its own
+        ; profiler arming marker, then check its deterministic checksum.
+        move.l  #DSP_CMD_PING+$c3c0,d0
+        bsr     dsp_exchange
+        cmp.l   #DSP_REPLY_HELLO,d0
+        bne     protocol_failed
+        move.l  #DSP_CMD_PROFILE_RT2,d0
+        bsr     dsp_exchange
+        cmpi.l  #DSP_RT2_PROFILE_CHECKSUM,d0
+        bne     protocol_failed
+        move.l  #DSP_CMD_PING+$c3de,d0
+        bsr     dsp_exchange
+        cmp.l   #DSP_REPLY_HELLO,d0
+        bne     protocol_failed
+
         ; Reload the valid bank after the malformed-bank checks, then prove
         ; that a host-rendered PDX period reaches the DSP-owned SSI path. Keep
         ; FM silent so the first nonzero stereo probe sums the exact second

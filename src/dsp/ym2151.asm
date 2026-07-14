@@ -191,6 +191,24 @@ rt_gain_alignment_pad:
 rt_envelope_gain:
         ds      4
 
+; Block-oriented spike state: four 8.16 operator phases in table-entry
+; units, four block-rate signed fractional gains, and the operator-1
+; feedback output history.
+rt2_phase:
+        ds      4
+rt2_gain:
+        ds      4
+rt2_fb_0:
+        ds      1
+rt2_fb_1:
+        ds      1
+
+; One operator stage writes this ring while the next consumes it in place
+; as its modulator. Modulo-64 addressing requires the 64-word alignment.
+        org     x:$80
+rt2_stage_ring:
+        ds      64
+
 ; Larger register and operator arrays remain in external X memory. Operator
 ; state uses logical per-channel order M1,C1,M2,C2. Phases are native 10.10
 ; ymfm values; modulo-24-bit storage preserves the low waveform bits at wrap.
@@ -349,6 +367,10 @@ command_loop:
         move    #>DSP_CMD_PROFILE_RT,x0
         cmp     x0,a
         jeq     command_profile_realtime
+
+        move    #>DSP_CMD_PROFILE_RT2,x0
+        cmp     x0,a
+        jeq     command_profile_realtime2
 
         move    #>DSP_CMD_START_MIXED,x0
         cmp     x0,a
@@ -564,6 +586,163 @@ rt_profile_loop_done:
         move    #>0,n2
         move    #>0,n3
         move    x:rt_profile_checksum,a
+        jsr     send_reply
+        jmp     command_loop
+
+; Profile one block-oriented, algorithm-0-shaped codec-rate channel: a
+; serial M1(feedback)->C1->M2->C2 chain with per-frame feedback and
+; modulation, block-rate envelope gains, and interleaved stereo output.
+; Each operator processes one 64-frame block so its phase and gain stay
+; in registers while the modulator ring is consumed in place by the next
+; stage. This adds the work the four-carrier lower bound deliberately
+; omitted. SSI must be stopped: both audio buffers are reused as the
+; 2048-frame stereo output block, and the reply is its checksum.
+command_profile_realtime2:
+        clr     a
+        move    #rt2_phase,r4
+        do      #4,rt2_clear_state
+        move    a1,x:(r4)+
+rt2_clear_state:
+        move    a1,x:rt2_fb_0
+        move    a1,x:rt2_fb_1
+
+        move    #rt2_gain,r4
+        move    #>$400000,x0           ; 0.5 signed fractional gain
+        move    x0,x:(r4)+
+        move    #>$300000,x0           ; 0.375
+        move    x0,x:(r4)+
+        move    #>$200000,x0           ; 0.25
+        move    x0,x:(r4)+
+        move    #>$100000,x0           ; 0.125
+        move    x0,x:(r4)+
+
+        move    #rt_linear_sine,r0
+        move    #>255,m0
+        move    #ssi_buffer_a,r1
+        move    #>63,m3
+        move    #>63,m5
+        move    #>$40,y1               ; (phase*64*2)>>46 = table index
+        move    #>$024a74,x1           ; 440 Hz: 2 + $4a74/65536 entries
+
+rt2_profile_loop_start:
+        do      #DSP_RT2_PROFILE_BLOCKS,rt2_blocks_done
+
+        ; Operator 1: self-feedback, fills the modulator ring.
+        move    #rt2_stage_ring,r5
+        move    x:rt2_phase,b
+        move    x:rt2_gain,y0
+        do      #DSP_RT2_BLOCK_FRAMES,rt2_op1_done
+        move    x:rt2_fb_0,x0
+        move    x:rt2_fb_1,a
+        add     x0,a
+        move    x0,x:rt2_fb_1          ; age the history while it is loaded
+        asr     a
+        asr     a
+        asr     a                      ; (out[-1]+out[-2]) >> 3 feedback
+        add     b,a
+        move    a1,x0
+        mpy     x0,y1,a
+        move    a1,n0
+        add     x1,b                   ; phase advance fills the n0 slot
+        move    y:(r0+n0),x0
+        mpy     x0,y0,a
+        move    a1,x:rt2_fb_0
+        move    a1,x:(r5)+
+rt2_op1_done:
+        move    b1,x:rt2_phase
+
+        ; Operator 2: modulated by the ring, overwrites it in place.
+        move    #rt2_stage_ring,r3
+        move    #rt2_stage_ring,r5
+        move    x:rt2_phase+1,b
+        move    x:rt2_gain+1,y0
+        do      #DSP_RT2_BLOCK_FRAMES,rt2_op2_done
+        move    x:(r3)+,a
+        add     b,a
+        move    a1,x0
+        mpy     x0,y1,a
+        move    a1,n0
+        add     x1,b
+        move    y:(r0+n0),x0
+        mpy     x0,y0,a
+        move    a1,x:(r5)+
+rt2_op2_done:
+        move    b1,x:rt2_phase+1
+
+        ; Operator 3: same stage shape as operator 2.
+        move    #rt2_stage_ring,r3
+        move    #rt2_stage_ring,r5
+        move    x:rt2_phase+2,b
+        move    x:rt2_gain+2,y0
+        do      #DSP_RT2_BLOCK_FRAMES,rt2_op3_done
+        move    x:(r3)+,a
+        add     b,a
+        move    a1,x0
+        mpy     x0,y1,a
+        move    a1,n0
+        add     x1,b
+        move    y:(r0+n0),x0
+        mpy     x0,y0,a
+        move    a1,x:(r5)+
+rt2_op3_done:
+        move    b1,x:rt2_phase+2
+
+        ; Operator 4: the carrier writes interleaved stereo, right at a
+        ; fixed half-amplitude pan.
+        move    #rt2_stage_ring,r3
+        move    x:rt2_phase+3,b
+        move    x:rt2_gain+3,y0
+        do      #DSP_RT2_BLOCK_FRAMES,rt2_op4_done
+        move    x:(r3)+,a
+        add     b,a
+        move    a1,x0
+        mpy     x0,y1,a
+        move    a1,n0
+        add     x1,b
+        move    y:(r0+n0),x0
+        mpy     x0,y0,a
+        move    a1,x:(r1)+             ; left
+        asr     a
+        move    a1,x:(r1)+             ; right
+rt2_op4_done:
+        move    b1,x:rt2_phase+3
+
+        ; Block-rate envelopes: fixed per-operator decrements stand in for
+        ; segment-derived slopes at this stage of the spike.
+        move    x:rt2_gain,a
+        move    #>$400,x0
+        sub     x0,a
+        move    a1,x:rt2_gain
+        move    x:rt2_gain+1,a
+        move    #>$300,x0
+        sub     x0,a
+        move    a1,x:rt2_gain+1
+        move    x:rt2_gain+2,a
+        move    #>$200,x0
+        sub     x0,a
+        move    a1,x:rt2_gain+2
+        move    x:rt2_gain+3,a
+        move    #>$100,x0
+        sub     x0,a
+        move    a1,x:rt2_gain+3
+rt2_blocks_done:
+        nop
+rt2_profile_loop_done:
+
+        ; Checksum the rendered stereo block. The cycle bracket above
+        ; excludes this conformance pass.
+        move    #ssi_buffer_a,r1
+        clr     a
+        do      #DSP_RT2_CHECKSUM_PAIRS,rt2_checksum_done
+        move    x:(r1)+,x0
+        add     x0,a
+        move    x:(r1)+,x0
+        add     x0,a
+rt2_checksum_done:
+        move    #>-1,m0
+        move    #>-1,m3
+        move    #>-1,m5
+        move    #>0,n0
         jsr     send_reply
         jmp     command_loop
 

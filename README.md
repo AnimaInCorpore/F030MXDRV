@@ -59,12 +59,15 @@ why the project publishes its own profiler.
 - The selected real-time target is a perceptual codec-rate FM kernel with
   exact write ordering, register semantics, and drift-free pitch/control
   timing, rather than sample equality. A first codec-rate feasibility kernel
-  already advances four drift-free oscillators in 39.16 cycles per codec
-  frame using modulo rings and parallel X/Y moves; its linear eight-channel
-  projection is 313.31 cycles against the 326.27-cycle frame budget. That
-  4.0% margin excludes envelopes, feedback, modulation routing, event
-  service, and SSI — so the eventual engine will be block-oriented and
-  specialized by YM algorithm.
+  advances four drift-free oscillators in 39.16 cycles per codec frame using
+  modulo rings and parallel X/Y moves. A second, block-oriented spike now
+  renders a complete serial algorithm-0 channel — operator-1 feedback,
+  per-frame modulation, block-rate envelope gains, and interleaved stereo —
+  in 60.10 cycles per codec frame. Its linear eight-channel projection is
+  480.77 cycles against the 326.27-cycle frame budget, so the worst-case
+  all-algorithm-0 workload currently misses real time by **1.47x** (not the
+  exact kernel's 46.84x), with dual-move packing and cheaper parallel-
+  algorithm stages still unexploited.
 - MDX synchronization/modulation and real-time mixed-block production
   remain. The exact boundary between implemented and pending work is kept in
   [the architecture notes](docs/architecture.md).
@@ -141,6 +144,7 @@ Hatari can also capture the cycle profiles behind the status numbers above:
 ```sh
 make profile-dsp      # exact eight-channel renderer -> build/dsp-profile/report.txt
 make profile-dsp-rt   # codec-rate four-operator floor -> build/dsp-profile-rt/report.txt
+make profile-dsp-rt2  # algorithm-0 block spike -> build/dsp-profile-rt2/report.txt
 ```
 
 ## Run

@@ -16,7 +16,9 @@ GENERATED_BUILD := build/generated
 REFERENCE_BUILD := build/reference
 DSP_PROFILE_DIR := build/dsp-profile
 DSP_RT_PROFILE_DIR := build/dsp-profile-rt
+DSP_RT2_PROFILE_DIR := build/dsp-profile-rt2
 DSP_RT_PROFILE_FRAMES := 2048
+DSP_RT2_PROFILE_FRAMES := 2048
 RELEASE_DIR := release
 
 YM2151_ORACLE := $(NATIVE_BUILD)/ym2151_oracle
@@ -42,7 +44,8 @@ M68K_OBJECTS := $(patsubst src/m68k/%.s,$(M68K_BUILD)/%.o,$(M68K_SOURCES))
 DOSBOX ?= $(shell command -v dosbox-staging 2>/dev/null || command -v dosbox 2>/dev/null)
 DOSBOX_FLAGS ?= --noprimaryconf --set output=texture
 
-.PHONY: all host dsp reference check smoke profile-dsp profile-dsp-rt clean run tools
+.PHONY: all host dsp reference check smoke profile-dsp profile-dsp-rt \
+	profile-dsp-rt2 clean run tools
 
 all: host dsp
 
@@ -211,6 +214,10 @@ smoke: check
 	@rg -q "Direct Transfer 0x100000" build/hatari-smoke.trace
 	@rg -q "Transfer 0x041ac9" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x01c0de" build/hatari-smoke.trace
+	@rg -q "Direct Transfer 0x01c3c0" build/hatari-smoke.trace
+	@rg -q "Direct Transfer 0x140000" build/hatari-smoke.trace
+	@rg -q "Transfer 0x000eb5" build/hatari-smoke.trace
+	@rg -q "Direct Transfer 0x01c3de" build/hatari-smoke.trace
 	@rg -q "XBIOS 0x80 Locksnd" build/hatari-smoke.trace
 	@rg -q "XBIOS 0x89 Dsptristate\\(0x1, 0x0\\)" build/hatari-smoke.trace
 	@rg -q "XBIOS 0x8B Devconnect\\(1, 0x8, 0, 1, 1\\)" build/hatari-smoke.trace
@@ -314,6 +321,45 @@ profile-dsp-rt: check tools/profile_dsp.py
 		--projection-factor 8 \
 		--projection-label "linear eight-channel projection" \
 		--title "DSP56001 codec-rate four-operator lower-bound profile"
+
+profile-dsp-rt2: check tools/profile_dsp.py
+	@if ! command -v hatari >/dev/null 2>&1; then \
+		echo "error: profile-dsp-rt2 target needs Hatari" >&2; \
+		exit 1; \
+	fi
+	@rm -rf $(DSP_RT2_PROFILE_DIR)
+	@python3 tools/profile_dsp.py prepare \
+		--listing $(DSP_BUILD)/YM2151.LST \
+		--output-dir $(DSP_RT2_PROFILE_DIR) \
+		--marker 0x01c3c0 \
+		--start-symbol rt2_profile_loop_start \
+		--end-symbol rt2_profile_loop_done
+	@SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy hatari \
+		--machine falcon --dsp emu \
+		--tos third_party/f030dsp3d/tools/tos402.rom --patch-tos true \
+		--fast-boot true --fast-forward true --sound off \
+		--confirm-quit false --run-vbls 1200 \
+		--parse $(DSP_RT2_PROFILE_DIR)/start.ini \
+		$(RELEASE_DIR)/f030mxdrv.tos \
+		> $(DSP_RT2_PROFILE_DIR)/debug.log 2>&1 || { \
+			tail -n 100 $(DSP_RT2_PROFILE_DIR)/debug.log >&2; \
+			exit 1; \
+		}
+	@test -s $(DSP_RT2_PROFILE_DIR)/profile.txt || { \
+		echo "error: Hatari did not capture the block-spike DSP profile" >&2; \
+		tail -n 100 $(DSP_RT2_PROFILE_DIR)/debug.log >&2; \
+		exit 1; \
+	}
+	@python3 tools/profile_dsp.py report \
+		--listing $(DSP_BUILD)/YM2151.LST \
+		--profile $(DSP_RT2_PROFILE_DIR)/profile.txt \
+		--output $(DSP_RT2_PROFILE_DIR)/report.txt \
+		--samples $(DSP_RT2_PROFILE_FRAMES) \
+		--sample-rate 49169.921875 \
+		--unit-label "codec frame" \
+		--projection-factor 8 \
+		--projection-label "linear eight-channel projection" \
+		--title "DSP56001 codec-rate algorithm-0 block-spike profile"
 
 run: all
 	@if ! command -v hatari >/dev/null 2>&1; then \
