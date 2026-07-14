@@ -18,10 +18,10 @@
 ; YM2151 state in X memory
 ; -----------------------------------------------------------------------------
 
-        org     x:$200
-
-ym_regdata:
-        ds      256
+; Keep frequently accessed scalar state in the short-addressable internal X
+; page. Besides avoiding external-memory traffic, this removes an extension
+; word from most scalar loads/stores and recovers scarce TOS loader space.
+        org     x:$0
 
 last_command:
         ds      1
@@ -40,27 +40,6 @@ query_detune:
         ds      1
 query_pm_delta:
         ds      1
-
-; Operator state uses logical per-channel order M1,C1,M2,C2. Phases are the
-; native 10.10 ymfm values; modulo-24-bit storage preserves the low 10 waveform
-; bits across wraparound.
-ym_phase:
-        ds      32
-ym_envelope:
-        ds      32
-ym_envelope_state:
-        ds      32
-ym_key_live:
-        ds      32
-ym_key_state:
-        ds      32
-
-ym_feedback_0:
-        ds      8
-ym_feedback_1:
-        ds      8
-ym_feedback_in:
-        ds      8
 
 ym_env_counter:
         ds      1
@@ -111,6 +90,8 @@ ym_timer_b_counter:
         ds      1
 ym_timer_b_phase:
         ds      1
+ym_queue_count:
+        ds      1
 
 ; The no-PM phase increments are expensive to derive from the OPM key-code,
 ; detune, and multiplier tables. Keep a copy across samples and rebuild it only
@@ -129,6 +110,12 @@ ssi_resample_phase:
 ssi_frame_count:
         ds      1
 ssi_buffer_remaining:
+        ds      1
+ssi_native_sample_count:
+        ds      1
+ym_queue_read_index:
+        ds      1
+ym_queue_timestamp:
         ds      1
 
 ; Scratch state. Keeping it explicit makes subroutine register clobbers safe
@@ -161,9 +148,6 @@ volume_sine:
 synth_opout:
         ds      8
 
-ym_lfo_noise_wave:
-        ds      256
-
 table_remaining:
         ds      1
 table_packed:
@@ -172,6 +156,41 @@ table_slots:
         ds      1
 table_current:
         ds      1
+
+; Larger register and operator arrays remain in external X memory. Operator
+; state uses logical per-channel order M1,C1,M2,C2. Phases are native 10.10
+; ymfm values; modulo-24-bit storage preserves the low waveform bits at wrap.
+        org     x:$200
+
+ym_regdata:
+        ds      256
+
+ym_phase:
+        ds      32
+ym_envelope:
+        ds      32
+ym_envelope_state:
+        ds      32
+ym_key_live:
+        ds      32
+ym_key_state:
+        ds      32
+
+ym_feedback_0:
+        ds      8
+ym_feedback_1:
+        ds      8
+ym_feedback_in:
+        ds      8
+
+ym_lfo_noise_wave:
+        ds      256
+
+; Up to 32 exact native-sample register events for the next 1280-sample render.
+ym_write_queue_times:
+        ds      32
+ym_write_queue_commands:
+        ds      32
 
 ; Phase and cache live in opposite internal memory banks so the common no-PM
 ; clock path can fetch both in one DSP instruction cycle. External Y below the
@@ -253,6 +272,10 @@ command_loop:
         move    #>DSP_CMD_QUERY_AUDIO,x0
         cmp     x0,a
         jeq     command_query_audio
+
+        move    #>DSP_CMD_QUEUE_WRITE,x0
+        cmp     x0,a
+        jeq     command_queue_write
 
         move    #>DSP_REPLY_ERROR,a
         jsr     send_reply
@@ -360,6 +383,8 @@ command_start_audio:
         clr     a
         move    a1,x:ssi_resample_phase
         move    a1,x:ssi_frame_count
+        move    a1,x:ssi_native_sample_count
+        move    a1,x:ym_queue_read_index
         move    #>1007,a
         move    a1,x:ssi_buffer_remaining
         move    #ssi_buffer_left,r4
@@ -409,7 +434,16 @@ ssi_stream_loop:
 
         move    #>DSP_CMD_WRITE_REG,x0
         cmp     x0,a
+        jeq     ssi_stream_write
+
+        move    #>DSP_CMD_QUEUE_WRITE,x0
+        cmp     x0,a
         jne     ssi_stream_command_error
+        jsr     ym_enqueue_write
+        jsr     send_reply
+        jmp     ssi_stream_data
+
+ssi_stream_write:
         jsr     ym_write_packed
         move    #>DSP_REPLY_OK,a
         jsr     send_reply
@@ -469,6 +503,15 @@ command_query_audio:
         jsr     send_reply
         jmp     command_loop
 
+; Queue transaction: 0e tt tt followed by 02 rr dd. The 16-bit timestamp is
+; the exact native-sample offset in the next 1280-sample bounded render. The
+; host sends entries in nondecreasing order; invalid/full transactions consume
+; both words and return an error so the host port remains synchronized.
+command_queue_write:
+        jsr     ym_enqueue_write
+        jsr     send_reply
+        jmp     command_loop
+
 ; Zero-order native-rate conversion. Each 49.17 kHz codec frame advances the
 ; 62.5 kHz YM kernel once or twice according to the exact 1280:1007 ratio.
 ssi_render_frame:
@@ -481,7 +524,12 @@ ssi_render_frame_loop:
         jlt     ssi_render_frame_done
         sub     x0,a
         move    a1,x:ssi_resample_phase
+        jsr     ym_apply_queued_writes
         jsr     ym_clock_sample
+        move    x:ssi_native_sample_count,a
+        move    #>1,x0
+        add     x0,a
+        move    a1,x:ssi_native_sample_count
         move    x:ssi_resample_phase,a
         jmp     ssi_render_frame_loop
 ssi_render_frame_done:
@@ -492,6 +540,103 @@ ssi_render_frame_done:
 send_reply:
         jclr    #1,x:m_hsr,*            ; wait for host transmit data empty
         movep   a1,x:m_htx
+        rts
+
+; Receive and append one exact-timestamp queue entry. The second word is always
+; consumed before validation so a rejected transaction cannot desynchronize the
+; host port.
+ym_enqueue_write:
+        move    x1,a
+        move    #>$00ffff,y0
+        and     y0,a1
+        move    a1,x:ym_queue_timestamp
+
+        jclr    #0,x:m_hsr,*
+        movep   x:m_hrx,x1
+
+        move    x1,a
+        move    #>$ff0000,y0
+        and     y0,a1
+        move    #>DSP_CMD_WRITE_REG,x0
+        cmp     x0,a
+        jne     ym_enqueue_error
+
+        move    x:ym_queue_timestamp,a
+        move    #>1280,x0
+        cmp     x0,a
+        jge     ym_enqueue_error
+
+        move    x:ym_queue_count,a
+        move    #>32,x0
+        cmp     x0,a
+        jge     ym_enqueue_error
+        tst     a
+        jeq     ym_enqueue_store
+
+        move    #>1,x0
+        sub     x0,a
+        move    a1,n0
+        move    #ym_write_queue_times,r0
+        nop
+        move    x:(r0+n0),b
+        move    x:ym_queue_timestamp,a
+        move    b1,x0
+        cmp     x0,a
+        jlt     ym_enqueue_error
+
+ym_enqueue_store:
+        move    x:ym_queue_count,n0
+        move    n0,n1
+        move    #ym_write_queue_times,r0
+        move    #ym_write_queue_commands,r1
+        nop
+        move    x:ym_queue_timestamp,a
+        move    a1,x:(r0+n0)
+        move    x1,x:(r1+n1)
+
+        move    x:ym_queue_count,a
+        move    #>1,x0
+        add     x0,a
+        move    a1,x:ym_queue_count
+        move    #>DSP_REPLY_OK,a
+        rts
+
+ym_enqueue_error:
+        move    #>DSP_REPLY_ERROR,a
+        rts
+
+; Apply every queued write due at or before the next native sample. Entries are
+; ordered by the host, so the first future timestamp terminates the scan.
+ym_apply_queued_writes:
+        move    x:ym_queue_count,a
+        tst     a
+        jeq     ym_apply_queued_done
+
+        move    x:ym_queue_read_index,n0
+        move    n0,n1
+        move    #ym_write_queue_times,r0
+        move    #ym_write_queue_commands,r1
+        nop
+        move    x:(r0+n0),a
+        move    x:ssi_native_sample_count,x0
+        cmp     x0,a
+        jgt     ym_apply_queued_done
+
+        move    x:(r1+n1),x1
+        move    x1,x:last_command
+        jsr     ym_write_packed
+        jsr     ym_refresh_phase_cache
+
+        move    x:ym_queue_read_index,a
+        move    #>1,x0
+        add     x0,a
+        move    a1,x:ym_queue_read_index
+        move    x:ym_queue_count,a
+        sub     x0,a
+        move    a1,x:ym_queue_count
+        jmp     ym_apply_queued_writes
+
+ym_apply_queued_done:
         rts
 
 ; Reset behavior follows ymfm::opm_registers::reset(): clear all register
@@ -534,7 +679,7 @@ ym_reset_envelope_state:
 ym_reset_runtime_loop:
         move    #ym_env_counter,r0
         clr     a
-        do      #22,ym_reset_global_loop
+        do      #23,ym_reset_global_loop
         move    a1,x:(r0)+
 ym_reset_global_loop:
         move    #>1,a

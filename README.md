@@ -23,7 +23,9 @@ audio path. The first cycle-oriented pass caches all 32 unmodulated phase
 increments across register writes in internal Y RAM, advances them with
 parallel X/Y fetches, and retains the full frequency calculation only on
 samples with non-zero phase modulation. Terminal release envelopes and fully
-silent channels also bypass work that cannot affect chip state or output.
+silent channels also bypass work that cannot affect chip state or output. Hot
+scalar state now occupies short-addressable internal X RAM, reducing both
+external accesses and the converted DSP image size.
 
 That path pre-renders one exact 1280-native-sample/1007-codec-frame resampling
 period on the DSP, replays the stereo block through 16-bit SSI at 49.17 kHz, and
@@ -36,8 +38,10 @@ This is not a complete music driver yet. MDX command replay and timer service,
 PDX mixing, and continuous underrun-free synthesis remain. The current SSI path
 loops a pre-rendered validation block. It now services synchronous MXDRV
 register writes while streaming and preserves them for the next render, but
-those writes cannot alter audio that was already rendered. The exact boundary
-between implemented and pending work is kept in
+those writes cannot alter audio that was already rendered. Protocol v6 also
+provides a 32-entry FIFO of exact native-sample register events for the next
+1280-sample render; the same FIFO transaction is accepted while SSI is active.
+The exact boundary between implemented and pending work is kept in
 [the architecture notes](docs/architecture.md).
 
 ## Build

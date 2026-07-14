@@ -429,6 +429,29 @@ start:
         bne     protocol_failed
         dbra    d3,.write_audio_trace
 
+        ; Exercise the timestamped DSP FIFO with two frequency writes. Move the
+        ; channel away from the oracle note first, then restore it at native
+        ; samples 0 and 64 of the upcoming render.
+        moveq   #$28,d1
+        moveq   #$4a,d2
+        bsr     mxdrv_write_ym2151
+        tst.l   d0
+        bne     protocol_failed
+
+        moveq   #0,d0
+        moveq   #$28,d1
+        moveq   #$4b,d2
+        bsr     dsp_queue_write
+        tst.l   d0
+        bne     protocol_failed
+
+        moveq   #64,d0
+        moveq   #$28,d1
+        moveq   #$4c,d2
+        bsr     dsp_queue_write
+        tst.l   d0
+        bne     protocol_failed
+
         Locksnd
         cmpi.l  #1,d0
         bne     sound_failed
@@ -451,6 +474,15 @@ start:
         cmp.l   #DSP_REPLY_OK,d0
         bne     audio_protocol_failed
 
+        ; Queue another event through the same two-word FIFO transaction while
+        ; SSI is active. It is retained for the next bounded render.
+        moveq   #16,d0
+        moveq   #$7d,d1
+        moveq   #$55,d2
+        bsr     dsp_queue_write
+        cmp.l   #DSP_REPLY_OK,d0
+        bne     audio_protocol_failed
+
         Cconws  audio_text
         move.w  #149,d5               ; 150 VBLs, about three seconds
 .audio_wait:
@@ -461,6 +493,13 @@ start:
         bsr     dsp_exchange
         cmp.l   #DSP_REPLY_OK,d0
         bne     audio_protocol_failed
+
+        moveq   #0,d1
+        moveq   #0,d2
+        bsr     mxdrv_query_phase_step
+        cmp.l   #YM_REF_PHASE_CH0_OP0,d0
+        bne     audio_protocol_failed
+
         move.l  #DSP_CMD_QUERY_AUDIO,d0
         bsr     dsp_exchange
         cmpi.l  #100000,d0             ; reject a stalled/underrunning SSI path

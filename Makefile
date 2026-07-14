@@ -122,6 +122,14 @@ check: all reference
 	@test -s $(YM2151_VECTORS)
 	@rg -q "^0 +Errors" $(DSP_BUILD)/YM2151.LST
 	@rg -q "^0 +Warnings" $(DSP_BUILD)/YM2151.LST
+	@bytes=$$(awk 'BEGIN { data=0; words=0 } \
+		/^_DATA/ { data=1; next } /^_END/ { data=0 } \
+		data { for (i=1; i<=NF; i++) if ($$i ~ /^[0-9A-F]{6}$$/) words++ } \
+		END { print words * 3 }' $(RELEASE_DIR)/ym2151.lod); \
+		test $$bytes -le 8192 || { \
+			echo "error: converted DSP image is $$bytes bytes (8192 maximum)" >&2; \
+			exit 1; \
+		}
 	@file $(RELEASE_DIR)/f030mxdrv.tos $(RELEASE_DIR)/ym2151.lod
 
 smoke: check
@@ -139,7 +147,7 @@ smoke: check
 		--trace-file build/hatari-smoke.trace \
 		--trace gemdos,dsp_host_interface,xbios \
 		$(RELEASE_DIR)/f030mxdrv.tos
-	@rg -q "Transfer 0x4d5805" build/hatari-smoke.trace
+	@rg -q "Transfer 0x4d5806" build/hatari-smoke.trace
 	@rg -q "Transfer 0x000080" build/hatari-smoke.trace
 	@rg -q "Transfer 0x01fc00" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x021b00" build/hatari-smoke.trace
@@ -160,7 +168,13 @@ smoke: check
 	@rg -q "XBIOS 0x89 Dsptristate\\(0x1, 0x0\\)" build/hatari-smoke.trace
 	@rg -q "XBIOS 0x8B Devconnect\\(1, 0x8, 0, 1, 1\\)" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x0b0000" build/hatari-smoke.trace
+	@rg -q "Direct Transfer 0x0e0000" build/hatari-smoke.trace
+	@rg -q "Direct Transfer 0x02284b" build/hatari-smoke.trace
+	@rg -q "Direct Transfer 0x0e0040" build/hatari-smoke.trace
+	@rg -q "Direct Transfer 0x02284c" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x027e5a" build/hatari-smoke.trace
+	@rg -q "Direct Transfer 0x0e0010" build/hatari-smoke.trace
+	@rg -q "Direct Transfer 0x027d55" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x0c0000" build/hatari-smoke.trace
 	@rg -q "XBIOS 0x89 Dsptristate\\(0x0, 0x0\\)" build/hatari-smoke.trace
 	@rg -q "XBIOS 0x81 Unlocksnd" build/hatari-smoke.trace
