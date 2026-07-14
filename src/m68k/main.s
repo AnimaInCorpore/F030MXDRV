@@ -689,6 +689,30 @@ run_conformance:
         cmp.l   #YM_REF_NOISE_63_RIGHT,d0
         bne     protocol_failed
 
+        ; Maximum-rate saw vibrato with PMS 7 drives the dynamic PM phase
+        ; path. Compare sample 63 against the exact ymfm result.
+        bsr     mxdrv_reset
+        tst.l   d0
+        bne     protocol_failed
+        lea     vibrato_trace(pc),a3
+        moveq   #30,d3
+.write_vibrato_trace:
+        moveq   #0,d1
+        moveq   #0,d2
+        move.b  (a3)+,d1
+        move.b  (a3)+,d2
+        bsr     mxdrv_write_ym2151
+        tst.l   d0
+        bne     protocol_failed
+        dbra    d3,.write_vibrato_trace
+        moveq   #64,d3
+        bsr     clock_samples
+        cmp.l   #YM_REF_VIBRATO_63_LEFT,d0
+        bne     protocol_failed
+        bsr     mxdrv_query_right
+        cmp.l   #YM_REF_VIBRATO_63_RIGHT,d0
+        bne     protocol_failed
+
         ; Timer A uses its 10-bit latch directly in native sample units.
         ; Value $3fe therefore expires after two clock commands.
         bsr     mxdrv_reset
@@ -1225,6 +1249,18 @@ noise_trace:
         dc.b    $27,$c7,$2f,$4c,$37,$00
         dc.b    $5f,$01,$7f,$00,$9f,$1c,$bf,$00,$df,$00,$ff,$0f
         dc.b    $0f,$9f,$08,$47
+        even
+
+vibrato_trace:
+        dc.b    $18,$ff,$19,$ff,$38,$70
+        dc.b    $20,$c7,$28,$4c,$30,$00
+        dc.b    $40,$01,$48,$01,$50,$01,$58,$01
+        dc.b    $60,$00,$68,$00,$70,$00,$78,$00
+        dc.b    $80,$1c,$88,$1c,$90,$1c,$98,$1c
+        dc.b    $a0,$00,$a8,$00,$b0,$00,$b8,$00
+        dc.b    $c0,$00,$c8,$00,$d0,$00,$d8,$00
+        dc.b    $e0,$0f,$e8,$0f,$f0,$0f,$f8,$0f
+        dc.b    $08,$78
         even
 
 csm_trace:

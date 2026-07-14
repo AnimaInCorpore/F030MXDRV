@@ -84,10 +84,12 @@ $(PDX_ADPCM_ORACLE): tools/pdx_adpcm_oracle.cpp \
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -std=c++17 -O2 $< -o $@
 
 $(YM2151_REFERENCE): $(YM2151_ORACLE) tests/traces/attack_all_carriers.trace \
-		tests/traces/noise_channel7.trace tests/traces/timer_csm.trace
+		tests/traces/noise_channel7.trace tests/traces/timer_csm.trace \
+		tests/traces/vibrato_pm.trace
 	@mkdir -p $(GENERATED_BUILD)
 	$(YM2151_ORACLE) --emit-m68k tests/traces/attack_all_carriers.trace \
-		tests/traces/noise_channel7.trace tests/traces/timer_csm.trace > $@
+		tests/traces/noise_channel7.trace tests/traces/timer_csm.trace \
+		tests/traces/vibrato_pm.trace > $@
 
 $(PDX_ADPCM_REFERENCE): $(PDX_ADPCM_ORACLE)
 	@mkdir -p $(GENERATED_BUILD)

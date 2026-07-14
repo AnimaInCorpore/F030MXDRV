@@ -1,0 +1,39 @@
+# sample  register  data
+# The attack_all_carriers voice with maximum-rate saw vibrato: LFO rate
+# $ff, PM depth $7f, and PMS 7 drive the dynamic phase-step path on every
+# sample where the raw PM value is non-zero.
+0 18 ff
+0 19 ff
+0 38 70
+0 20 c7
+0 28 4c
+0 30 00
+
+# Four raw operator slots for channel 0: 0, 8, 16, 24.
+0 40 01
+0 48 01
+0 50 01
+0 58 01
+0 60 00
+0 68 00
+0 70 00
+0 78 00
+0 80 1c
+0 88 1c
+0 90 1c
+0 98 1c
+0 a0 00
+0 a8 00
+0 b0 00
+0 b8 00
+0 c0 00
+0 c8 00
+0 d0 00
+0 d8 00
+0 e0 0f
+0 e8 0f
+0 f0 0f
+0 f8 0f
+
+# Key on all four operators on channel 0.
+0 08 78

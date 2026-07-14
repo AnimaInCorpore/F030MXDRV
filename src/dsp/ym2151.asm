@@ -43,13 +43,9 @@ query_raw_operator:
         ds      1
 query_block_freq:
         ds      1
-query_block:
-        ds      1
 query_dtmul:
         ds      1
 query_detune:
-        ds      1
-query_pm_delta:
         ds      1
 
 ym_env_counter:
@@ -179,7 +175,7 @@ table_current:
 ; integer positions for the duration of the benchmark command. The phase ring
 ; must begin on a four-word boundary for m4/m5 modulo addressing.
 rt_profile_alignment_pad:
-        ds      2
+        ds      4
 rt_phase_fraction:
         ds      4
 rt_profile_checksum:
@@ -222,6 +218,22 @@ ym_lfo_noise_wave:
 ym_write_queue_times:
         ds      32
 ym_write_queue_commands:
+        ds      32
+
+; PM-independent per-operator frequency data, rebuilt together with the
+; phase-step cache. The dynamic-PM path derives each sample's step from
+; these five words instead of re-decoding registers for all 32 operators.
+        org     y:$0
+
+ym_cache_position:
+        ds      32
+ym_cache_block:
+        ds      32
+ym_cache_pms:
+        ds      32
+ym_cache_detune:
+        ds      32
+ym_cache_mul2:
         ds      32
 
 ; Phase and cache live in opposite internal memory banks so the common no-PM
@@ -1075,8 +1087,8 @@ ym_refresh_phase_done:
         rts
 
 ; Build the static phase-step array with PM temporarily forced to zero. The
-; dynamic path below still runs the complete ymfm computation whenever the LFO
-; produces a non-zero PM value.
+; same pass refreshes the per-operator PM-independent caches that
+; ym_step_from_statics combines with the live PM value each sample.
 ym_rebuild_phase_cache:
         move    x:ym_lfo_pm,a
         move    a1,x:ym_phase_cache_saved_pm
@@ -1221,34 +1233,28 @@ ym_query_phase_step:
         cmp     x0,a
         jgt     ym_query_error
 
-        tst     a
-        jeq     ym_query_raw_m1
-        move    #>1,x0
-        cmp     x0,a
-        jeq     ym_query_raw_c1
-        move    #>2,x0
-        cmp     x0,a
-        jeq     ym_query_raw_m2
-        move    #>24,a
-        jmp     ym_query_raw_add_channel
-ym_query_raw_m1:
-        clr     a
-        jmp     ym_query_raw_add_channel
-ym_query_raw_c1:
-        move    #>16,a
-        jmp     ym_query_raw_add_channel
-ym_query_raw_m2:
-        move    #>8,a
-ym_query_raw_add_channel:
-        move    x:query_channel,x0
+        ; synth_index = channel*4 + logical operator; ym_select_operator
+        ; then derives the channel and raw register slot from it.
+        move    x:query_channel,b
+        rep     #2
+        asl     b
+        move    b1,x0
         add     x0,a
-        move    a1,x:query_raw_operator
-
+        move    a1,x:synth_index
+        jsr     ym_select_operator
         jmp     ym_compute_phase_step
 
-; Common phase-step kernel. query_channel and query_raw_operator must already
-; identify the selected logical operator.
+; Common phase-step kernel. synth_index, query_channel, and
+; query_raw_operator must already identify the selected logical operator.
 ym_compute_phase_step:
+        jsr     ym_cache_operator_statics
+        jmp     ym_step_from_statics
+
+; Decode the PM-independent operator frequency data into the per-operator
+; Y caches: gap-removed position including DT2, raw block, channel PM
+; sensitivity, signed DT1 delta, and the doubled multiplier.
+ym_cache_operator_statics:
+        move    x:synth_index,n3
 
         ; block_freq = ((KC & 7f) << 6) | ((KF >> 2) & 3f).
         move    x:query_channel,n0
@@ -1271,12 +1277,26 @@ ym_compute_phase_step:
         add     x0,a
         move    a1,x:query_block_freq
 
-        ; Preserve the octave/block for the table shift.
+        ; Cache the octave/block for the table shift.
         rep     #10
         lsr     a
         move    #>7,y0
         and     y0,a1
-        move    a1,x:query_block
+        move    #ym_cache_block,r3
+        nop
+        move    a1,y:(r3+n3)
+
+        ; Cache the channel PM sensitivity beside the operator.
+        move    #ym_regdata+$38,r0
+        nop
+        move    x:(r0+n0),a
+        rep     #4
+        lsr     a
+        move    #>7,y0
+        and     y0,a1
+        move    #ym_cache_pms,r3
+        nop
+        move    a1,y:(r3+n3)
 
         ; Fetch DT2 from C0-DF and translate it to 1/64-semitone units.
         move    x:query_raw_operator,n0
@@ -1291,50 +1311,9 @@ ym_compute_phase_step:
         move    #opm_dt2_delta,r1
         nop
         move    y:(r1+n1),y1
-        move    y1,x:query_pm_delta
-
-        ; Add channel PM sensitivity to DT2. ym_lfo_pm is the signed raw PM
-        ; value after waveform depth, in the same -127..128 domain as ymfm.
-        move    x:query_channel,n0
-        move    #ym_regdata+$38,r0
-        nop
-        move    x:(r0+n0),a
-        rep     #4
-        lsr     a
-        move    #>7,y0
-        and     y0,a1
-        tst     a
-        jeq     ym_query_pm_ready
-        move    a1,b
-        move    #>6,x0
-        cmp     x0,b
-        jge     ym_query_pm_high
-
-        move    #>6,a
-        move    b1,y1
-        sub     y1,a
-        move    a1,y0
-        move    x:ym_lfo_pm,a
-        rep     y0
-        asr     a
-        jmp     ym_query_pm_add
-
-ym_query_pm_high:
-        move    b1,a
-        move    #>5,x0
-        sub     x0,a
-        move    a1,y0
-        move    x:ym_lfo_pm,a
-        rep     y0
-        asl     a
-ym_query_pm_add:
-        move    x:query_pm_delta,x0
-        add     x0,a
-        move    a1,x:query_pm_delta
-ym_query_pm_ready:
 
         ; Remove the gaps from the 4-bit OPM key code, restore the fraction,
-        ; then add the coarse detune delta.
+        ; and cache the position with the coarse detune delta folded in.
         move    x:query_block_freq,a
         rep     #6
         lsr     a
@@ -1358,75 +1337,11 @@ ym_query_pm_ready:
         move    #>$3f,y0
         and     y0,a1
         add     x0,a
-        move    x:query_pm_delta,y1
         add     y1,a
-
-        ; PM can underflow one octave or overflow two. Adjust the block with
-        ; the same boundary/clamp order as opm_key_code_to_phase_step().
-        tst     a
-        jlt     ym_query_eff_underflow
-        move    #>768,x0
-        cmp     x0,a
-        jlt     ym_query_eff_ready
-        sub     x0,a
-        cmp     x0,a
-        jlt     ym_query_eff_overflow_once
-        sub     x0,a
-        move    x:query_block,b
-        move    #>1,y1
-        add     y1,b
-        move    b1,x:query_block
-ym_query_eff_overflow_once:
-        move    x:query_block,b
-        move    #>7,x0
-        cmp     x0,b
-        jge     ym_query_phase_clamp
-        move    #>1,x0
-        add     x0,b
-        move    b1,x:query_block
-        jmp     ym_query_eff_ready
-
-ym_query_eff_underflow:
-        move    #>768,x0
-        add     x0,a
-        move    x:query_block,b
-        tst     b
-        jeq     ym_query_phase_clamp_low
-        move    #>1,x0
-        sub     x0,b
-        move    b1,x:query_block
-
-ym_query_eff_ready:
-        move    a1,n1
-        move    #opm_phase_step,r1
+        move    #ym_cache_position,r3
         nop
-        move    y:(r1+n1),a
+        move    a1,y:(r3+n3)
 
-        ; Shift the base step down according to the octave: block XOR 7.
-        move    #>7,b
-        move    x:query_block,x0
-        sub     x0,b
-        tst     b
-        jeq     ym_query_phase_shifted
-        move    b1,x0
-        rep     x0
-        lsr     a
-        jmp     ym_query_phase_shifted
-
-ym_query_phase_clamp:
-        move    #opm_phase_step+767,r1
-        nop
-        move    y:(r1),a
-        jmp     ym_query_phase_shifted
-
-ym_query_phase_clamp_low:
-        move    #opm_phase_step,r1
-        nop
-        move    y:(r1),a
-        rep     #7
-        lsr     a
-
-ym_query_phase_shifted:
         ; DT1 table index = keycode * 4 + (detune & 3).
         move    x:query_raw_operator,n0
         move    #ym_regdata+$40,r0
@@ -1453,31 +1368,148 @@ ym_query_phase_shifted:
         move    b1,n1
         jsr     ym_lookup_detune
 
-        ; DT1 bit 2 selects negative detune.
+        ; DT1 bit 2 selects negative detune; cache the signed delta.
         move    x:query_detune,b
-        jclr    #2,b1,ym_query_detune_positive
+        jclr    #2,b1,ym_cache_detune_positive
         move    x0,b
         neg     b
         move    b1,x0
-ym_query_detune_positive:
-        add     x0,a
+ym_cache_detune_positive:
+        move    #ym_cache_detune,r3
+        nop
+        move    x0,y:(r3+n3)
 
-        ; The multiplier is stored as x.1: zero means 0.5, otherwise MUL*1.
+        ; The multiplier is stored as x.1: zero means 0.5, otherwise MUL*2.
         move    x:query_dtmul,b
         move    #>$0f,y0
         and     y0,b1
         tst     b
-        jeq     ym_query_multiple_half
+        jeq     ym_cache_multiple_half
         asl     b
-        move    b1,y0
-        jmp     ym_query_apply_multiple
-ym_query_multiple_half:
-        move    #>1,y0
+        jmp     ym_cache_multiple_store
+ym_cache_multiple_half:
+        move    #>1,b
+ym_cache_multiple_store:
+        move    #ym_cache_mul2,r3
+        nop
+        move    b1,y:(r3+n3)
+        rts
 
-ym_query_apply_multiple:
-        ; B = step*mul2 doubled at the B0 end; two arithmetic shifts leave
-        ; (step*mul2) >> 1, which fits 24 bits for every OPM step/MUL pair.
+; Derive the current phase step for synth_index from the cached
+; PM-independent operator data plus the live LFO PM value. This is the
+; whole per-sample dynamic-PM path; registers are not re-decoded.
+ym_step_from_statics:
+        move    x:synth_index,n3
+        move    #ym_cache_pms,r3
+        nop
+        move    y:(r3+n3),a
+        move    #ym_cache_position,r3
+        tst     a
+        jeq     ym_step_no_pm
+
+        ; Scale ym_lfo_pm by the channel sensitivity. ym_lfo_pm is the
+        ; signed raw PM value in the same -127..128 domain as ymfm.
+        move    a1,b
+        move    #>6,x0
+        cmp     x0,b
+        jge     ym_step_pm_high
+        move    #>6,a
+        move    b1,y1
+        sub     y1,a
+        move    a1,y0
+        move    x:ym_lfo_pm,a
+        rep     y0
+        asr     a
+        jmp     ym_step_pm_add
+ym_step_pm_high:
+        move    #>5,x0
+        sub     x0,b
+        move    b1,y0
+        move    x:ym_lfo_pm,a
+        rep     y0
+        asl     a
+ym_step_pm_add:
+        move    y:(r3+n3),y1
+        add     y1,a
+        jmp     ym_step_adjust
+ym_step_no_pm:
+        move    y:(r3+n3),a
+ym_step_adjust:
+        move    #ym_cache_block,r3
+        nop
+        move    y:(r3+n3),b
+
+        ; PM can underflow one octave or overflow two. Adjust a working
+        ; block copy with the same boundary/clamp order as
+        ; opm_key_code_to_phase_step().
+        tst     a
+        jlt     ym_step_underflow
+        move    #>768,x0
+        cmp     x0,a
+        jlt     ym_step_ready
+        sub     x0,a
+        cmp     x0,a
+        jlt     ym_step_overflow_once
+        sub     x0,a
+        move    #>1,y1
+        add     y1,b
+ym_step_overflow_once:
+        move    #>7,x0
+        cmp     x0,b
+        jge     ym_step_clamp
+        move    #>1,x0
+        add     x0,b
+        jmp     ym_step_ready
+
+ym_step_underflow:
+        move    #>768,x0
+        add     x0,a
+        tst     b
+        jeq     ym_step_clamp_low
+        move    #>1,x0
+        sub     x0,b
+
+ym_step_ready:
+        move    a1,n1
+        move    #opm_phase_step,r1
+        move    b1,y0
+        move    y:(r1+n1),a
+
+        ; Shift the base step down according to the octave: block XOR 7.
+        move    #>7,b
+        sub     y0,b
+        tst     b
+        jeq     ym_step_shifted
+        move    b1,x0
+        rep     x0
+        lsr     a
+        jmp     ym_step_shifted
+
+ym_step_clamp:
+        move    #opm_phase_step+767,r1
+        nop
+        move    y:(r1),a
+        jmp     ym_step_shifted
+
+ym_step_clamp_low:
+        move    #opm_phase_step,r1
+        nop
+        move    y:(r1),a
+        rep     #7
+        lsr     a
+
+ym_step_shifted:
+        ; Add the cached signed DT1 delta, then apply the doubled
+        ; multiplier: MPY leaves step*mul2 doubled at the B0 end, so two
+        ; arithmetic shifts complete the >>1. Fits 24 bits for every OPM
+        ; step/MUL pair.
+        move    #ym_cache_detune,r3
+        nop
+        move    y:(r3+n3),x0
+        add     x0,a
+        move    #ym_cache_mul2,r3
         move    a1,x0
+        move    y:(r3+n3),y0
         mpy     x0,y0,b
         asr     b
         asr     b
@@ -2826,8 +2858,8 @@ ym_clock_phase_all:
 
         ; PM depth is zero for the common case. Fetch cached phase steps from Y
         ; while fetching phases from X, reducing phase advancement to three
-        ; instructions per operator. Any non-zero PM sample retains the full
-        ; frequency calculation below.
+        ; instructions per operator. Any non-zero PM sample combines the
+        ; per-operator static caches with the live PM value below.
         move    x:ym_lfo_pm,a
         tst     a
         jne     ym_clock_phase_dynamic
@@ -2844,8 +2876,7 @@ ym_clock_phase_dynamic:
         clr     a
         move    a1,x:synth_index
 ym_clock_phase_loop:
-        jsr     ym_select_operator
-        jsr     ym_compute_phase_step
+        jsr     ym_step_from_statics
         move    a1,b
         move    x:synth_index,n0
         move    #ym_phase,r0

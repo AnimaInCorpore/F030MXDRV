@@ -88,7 +88,7 @@ uint32_t reference_phase_step()
 }
 
 void emit_m68k_reference(const std::string &trace_path, const std::string &noise_trace_path,
-    const std::string &csm_trace_path)
+    const std::string &csm_trace_path, const std::string &vibrato_trace_path)
 {
     const auto events = load_trace(trace_path);
     oracle_interface intf;
@@ -203,6 +203,32 @@ void emit_m68k_reference(const std::string &trace_path, const std::string &noise
               << std::setfill('0') << csm_left << "\n";
     std::cout << "YM_REF_CSM_2_RIGHT equ       $" << std::hex << std::setw(6)
               << std::setfill('0') << csm_right << "\n";
+
+    // Maximum-rate saw vibrato with PMS 7 keeps the per-sample LFO PM value
+    // non-zero for most of the window, exercising the dynamic phase-step
+    // derivation rather than the cached no-PM path.
+    const auto vibrato_events = load_trace(vibrato_trace_path);
+    oracle_interface vibrato_intf;
+    inspectable_ym2151 vibrato_chip(vibrato_intf);
+    vibrato_chip.reset();
+    size_t vibrato_event = 0;
+    inspectable_ym2151::output_data vibrato_output;
+    for (uint32_t sample = 0; sample <= 63; ++sample)
+    {
+        while (vibrato_event < vibrato_events.size()
+            && vibrato_events[vibrato_event].sample == sample)
+        {
+            const auto &event = vibrato_events[vibrato_event++];
+            write_register(vibrato_chip, event.reg, event.data);
+        }
+        vibrato_chip.generate(&vibrato_output);
+    }
+    const uint32_t vibrato_left = uint32_t(vibrato_output.data[0]) & 0x00ffffff;
+    const uint32_t vibrato_right = uint32_t(vibrato_output.data[1]) & 0x00ffffff;
+    std::cout << "YM_REF_VIBRATO_63_LEFT equ   $" << std::hex << std::setw(6)
+              << std::setfill('0') << vibrato_left << "\n";
+    std::cout << "YM_REF_VIBRATO_63_RIGHT equ  $" << std::hex << std::setw(6)
+              << std::setfill('0') << vibrato_right << "\n";
 }
 
 std::vector<trace_event> load_trace(const std::string &path)
@@ -285,9 +311,9 @@ int main(int argc, char **argv)
 {
     try
     {
-        if (argc == 5 && std::string(argv[1]) == "--emit-m68k")
+        if (argc == 6 && std::string(argv[1]) == "--emit-m68k")
         {
-            emit_m68k_reference(argv[2], argv[3], argv[4]);
+            emit_m68k_reference(argv[2], argv[3], argv[4], argv[5]);
             return 0;
         }
         if (argc == 2 && std::string(argv[1]) == "--phase-hex")
@@ -303,7 +329,7 @@ int main(int argc, char **argv)
         }
 
         std::cerr << "usage:\n"
-                  << "  ym2151_oracle --emit-m68k ATTACK_TRACE NOISE_TRACE CSM_TRACE\n"
+                  << "  ym2151_oracle --emit-m68k ATTACK_TRACE NOISE_TRACE CSM_TRACE VIBRATO_TRACE\n"
                   << "  ym2151_oracle --phase-hex\n"
                   << "  ym2151_oracle --vectors TRACE SAMPLES\n";
         return 2;

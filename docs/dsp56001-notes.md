@@ -43,8 +43,14 @@ access, octave shifting, multiplier handling, and PM sensitivity. Repeating
 that static work for all 32 operators on every sample dominated the initial
 correctness-oriented kernel. The DSP now caches the no-PM increments and
 rebuilds them after writes to the register groups that can contain KC/KF,
-DT1/MUL, or DT2. A non-zero per-sample LFO PM value still selects the original
-complete calculation, so the optimization does not approximate modulation.
+DT1/MUL, or DT2. The same rebuild pass stores five PM-independent words per
+operator in internal `Y:$0000` — gap-removed position including DT2, raw
+block, channel PM sensitivity, signed DT1 delta, and doubled multiplier — so
+a non-zero per-sample LFO PM value now costs only the PM shift, boundary
+adjustment, one table read, the octave shift, and one `MPY` per operator
+instead of the complete register decode. The `tests/traces/vibrato_pm.trace`
+fixture pins this dynamic path to exact ymfm output at maximum saw-LFO rate,
+PM depth, and PMS.
 
 The 32-word cache starts at internal `Y:$0100`. This keeps phase in X and its
 increment in Y, allowing one parallel fetch followed by add/store: three
@@ -174,7 +180,7 @@ final YM program deliberately begins at `P:$0080`, leaving
 through `Dsp_BlkUnpacked`.
 
 The generated stream starts with magic `$4d584c`, followed by a section count
-and address/count/data records. The current program contains 2,824 initialized
+and address/count/data records. The current program contains 2,751 initialized
 words in five sparse P sections. After installing them, the loader replies
 `$4c4f41` and jumps through the replaced reset vector at `P:$0000`. The build
 generator rejects a bootstrap above the 512-word XBIOS limit, any overlap with
