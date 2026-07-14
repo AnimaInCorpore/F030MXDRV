@@ -73,10 +73,20 @@ protocol version in the ping reply whenever either side changes incompatibly.
 
 1. **Scaffold (done):** build both CPUs, load/ping/reset, mirror OPM registers,
    and expose the MXDRV `WriteOPM` seam.
-2. **Driver API foundation (present):** preserve the 32-call table and Trap #4
-   register convention, own bounded MDX/PDX copies, expose OPM/PCM work buffers,
-   and implement basic reset/play/stop/pause/fade/mask state. MDX track parsing,
-   command execution, and timer service are still pending.
+2. **Driver API and MDX executor (in progress):** preserve the 32-call table and
+   Trap #4 register convention, own bounded MDX/PDX copies, expose OPM/PCM work
+   buffers, and implement reset/play/stop/pause/fade/mask state. Playback now
+   validates the sequence, voice-table, and all 16 track offsets, then advances
+   bounded waits and notes one explicit tick at a time. E0/E1 tempo and raw OPM
+   writes, E2 FM voice loading/PCM bank selection, pan, PCM volume, note length,
+   E9/EA/EB repeat control flow, FM pitch/key-on/off, PCM triggers, and track
+   ends execute. Repeat targets and mutable work bytes are range checked. A
+   guarded timer-service seam exposes the exact Timer-B period in native sample
+   units. Public play now claims an otherwise-idle MFP Timer A at 1024 Hz; its
+   interrupt performs exact 16.16 phase accumulation into pending ticks, while
+   a foreground pump performs all XBIOS/DSP work. Stop restores timer/vector
+   ownership. An application event loop still needs to call that pump regularly;
+   modulation and full FM volume handling remain.
 3. **Operator kernel (present):** KC/KF, DT1, DT2, octave, multiplier, phase
    accumulation, log-sine/power conversion, ADSR, operator mapping, feedback,
    all eight algorithms, panning, and stereo sample generation now run on the
@@ -118,8 +128,9 @@ protocol version in the ping reply whenever either side changes incompatibly.
    sample exhaustion, malformed bank ranges, and deterministic two-voice mixer
    frames under Hatari. A protocol-v9 integration gate renders one 1007-frame
    PCM period on the host, uploads it, checks the DSP-mixed stereo sum, and sends
-   the block through the Falcon SSI path. MDX PCM command execution, continuous
-   mixed-block scheduling, and compatibility tests with real MDX/PDX pairs
+   the block through the Falcon SSI path. MDX PCM notes now bind tracks 8-15 to
+   PDX voices 0-7 with encoded durations and default rate/gain/pan. Continuous
+   mixed-block scheduling and compatibility tests with real MDX/PDX pairs
    remain.
 
 ## Validation strategy

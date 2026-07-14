@@ -13,10 +13,12 @@ DSP_MIX_TRANSFER_WORDS equ   1+DSP_MIX_FRAME_COUNT*2
 ; in:  d0.l = command (low 24 bits)
 ; out: d0.l = reply   (low 24 bits)
 dsp_exchange:
+        movem.l d1-d7/a0-a6,-(sp)
         move.l  d0,dsp_tx_word
         clr.l   dsp_rx_word
         Dsp_BlkUnpacked dsp_tx_word,#1,dsp_rx_word,#1
         move.l  dsp_rx_word,d0
+        movem.l (sp)+,d1-d7/a0-a6
         rts
 
 ; Queue one YM2151 write at an absolute position on the rolling native-sample

@@ -29,6 +29,8 @@ M68K_SOURCES := \
 	src/m68k/dsp_link.s \
 	src/m68k/mxdrv_core.s \
 	src/m68k/mxdrv_port.s \
+	src/m68k/mdx.s \
+	src/m68k/mdx_clock.s \
 	src/m68k/pdx.s
 M68K_OBJECTS := $(patsubst src/m68k/%.s,$(M68K_BUILD)/%.o,$(M68K_SOURCES))
 
@@ -186,6 +188,10 @@ smoke: check
 	@rg -q "Direct Transfer 0x120000" build/hatari-smoke.trace
 	@rg -q "Transfer 0x0003c0" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x01cd09" build/hatari-smoke.trace
+	@rg -q "Direct Transfer 0x01d009" build/hatari-smoke.trace
+	@rg -q "Direct Transfer 0x01d10c" build/hatari-smoke.trace
+	@rg -q "Direct Transfer 0x021a22" build/hatari-smoke.trace
+	@rg -q "Direct Transfer 0x021a33" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x0b0000" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x0e0000" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x02284b" build/hatari-smoke.trace
@@ -205,7 +211,7 @@ smoke: check
 	@rg -q "Direct Transfer 0x0c0000" build/hatari-smoke.trace
 	@rg -q "XBIOS 0x89 Dsptristate\\(0x0, 0x0\\)" build/hatari-smoke.trace
 	@rg -q "XBIOS 0x81 Unlocksnd" build/hatari-smoke.trace
-	@echo "Hatari MXDRV/DSP YM2151 + PDX ADPCM/FM mix oracle smoke test: OK"
+	@echo "Hatari MXDRV MDX/PDX + DSP YM2151 mixed-audio smoke test: OK"
 
 run: all
 	@if ! command -v hatari >/dev/null 2>&1; then \

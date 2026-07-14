@@ -1,6 +1,11 @@
         global  mxdrv_call
+        global  mxdrv_mdx_buffer
+        global  mxdrv_mdx_size
         global  mxdrv_pdx_buffer
         global  mxdrv_pdx_size
+        global  mxdrv_channel_mask
+        global  mxdrv_playing
+        global  mxdrv_paused
 
 MXDRV_MDX_CAPACITY      equ     65536
 MXDRV_PDX_CAPACITY      equ     319488
@@ -62,6 +67,7 @@ mxdrv_api_table:
         dc.w    mxdrv_api_error-mxdrv_api_table
 
 mxdrv_api_reset:
+        bsr     mxdrv_mdx_clock_stop
         clr.l   mxdrv_mdx_size
         clr.l   mxdrv_pdx_size
         clr.w   mxdrv_channel_mask
@@ -74,6 +80,7 @@ mxdrv_api_reset:
         clr.b   mxdrv_option_11
         clr.b   mxdrv_option_15
         clr.b   mxdrv_stop_mode
+        bsr     mxdrv_mdx_reset
         bsr     mxdrv_pdx_reset
         bra     mxdrv_reset
 
@@ -120,9 +127,24 @@ mxdrv_api_play:
         tst.l   mxdrv_mdx_size
         beq     mxdrv_api_error
 mxdrv_start_play:
+        bsr     mxdrv_api_stop
+        bsr     mxdrv_mdx_start
+        tst.l   d0
+        bne     mxdrv_api_error
         move.b  #1,mxdrv_playing
         clr.b   mxdrv_paused
+        bsr     mxdrv_mdx_clock_start
+        tst.l   d0
+        bne     mxdrv_start_clock_error
         moveq   #0,d0
+        rts
+
+mxdrv_start_clock_error:
+        clr.b   mxdrv_playing
+        move.b  #1,mxdrv_paused
+        bsr     mxdrv_mdx_reset
+        bsr     mxdrv_pdx_reset
+        moveq   #-1,d0
         rts
 
 mxdrv_api_play_masked:
@@ -132,8 +154,11 @@ mxdrv_api_play_masked:
         bra     mxdrv_api_error
 
 mxdrv_api_stop:
+        bsr     mxdrv_mdx_clock_stop
         clr.b   mxdrv_playing
         move.b  #1,mxdrv_paused
+        bsr     mxdrv_mdx_reset
+        bsr     mxdrv_pdx_reset
         moveq   #0,d3
 mxdrv_stop_keyoff_loop:
         moveq   #$08,d1
@@ -233,9 +258,11 @@ mxdrv_api_set_ignore_keys:
         rts
 
 mxdrv_api_get_active_mask:
-        moveq   #0,d0
-        move.w  mxdrv_channel_mask,d0
-        not.w   d0
+        bsr     mxdrv_mdx_active_mask
+        moveq   #0,d1
+        move.w  mxdrv_channel_mask,d1
+        not.w   d1
+        and.w   d1,d0
         rts
 
 mxdrv_api_option_15:

@@ -182,6 +182,176 @@ start:
         cmpi.l  #-1,d0
         bne     protocol_failed
 
+        ; Copy and start a bounded MDX image through calls $02/$04. Track 0
+        ; executes raw OPM/tempo commands and an FM note; track 8 triggers PDX
+        ; entry 0. Track 1 proves E9/EA looping and EB final-pass escape.
+        moveq   #2,d0
+        move.l  #mdx_test_song_end-mdx_test_song,d1
+        lea     mdx_test_song(pc),a1
+        bsr     mxdrv_call
+        tst.l   d0
+        bne     protocol_failed
+
+        moveq   #8,d0                  ; title displacement is still ABI-visible
+        bsr     mxdrv_call
+        move.l  d0,a0
+        cmpi.b  #'M',(a0)
+        bne     protocol_failed
+
+        moveq   #4,d0
+        bsr     mxdrv_call
+        tst.l   d0
+        bne     protocol_failed
+        bsr     mxdrv_mdx_active_mask
+        cmpi.l  #$ffff,d0
+        bne     protocol_failed
+        bsr     mxdrv_mdx_timer_period
+        cmpi.l  #896,d0                ; ($100-$c8)*16 native samples
+        bne     protocol_failed
+
+        bsr     mxdrv_mdx_timer_service
+        cmpi.l  #$0103,d0
+        bne     protocol_failed
+        bsr     mxdrv_mdx_timer_period
+        cmpi.l  #1472,d0               ; E0 $a4: ($100-$a4)*16
+        bne     protocol_failed
+        lea     mxdrv_mdx_buffer,a0
+        cmpi.b  #2,mdx_test_repeat_work-mdx_test_song(a0)
+        bne     protocol_failed
+        moveq   #$10,d0                ; raw E1, E0, KF/KC and key-on landed
+        bsr     mxdrv_call
+        move.l  d0,a0
+        cmpi.b  #$5a,$1b(a0)
+        bne     protocol_failed
+        cmpi.b  #$a4,$12(a0)
+        bne     protocol_failed
+        cmpi.b  #$14,$30(a0)
+        bne     protocol_failed
+        cmpi.b  #$00,$28(a0)
+        bne     protocol_failed
+        cmpi.b  #$78,$08(a0)
+        bne     protocol_failed
+        cmpi.b  #$c7,$20(a0)           ; E2 voice 1, pan 3, algorithm 7
+        bne     protocol_failed
+        cmpi.b  #$01,$40(a0)
+        bne     protocol_failed
+        cmpi.b  #$1f,$80(a0)
+        bne     protocol_failed
+        bsr     mxdrv_pdx_active_mask
+        cmpi.l  #1,d0
+        bne     protocol_failed
+
+        bsr     mxdrv_mdx_timer_service
+        cmpi.l  #$0102,d0
+        bne     protocol_failed
+        lea     mxdrv_mdx_buffer,a0
+        cmpi.b  #1,mdx_test_repeat_work-mdx_test_song(a0)
+        bne     protocol_failed
+        moveq   #$10,d0
+        bsr     mxdrv_call
+        move.l  d0,a0
+        tst.b   $08(a0)                ; FM duration expired and keyed off
+        bne     protocol_failed
+        cmpi.b  #$11,$1a(a0)           ; second pass returned to loop body
+        bne     protocol_failed
+
+        bsr     mxdrv_mdx_timer_service
+        tst.l   d0
+        bne     protocol_failed
+        bsr     mxdrv_pdx_active_mask
+        tst.l   d0
+        bne     protocol_failed
+        tst.b   mxdrv_mdx_error
+        bne     protocol_failed
+        moveq   #$10,d0
+        bsr     mxdrv_call
+        move.l  d0,a0
+        cmpi.b  #$33,$1a(a0)           ; EB skipped EA on the last pass
+        bne     protocol_failed
+        moveq   #$12,d0                ; stopped: paused=$01, playing=$00
+        bsr     mxdrv_call
+        cmpi.l  #$0100,d0
+        bne     protocol_failed
+        bsr     mxdrv_mdx_timer_ticks
+        cmpi.l  #3,d0
+        bne     protocol_failed
+        bsr     mxdrv_mdx_timer_service ; stopped service calls do not advance
+        tst.l   d0
+        bne     protocol_failed
+        bsr     mxdrv_mdx_timer_ticks
+        cmpi.l  #3,d0
+        bne     protocol_failed
+
+        ; A syntactically valid MDX whose EA target leaves the copied image
+        ; must retire safely instead of decrementing arbitrary host memory.
+        moveq   #2,d0
+        move.l  #mdx_bad_repeat_song_end-mdx_bad_repeat_song,d1
+        lea     mdx_bad_repeat_song(pc),a1
+        bsr     mxdrv_call
+        tst.l   d0
+        bne     protocol_failed
+        moveq   #4,d0
+        bsr     mxdrv_call
+        tst.l   d0
+        bne     protocol_failed
+        bsr     mxdrv_mdx_timer_service
+        tst.l   d0
+        bne     protocol_failed
+        tst.b   mxdrv_mdx_error
+        beq     protocol_failed
+
+        ; Public play now claims idle MFP Timer A at 1024 Hz. Its IRQ may only
+        ; accumulate pending Timer-B boundaries; foreground pumping performs
+        ; the sequencer's XBIOS/DSP traffic. Three VBLs guarantee at least one
+        ; pending tick at the default $c8 tempo without assuming exact phase.
+        moveq   #2,d0
+        move.l  #mdx_clock_song_end-mdx_clock_song,d1
+        lea     mdx_clock_song(pc),a1
+        bsr     mxdrv_call
+        tst.l   d0
+        bne     protocol_failed
+        moveq   #4,d0
+        bsr     mxdrv_call
+        tst.l   d0
+        bne     protocol_failed
+        bsr     mxdrv_mdx_clock_installed
+        cmpi.l  #1,d0
+        bne     protocol_failed
+
+        moveq   #2,d5
+.wait_mdx_clock:
+        Vsync
+        dbra    d5,.wait_mdx_clock
+        bsr     mxdrv_mdx_clock_pending
+        tst.l   d0
+        beq     protocol_failed
+        bsr     mxdrv_mdx_clock_pump
+        cmpi.l  #1,d0                  ; only the long-rest track remains
+        bne     protocol_failed
+        move.l  d1,d4
+        beq     protocol_failed
+        bsr     mxdrv_mdx_timer_ticks
+        cmp.l   d4,d0
+        bne     protocol_failed
+
+        moveq   #5,d0                  ; stop restores Timer A/vector ownership
+        bsr     mxdrv_call
+        tst.l   d0
+        bne     protocol_failed
+        bsr     mxdrv_mdx_clock_installed
+        tst.l   d0
+        bne     protocol_failed
+
+        move.l  #DSP_CMD_PING+$d10c,d0
+        bsr     dsp_exchange
+        cmp.l   #DSP_REPLY_HELLO,d0
+        bne     protocol_failed
+
+        move.l  #DSP_CMD_PING+$d009,d0
+        bsr     dsp_exchange
+        cmp.l   #DSP_REPLY_HELLO,d0
+        bne     protocol_failed
+
         move.l  #DSP_CMD_PING+$ad18,d0
         bsr     dsp_exchange
         cmp.l   #DSP_REPLY_HELLO,d0
@@ -836,6 +1006,7 @@ sound_failed:
         bra     clean_exit
 
 clean_exit:
+        bsr     mxdrv_mdx_clock_stop
         Dsp_Unlock
         Pterm0
 
@@ -911,6 +1082,106 @@ csm_trace:
         dc.b    $20,$c7,$28,$4c,$30,$00,$40,$01
         dc.b    $60,$00,$80,$ff,$a0,$00,$c0,$00,$e0,$0f
         dc.b    $10,$ff,$11,$02,$14,$81
+        even
+
+; Minimal structurally faithful MDX image. The sequence block contains the
+; voice-table displacement followed by all sixteen relative track pointers.
+mdx_test_song:
+        dc.w    0,$ffff
+        dc.w    mdx_test_sequence-mdx_test_song
+        dc.w    mdx_test_title-mdx_test_song
+mdx_test_title:
+        dc.b    'MDX executor smoke',0
+        even
+mdx_test_sequence:
+        dc.w    mdx_test_voice_table-mdx_test_sequence
+        dc.w    mdx_test_fm_track-mdx_test_sequence
+        dc.w    mdx_test_repeat_track-mdx_test_sequence
+        dcb.w   6,mdx_test_end_track-mdx_test_sequence
+        dc.w    mdx_test_pcm_track-mdx_test_sequence
+        dcb.w   7,mdx_test_end_track-mdx_test_sequence
+mdx_test_voice_table:
+        dc.b    1,$07,$00               ; ID, algorithm 7, PMS/AMS 0
+        dc.b    $01,$01,$01,$01         ; DT1/MUL
+        dc.b    $00,$00,$00,$00         ; TL
+        dc.b    $1f,$1f,$1f,$1f         ; KS/AR
+        dc.b    $00,$00,$00,$00         ; AMS/D1R
+        dc.b    $00,$00,$00,$00         ; DT2/D2R
+        dc.b    $0f,$0f,$0f,$0f         ; D1L/RR
+mdx_test_fm_track:
+        dc.b    $e2,$01                ; select the standard voice record
+        dc.b    $e1,$1b,$5a            ; raw OPM write
+        dc.b    $e0,$a4                ; tempo
+        dc.b    $80,$00                ; note 0 for one tick
+        dc.b    $f9
+mdx_test_repeat_track:
+        dc.b    $e9,$02                ; two passes
+mdx_test_repeat_work:
+        dc.b    $00                    ; mutable in-stream counter
+mdx_test_repeat_body:
+        dc.b    $e1,$1a,$11
+        dc.b    $00                    ; one-tick rest
+        dc.b    $eb
+        dc.w    mdx_test_repeat_end_offset-mdx_test_repeat_escape_after
+mdx_test_repeat_escape_after:
+        dc.b    $e1,$1a,$22            ; only the non-final pass executes this
+        dc.b    $ea
+mdx_test_repeat_end_offset:
+        dc.w    mdx_test_repeat_body-mdx_test_repeat_after_end
+mdx_test_repeat_after_end:
+        dc.b    $e1,$1a,$33            ; final-pass escape resumes here
+        dc.b    $f9
+mdx_test_pcm_track:
+        dc.b    $e3,$03                ; both outputs
+        dc.b    $e4,$08                ; unity PCM8 gain
+        dc.b    $80,$01                ; PDX entry 0 for two ticks
+        dc.b    $f9
+mdx_test_end_track:
+        dc.b    $f9
+mdx_test_song_end:
+        even
+
+; All structural offsets are valid, but track 0's EA branch target is not.
+; The executor must catch it before touching the implied counter byte.
+mdx_bad_repeat_song:
+        dc.w    0,$ffff
+        dc.w    mdx_bad_repeat_sequence-mdx_bad_repeat_song
+        dc.w    mdx_bad_repeat_title-mdx_bad_repeat_song
+mdx_bad_repeat_title:
+        dc.b    'Bad repeat',0
+        even
+mdx_bad_repeat_sequence:
+        dc.w    mdx_bad_repeat_voice-mdx_bad_repeat_sequence
+        dc.w    mdx_bad_repeat_track-mdx_bad_repeat_sequence
+        dcb.w   15,mdx_bad_repeat_end_track-mdx_bad_repeat_sequence
+mdx_bad_repeat_voice:
+        dc.b    0
+mdx_bad_repeat_track:
+        dc.b    $ea,$80,$00
+mdx_bad_repeat_end_track:
+        dc.b    $f9
+mdx_bad_repeat_song_end:
+        even
+
+; Long-rest song used to prove MFP accumulation plus foreground pumping.
+mdx_clock_song:
+        dc.w    0,$ffff
+        dc.w    mdx_clock_sequence-mdx_clock_song
+        dc.w    mdx_clock_title-mdx_clock_song
+mdx_clock_title:
+        dc.b    'Clock pump',0
+        even
+mdx_clock_sequence:
+        dc.w    mdx_clock_voice-mdx_clock_sequence
+        dc.w    mdx_clock_track-mdx_clock_sequence
+        dcb.w   15,mdx_clock_end_track-mdx_clock_sequence
+mdx_clock_voice:
+        dc.b    0
+mdx_clock_track:
+        dc.b    $7f,$f9                ; remain active for 128 timer ticks
+mdx_clock_end_track:
+        dc.b    $f9
+mdx_clock_song_end:
         even
 
 ; Standard PDX table: 96 big-endian offset/length pairs. Entry 0 is valid,

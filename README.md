@@ -10,7 +10,15 @@ division of work is:
 The current milestone is executable on TOS and under Hatari. The 68030 side now
 has the original 32-entry MXDRV call-table shape, owned MDX/PDX buffers, core
 transport state, an `OPMBuf`-compatible mirror, and a DSP-backed replacement for
-MXDRV's `WriteOPM`. Standard raw PDX banks now have validated 96-entry sample
+MXDRV's `WriteOPM`. A bounded MDX executor validates the sequence/voice table
+and all 16 track offsets, advances encoded waits and notes, loads standard FM
+voice records, performs tempo/raw OPM writes and FM key-on/off, and maps PCM
+tracks 8-15 to the eight PDX voices. E9/EA repeats and EB final-pass escape use
+the original mutable in-stream counter layout with bounds checks. A guarded
+timer-service entry reports exact YM Timer-B periods in native sample units,
+and public play connects it to an otherwise-idle MFP Timer A. Its 1024 Hz ISR
+only accumulates pending ticks; a foreground pump performs the XBIOS/DSP work
+and stop restores timer/vector ownership. Standard raw PDX banks now have validated 96-entry sample
 lookup and eight streaming decoder voices that match the X68000 MSM6258
 predictor, step, clamping, and nibble order. The host-side PCM8 layer applies
 all five playback rates, the 16 volume steps, common hardware pan, and saturating
@@ -45,9 +53,10 @@ optimization target rather than the final audio path: the current Hatari gate
 produced 5,679 fresh frames in a nominal one-second interval, versus about
 49,170 required by the codec.
 
-This is not a complete music driver yet. MDX command replay and timer service,
-binding MDX PCM commands to the PDX voices, continuous mixed-block production,
-and underrun-free live synthesis remain. PDX lookup, decoding, rate conversion,
+This is not a complete music driver yet. MDX synchronization/modulation,
+full FM volume handling, integration of the foreground clock pump into a real
+player loop, continuous mixed-block production, and underrun-free live synthesis
+remain. PDX lookup, decoding, rate conversion,
 gain, pan, eight-voice host mixing, and bounded PCM/FM output to the DAC are
 verified, but only in the explicit integration harness. The buffered SSI mode
 still supplies the
@@ -95,6 +104,11 @@ nonzero DSP-mixed stereo sum before checking
 sound locking, DSP-to-DAC matrix setup, buffered and live audio start/stop,
 rolling-clock FIFO writes during live synthesis, SSI frame-count floors,
 tristating, and sound unlock under Hatari.
+It also copies a 16-track MDX fixture through the public API, verifies E2 FM
+voice loading, E0/E1 writes, FM note duration/key-off, and a timed track-8 PDX
+trigger. The fixture also covers two-pass E9/EA repetition, EB final-pass escape,
+Timer-B period changes, rejection of an out-of-range repeat target, automatic
+MFP tick accumulation, foreground draining, and timer release on stop.
 
 The outputs are:
 
@@ -113,6 +127,8 @@ Hatari is installed. It is a test harness at this stage, not yet an MDX player.
 - `src/m68k/main.s`: Falcon loader and smoke test.
 - `src/m68k/mxdrv_core.s`: resident-independent 32-call MXDRV API foundation.
 - `src/m68k/mxdrv_port.s`: replacement seam for MXDRV's original `WriteOPM`.
+- `src/m68k/mdx.s`: bounded 16-track MDX initialization and tick executor.
+- `src/m68k/mdx_clock.s`: MFP Timer-A accumulation and foreground tick pump.
 - `src/m68k/pdx.s`: validated PDX lookup, eight MSM6258 voices, and codec mixer.
 - `src/m68k/dsp_link.s`: packed 24-bit host/DSP exchange.
 - `src/dsp/ym2151.asm`: DSP protocol and command-clocked YM2151 sample kernel.
@@ -124,6 +140,7 @@ Hatari is installed. It is a test harness at this stage, not yet an MDX player.
 - `tests/traces/timer_csm.trace`: two-sample Timer A/CSM oracle trace.
 - `docs/ym2151-ground-truth.md`: facts extracted from the vendored MAME core.
 - `docs/pdx-ground-truth.md`: PDX table and X68000 ADPCM decoding facts.
+- `docs/mdx-ground-truth.md`: MDX sequence, track, duration, and command facts.
 - `docs/dsp56001-notes.md`: constraints taken from the local Motorola manual.
 - `docs/architecture.md`: ownership, protocol, and staged port plan.
 

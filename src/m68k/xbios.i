@@ -24,6 +24,13 @@
         addq.l  #2,sp
         endm
 
+        macro   Supexec routine
+        pea     \1
+        move.w  #38,-(sp)
+        trap    #14
+        addq.l  #6,sp
+        endm
+
         macro   Locksnd
         move.w  #128,-(sp)
         trap    #14
