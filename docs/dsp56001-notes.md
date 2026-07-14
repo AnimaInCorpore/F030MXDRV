@@ -36,6 +36,26 @@ These constraints are part of correctness, not just optimization: violating
 either the address delay or zero-count behavior produces valid assembly with
 incorrect chip state at runtime.
 
+## First synthesis hot-path pass
+
+Deriving one OPM phase increment includes key-code gap removal, DT1/DT2 table
+access, octave shifting, multiplier handling, and PM sensitivity. Repeating
+that static work for all 32 operators on every sample dominated the initial
+correctness-oriented kernel. The DSP now caches the no-PM increments and
+rebuilds them after writes to the register groups that can contain KC/KF,
+DT1/MUL, or DT2. A non-zero per-sample LFO PM value still selects the original
+complete calculation, so the optimization does not approximate modulation.
+
+The 32-word cache starts at internal `Y:$0100`. This keeps phase in X and its
+increment in Y, allowing one parallel fetch followed by add/store: three
+instructions per operator in the common no-PM path. It also avoids external
+`Y:$0200`, which overlaps the external program address range under the Falcon
+memory reservation used by this executable. The output path separately skips
+four-operator evaluation when all four envelopes are `$3ff`, while explicitly
+clocking that channel's next feedback input to zero. Released envelopes already
+at `$3ff` bypass rate derivation until a later key-on makes them active again.
+Phase, key edges, feedback history, LFO/noise, and timers continue to clock.
+
 ## Falcon SSI staging path
 
 The bounded audio probe configures SSI control A as `$4100`: 16-bit words and

@@ -19,7 +19,11 @@ semantics, CSM keying, and the 64-clock busy flag. Generated tables and expected
 tone/noise/CSM samples come mechanically from the vendored ymfm implementation.
 Packed immutable tables now live in the 68030 executable and are uploaded during
 DSP bootstrap, leaving enough of TOS 4.02's loader budget for the first Falcon
-audio path.
+audio path. The first cycle-oriented pass caches all 32 unmodulated phase
+increments across register writes in internal Y RAM, advances them with
+parallel X/Y fetches, and retains the full frequency calculation only on
+samples with non-zero phase modulation. Terminal release envelopes and fully
+silent channels also bypass work that cannot affect chip state or output.
 
 That path pre-renders one exact 1280-native-sample/1007-codec-frame resampling
 period on the DSP, replays the stereo block through 16-bit SSI at 49.17 kHz, and

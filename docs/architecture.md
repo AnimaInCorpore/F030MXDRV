@@ -76,9 +76,13 @@ protocol version in the ping reply whenever either side changes incompatibly.
    to the DAC without handshaking, validates the transmitted frame count, stops
    and tristates SSI, and unlocks sound. The current scalar YM kernel cannot
    synthesize at codec cadence (Hatari measured only 3,241 fresh frames in a
-   three-second direct-stream experiment), so cycle optimization and a bounded
-   register FIFO are required before the pre-rendered block can be replaced by
-   continuous live synthesis.
+   three-second direct-stream experiment). The first optimization pass now
+   caches static phase increments, reduces the no-PM phase loop to parallel
+   phase/cache fetch plus add/store, and bypasses terminal envelopes and fully
+   silent channels without changing the exact sample vectors. More operator
+   specialization, cycle measurement, and a bounded register FIFO are still
+   required before the pre-rendered block can be replaced by continuous live
+   synthesis.
 6. **PCM/PDX:** add the X68000 ADPCM path and mixer, then compatibility tests
    for real MDX/PDX material.
 

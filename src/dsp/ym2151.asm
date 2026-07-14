@@ -112,6 +112,13 @@ ym_timer_b_counter:
 ym_timer_b_phase:
         ds      1
 
+; The no-PM phase increments are expensive to derive from the OPM key-code,
+; detune, and multiplier tables. Keep a copy across samples and rebuild it only
+; after a register write that can change frequency. ym_lfo_pm is saved while
+; rebuilding so protocol queries still observe the current modulation phase.
+ym_phase_cache_saved_pm:
+        ds      1
+
 ; Falcon SSI output state. The codec's 25.175 MHz / 4 / 128 rate is
 ; 49,169.921875 Hz, so 62.5 kHz native OPM time advances by exactly 1280/1007
 ; samples per codec frame.
@@ -165,6 +172,15 @@ table_slots:
         ds      1
 table_current:
         ds      1
+
+; Phase and cache live in opposite internal memory banks so the common no-PM
+; clock path can fetch both in one DSP instruction cycle. External Y below the
+; reserved table boundary aliases external program RAM on the Falcon, so the
+; small cache deliberately stays in the 56001's internal Y RAM.
+        org     y:$100
+
+ym_phase_step_cache:
+        ds      32
 
 ; -----------------------------------------------------------------------------
 ; Program
@@ -249,12 +265,14 @@ command_ping:
 
 command_write:
         jsr     ym_write_packed
+        jsr     ym_refresh_phase_cache
         move    #>DSP_REPLY_OK,a
         jsr     send_reply
         jmp     command_loop
 
 command_reset:
         jsr     ym_reset
+        jsr     ym_rebuild_phase_cache
         move    #>DSP_REPLY_OK,a
         jsr     send_reply
         jmp     command_loop
@@ -326,6 +344,7 @@ command_load_tables:
 command_load_tables_loop:
         jsr     ym_expand_tables
         jsr     ym_reset
+        jsr     ym_rebuild_phase_cache
         move    #>DSP_REPLY_OK,a
         jsr     send_reply
         jmp     command_loop
@@ -560,6 +579,62 @@ ym_write_store:
         jsr     ym_write_keyon
 
 ym_write_done:
+        rts
+
+; Rebuild cached increments for the register groups containing channel KC/KF
+; ($28-$37), operator DT1/MUL ($40-$5f), and DT2 ($c0-$df). The compact masks
+; also admit the adjacent $20-$27 and $38-$3f controls; an occasional harmless
+; rebuild costs less loader space than exact range dispatch. Rebuilding the full
+; 32-operator array keeps the sample loop small, and writes are sparse compared
+; with the 62.5 kHz native sample clock.
+ym_refresh_phase_cache:
+        move    x:last_command,a
+        move    #>$00ff00,y0
+        and     y0,a1
+        rep     #8
+        lsr     a
+
+        move    a1,b
+        move    #>$e0,y0
+        and     y0,a1
+        move    #>$20,x0
+        cmp     x0,a
+        jeq     ym_rebuild_phase_cache
+
+        move    b1,a
+        move    #>$60,y0
+        and     y0,a1
+        move    #>$40,x0
+        cmp     x0,a
+        jeq     ym_rebuild_phase_cache
+ym_refresh_phase_done:
+        rts
+
+; Build the static phase-step array with PM temporarily forced to zero. The
+; dynamic path below still runs the complete ymfm computation whenever the LFO
+; produces a non-zero PM value.
+ym_rebuild_phase_cache:
+        move    x:ym_lfo_pm,a
+        move    a1,x:ym_phase_cache_saved_pm
+        clr     a
+        move    a1,x:ym_lfo_pm
+        move    a1,x:synth_index
+        move    #ym_phase_step_cache,r2
+ym_rebuild_phase_loop:
+        jsr     ym_select_operator
+        jsr     ym_compute_phase_step
+        move    a1,y:(r2)+
+
+        move    x:synth_index,a
+        move    #>1,x0
+        add     x0,a
+        move    a1,x:synth_index
+        move    #>32,x0
+        cmp     x0,a
+        jlt     ym_rebuild_phase_loop
+
+        move    x:ym_phase_cache_saved_pm,a
+        move    a1,x:ym_lfo_pm
         rts
 
 ; Register 14 controls Timer A/B load and status plus CSM. Mode writes only
@@ -1655,6 +1730,24 @@ ym_sustain_target:
 
 ; Clock one operator envelope on an envelope tick.
 ym_clock_envelope:
+        ; A released operator at maximum attenuation is a fixed point. Avoid
+        ; selecting registers and looking up a rate that can no longer change
+        ; its state; key-on processing will make it active again first.
+        move    x:synth_index,n0
+        move    #ym_envelope,r0
+        nop
+        move    x:(r0+n0),b
+        move    #>$3ff,x0
+        cmp     x0,b
+        jne     ym_env_active
+        move    #ym_envelope_state,r0
+        nop
+        move    x:(r0+n0),a
+        move    #>4,x0
+        cmp     x0,a
+        jeq     ym_env_done
+
+ym_env_active:
         jsr     ym_select_operator
         move    x:synth_index,n0
         move    #ym_envelope,r0
@@ -1984,6 +2077,33 @@ ym_output_channel:
         rep     #2
         asl     a
         move    a1,x:synth_index
+
+        ; Four fully attenuated operators produce exactly zero, including the
+        ; channel-7 noise substitution. Keep the feedback input clocked to zero
+        ; but bypass the expensive algorithm, sine, power, and AM calculations.
+        move    #ym_envelope,x0
+        add     x0,a
+        move    a1,r0
+        nop
+        move    x:(r0)+,a
+        move    x:(r0)+,x0
+        add     x0,a
+        move    x:(r0)+,x0
+        add     x0,a
+        move    x:(r0),x0
+        add     x0,a
+        move    #>$ffc,x0
+        cmp     x0,a
+        jne     ym_output_channel_active
+
+        move    x:synth_channel,n0
+        move    #ym_feedback_in,r0
+        nop
+        clr     a
+        move    a1,x:(r0+n0)
+        rts
+
+ym_output_channel_active:
         jsr     ym_compute_am_offset
 
         ; Operator 1 feedback uses the two prior outputs.
@@ -2275,6 +2395,23 @@ ym_clock_envelope_loop:
 ym_clock_phase_all:
         jsr     ym_clock_noise_lfo
 
+        ; PM depth is zero for the common case. Fetch cached phase steps from Y
+        ; while fetching phases from X, reducing phase advancement to three
+        ; instructions per operator. Any non-zero PM sample retains the full
+        ; frequency calculation below.
+        move    x:ym_lfo_pm,a
+        tst     a
+        jne     ym_clock_phase_dynamic
+        move    #ym_phase,r0
+        move    #ym_phase_step_cache,r4
+        do      #32,ym_clock_phase_cached
+        move    x:(r0),a y:(r4)+,y1
+        add     y1,a
+        move    a1,x:(r0)+
+ym_clock_phase_cached:
+        jmp     ym_clock_phase_complete
+
+ym_clock_phase_dynamic:
         clr     a
         move    a1,x:synth_index
 ym_clock_phase_loop:
@@ -2297,6 +2434,7 @@ ym_clock_phase_loop:
         cmp     x0,a
         jlt     ym_clock_phase_loop
 
+ym_clock_phase_complete:
         clr     a
         move    a1,x:ym_last_left
         move    a1,x:ym_last_right
