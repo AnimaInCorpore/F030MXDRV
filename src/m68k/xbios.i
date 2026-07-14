@@ -1,4 +1,4 @@
-; Minimal GEMDOS/XBIOS bindings used by the scaffold.
+; Minimal GEMDOS/XBIOS bindings used by the Falcon host.
 
         macro   Cconin
         move.w  #1,-(sp)

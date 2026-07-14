@@ -24,6 +24,7 @@ YM2151_VECTORS := $(REFERENCE_BUILD)/attack_all_carriers.tsv
 M68K_SOURCES := \
 	src/m68k/main.s \
 	src/m68k/dsp_link.s \
+	src/m68k/mxdrv_core.s \
 	src/m68k/mxdrv_port.s
 M68K_OBJECTS := $(patsubst src/m68k/%.s,$(M68K_BUILD)/%.o,$(M68K_SOURCES))
 
@@ -65,9 +66,9 @@ $(YM2151_ORACLE): tools/ym2151_oracle.cpp $(YMFM_SOURCE)/ymfm_opm.cpp \
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -std=c++17 -O2 -I$(YMFM_SOURCE) \
 		tools/ym2151_oracle.cpp $(YMFM_SOURCE)/ymfm_opm.cpp -o $@
 
-$(YM2151_REFERENCE): $(YM2151_ORACLE)
+$(YM2151_REFERENCE): $(YM2151_ORACLE) tests/traces/attack_all_carriers.trace
 	@mkdir -p $(GENERATED_BUILD)
-	$(YM2151_ORACLE) --emit-m68k > $@
+	$(YM2151_ORACLE) --emit-m68k tests/traces/attack_all_carriers.trace > $@
 
 $(YM2151_TABLES): tools/generate_ym2151_tables.py $(YMFM_SOURCE)/ymfm_fm.ipp
 	@mkdir -p $(GENERATED_BUILD)
@@ -131,13 +132,19 @@ smoke: check
 		--trace-file build/hatari-smoke.trace \
 		--trace gemdos,dsp_host_interface,xbios \
 		$(RELEASE_DIR)/f030mxdrv.tos
-	@rg -q "Transfer 0x4d5802" build/hatari-smoke.trace
+	@rg -q "Transfer 0x4d5803" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x021b00" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x050000" build/hatari-smoke.trace
 	@phase=$$($(YM2151_ORACLE) --phase-hex); \
 		rg -q "Transfer $$phase" build/hatari-smoke.trace
-	@rg -q "Transfer 0x000000" build/hatari-smoke.trace
-	@echo "Hatari DSP protocol/register/ymfm phase-oracle smoke test: OK"
+	@rg -q "Direct Transfer 0x070000" build/hatari-smoke.trace
+	@rg -q "Transfer 0x0001ff" build/hatari-smoke.trace
+	@rg -q "Transfer 0x000014" build/hatari-smoke.trace
+	@rg -q "Transfer 0x0029e0" build/hatari-smoke.trace
+	@rg -q "Transfer 0x006b40" build/hatari-smoke.trace
+	@rg -q "Transfer 0xffe520" build/hatari-smoke.trace
+	@rg -q "Direct Transfer 0x01c0de" build/hatari-smoke.trace
+	@echo "Hatari MXDRV/DSP ymfm sample-oracle smoke test: OK"
 
 run: all
 	@if ! command -v hatari >/dev/null 2>&1; then \

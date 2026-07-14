@@ -50,7 +50,7 @@ status are bits 0 and 1.
 | `e0-ff` | sustain level and release rate |
 
 ymfm keeps PM depth in an internal shadow at `1a`; direct writes to `1a` are
-ignored. The scaffold already implements this detail in its register image.
+ignored. The DSP core implements this detail in its register image.
 Reset clears all 256 registers, then sets `20-27` to `c0` so both outputs are
 enabled by default.
 
@@ -71,11 +71,14 @@ four key-code bits, and six key-fraction bits form a 13-bit value. DT1, DT2,
 multiplier, LFO PM, key scaling, and envelope rates must remain in the same
 integer domains as ymfm until the final DSP fixed-point conversion is defined.
 
-The current phase kernel mechanically imports ymfm's 768-entry phase-step and
-128-entry DT1 tables at build time. It removes the gaps from OPM key codes,
-applies the DT2 deltas `[0, 384, 500, 608]`, handles octave overflow/clamping,
-adds signed DT1, and applies the x.1 multiplier (`MUL=0` means 0.5). Protocol
-command `05 cc oo` exposes this intermediate result for exact conformance tests.
+The build mechanically imports ymfm's phase-step, DT1, log-sine, power, and
+envelope-increment tables. The larger phase and envelope tables are
+nibble-packed in the `.lod` and expanded exactly at DSP startup to stay within
+the TOS 4.02 loader's practical record-size limit. The frequency path removes
+the gaps from OPM key codes, applies the DT2 deltas `[0, 384, 500, 608]`, handles
+octave overflow/clamping, adds signed DT1, and applies the x.1 multiplier
+(`MUL=0` means 0.5). Protocol commands `05 cc oo` and `07 00 ii` expose phase
+and envelope intermediates for exact conformance tests.
 
 The LFO uses 256-entry saw, square, triangle, or noise waveforms, a 4.4-style
 rate, separate 7-bit AM/PM depth, channel sensitivities, and per-operator AM
@@ -89,8 +92,8 @@ its existing debug operator state. It is linked directly with `ymfm_opm.cpp`;
 there is no independent host reimplementation of the chip math. The build uses
 it in two ways:
 
-- `--emit-m68k` produces the expected phase-step constant included by the TOS
-  smoke program;
+- `--emit-m68k TRACE` produces the expected phase-step and stereo checkpoint
+  constants included by the TOS smoke program;
 - `--vectors TRACE SAMPLES` produces stereo output plus phase, phase step,
   envelope attenuation, and envelope state for all four channel operators.
 

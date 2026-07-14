@@ -3,12 +3,22 @@
         global  mxdrv_reset
         global  mxdrv_write_ym2151
         global  mxdrv_query_phase_step
+        global  mxdrv_clock_sample
+        global  mxdrv_query_right
+        global  mxdrv_query_envelope
+        global  mxdrv_opm_buffer
 
         text
 
 ; Reset the DSP-owned YM2151 core.
 ; out: d0.l = DSP reply
 mxdrv_reset:
+        lea     mxdrv_opm_buffer,a0
+        moveq   #0,d0
+        move.w  #255,d3
+.clear_opm:
+        move.b  d0,(a0)+
+        dbra    d3,.clear_opm
         move.l  #DSP_CMD_RESET,d0
         bra     dsp_exchange
 
@@ -16,9 +26,11 @@ mxdrv_reset:
 ; in:  d1.b = YM2151 register, d2.b = data (original MXDRV convention)
 ; out: d0.l = DSP reply
 ;
-; The original routine also mirrors into OPMBuf. The recreated driver should
-; retain that mirror before calling here so MXDRV call $10 stays compatible.
 mxdrv_write_ym2151:
+        moveq   #0,d0
+        move.b  d1,d0
+        lea     mxdrv_opm_buffer,a0
+        move.b  d2,(a0,d0.w)           ; MXDRV call $10-compatible mirror
         moveq   #0,d0
         move.b  d1,d0
         lsl.l   #8,d0
@@ -36,5 +48,30 @@ mxdrv_query_phase_step:
         move.b  d2,d0
         ori.l   #DSP_CMD_QUERY_PHASE,d0
         bra     dsp_exchange
+
+; Advance the DSP-owned YM2151 by one native 62.5 kHz sample.
+; out: d0.l = signed left sample in the low 24 bits
+mxdrv_clock_sample:
+        move.l  #DSP_CMD_CLOCK,d0
+        bra     dsp_exchange
+
+; Fetch the right half of the most recently generated sample.
+; out: d0.l = signed right sample in the low 24 bits
+mxdrv_query_right:
+        move.l  #DSP_CMD_QUERY_RIGHT,d0
+        bra     dsp_exchange
+
+; Fetch one logical operator's native envelope attenuation (0-1023).
+; in:  d1.b = logical operator index (channel*4 + operator)
+mxdrv_query_envelope:
+        moveq   #0,d0
+        move.b  d1,d0
+        ori.l   #DSP_CMD_QUERY_ENV,d0
+        bra     dsp_exchange
+
+        bss
+
+mxdrv_opm_buffer:
+        ds.b    256
 
         end

@@ -12,22 +12,26 @@ routine receives the register in `d1.b` and data in `d2.b`, mirrors the byte in
 `OPMBuf`, then writes the X68000 OPM ports. `src/m68k/mxdrv_port.s` preserves
 those input conventions and replaces the hardware write with one DSP word.
 
-## Host/DSP protocol v2
+## Host/DSP protocol v3
 
 Every transport unit is one DSP/host 24-bit word. The upper byte is an opcode.
 
 | Word | Meaning | Reply |
 | --- | --- | --- |
-| `01 00 00` | ping/protocol query | `4d 58 02` (`MX`, version 2) |
+| `01 00 00` | ping/protocol query | `4d 58 03` (`MX`, version 3) |
 | `02 rr dd` | write YM2151 register `rr = dd` | `00 00 00` |
 | `03 00 00` | reset YM2151 state | `00 00 00` |
+| `04 00 00` | clock one native 62.5 kHz sample | signed left sample |
 | `05 cc oo` | query phase step for channel `cc`, logical operator `oo` | 20-bit phase step |
+| `06 00 00` | query the last generated right sample | signed right sample |
+| `07 00 ii` | query logical operator `ii` | 10-bit envelope attenuation |
 | anything else | unsupported command | `ff ff ff` |
 
-The synchronous acknowledgement intentionally provides back-pressure. It makes
-the first integration deterministic and avoids reproducing the physical
-YM2151's busy pin in the transport. A bounded write FIFO/batch command should
-replace per-write acknowledgements once the replay loop is running.
+The synchronous acknowledgement intentionally provides back-pressure. It keeps
+conformance replay deterministic and avoids reproducing the physical YM2151's
+busy pin in the transport. Command `04` is a testable sample clock, not the
+eventual real-time audio path. A bounded write FIFO plus an SSI-driven synthesis
+loop should replace per-write/per-sample exchanges once playback is running.
 
 The constants are duplicated in `src/m68k/protocol.i` and
 `src/dsp/protocol.inc` because the two assemblers do not share syntax. Keep the
@@ -35,17 +39,21 @@ protocol version in the ping reply whenever either side changes incompatibly.
 
 ## Stages
 
-1. **Scaffold (present):** build both CPUs, load/ping/reset, mirror OPM
-   registers, expose the MXDRV `WriteOPM` seam, and compare a DSP phase step
-   exactly against the native ymfm oracle under Hatari.
-2. **Driver core:** lift the resident/trap-independent portions of MXDRV into
-   the new 68030 build, keep its 32-call API shape, and redirect all OPM writes.
-3. **Operator kernel (phase started):** extend the present KC/KF, DT1, DT2,
-   octave, and multiplier kernel with phase accumulation, log-sine/attenuation,
-   envelope, operator mapping, feedback, and eight algorithms in 24-bit DSP
-   fixed point. Validate every boundary against the native ymfm oracle.
-4. **Chip globals:** add key-on semantics, LFO waveforms, AM/PM, timers, CSM,
-   channel 7 noise, pan, and YM3012 10.3-float round-trip behavior.
+1. **Scaffold (done):** build both CPUs, load/ping/reset, mirror OPM registers,
+   and expose the MXDRV `WriteOPM` seam.
+2. **Driver API foundation (present):** preserve the 32-call table and Trap #4
+   register convention, own bounded MDX/PDX copies, expose OPM/PCM work buffers,
+   and implement basic reset/play/stop/pause/fade/mask state. MDX track parsing,
+   command execution, and timer service are still pending.
+3. **Operator kernel (present):** KC/KF, DT1, DT2, octave, multiplier, phase
+   accumulation, log-sine/power conversion, ADSR, operator mapping, feedback,
+   all eight algorithms, panning, and stereo sample generation now run on the
+   DSP. The checked attack trace is bit-exact with ymfm at the phase, envelope,
+   and rounded-output boundaries; a second sweep covers all eight algorithms
+   with operator feedback enabled.
+4. **Chip globals (partial):** register reset, key edges, pan, and YM3012
+   10.3-float round-trip behavior are implemented. LFO waveforms, AM/PM, timers,
+   CSM, busy/status behavior, and channel 7 noise remain.
 5. **Falcon audio:** clock the DSP synthesis kernel, resample the X68000's
    62.5 kHz OPM stream for a supported Falcon codec rate, and transmit stereo
    through SSI/crossbar. Restore all locked audio/DSP resources on exit.
@@ -65,5 +73,5 @@ traces can be compared at these boundaries:
 - stereo output before and after YM3012 rounding;
 - timer/status events in source-clock units.
 
-Exact equality is expected for integer state. Audio comparisons should allow
-only the explicitly documented fixed-point/resampling error.
+Exact equality is expected for integer state and pre-resampling native samples.
+Only the future resampling stage may introduce explicitly documented error.
