@@ -160,11 +160,12 @@ smoke: check
 		--trace-file build/hatari-smoke.trace \
 		--trace gemdos,dsp_host_interface,xbios \
 		$(RELEASE_DIR)/f030mxdrv.tos
-	@rg -q "Transfer 0x4d5808" build/hatari-smoke.trace
+	@rg -q "Transfer 0x4d5809" build/hatari-smoke.trace
 	@rg -q "Transfer 0x000080" build/hatari-smoke.trace
 	@rg -q "Transfer 0x01fc00" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x021b00" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x01ad0c" build/hatari-smoke.trace
+	@rg -q "Direct Transfer 0x01ad18" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x050000" build/hatari-smoke.trace
 	@phase=$$($(YM2151_ORACLE) --phase-hex); \
 		rg -q "Transfer $$phase" build/hatari-smoke.trace
@@ -181,6 +182,10 @@ smoke: check
 	@rg -q "XBIOS 0x80 Locksnd" build/hatari-smoke.trace
 	@rg -q "XBIOS 0x89 Dsptristate\\(0x1, 0x0\\)" build/hatari-smoke.trace
 	@rg -q "XBIOS 0x8B Devconnect\\(1, 0x8, 0, 1, 1\\)" build/hatari-smoke.trace
+	@rg -q "Direct Transfer 0x110000" build/hatari-smoke.trace
+	@rg -q "Direct Transfer 0x120000" build/hatari-smoke.trace
+	@rg -q "Transfer 0x0003c0" build/hatari-smoke.trace
+	@rg -q "Direct Transfer 0x01cd09" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x0b0000" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x0e0000" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x02284b" build/hatari-smoke.trace
@@ -200,7 +205,7 @@ smoke: check
 	@rg -q "Direct Transfer 0x0c0000" build/hatari-smoke.trace
 	@rg -q "XBIOS 0x89 Dsptristate\\(0x0, 0x0\\)" build/hatari-smoke.trace
 	@rg -q "XBIOS 0x81 Unlocksnd" build/hatari-smoke.trace
-	@echo "Hatari MXDRV/DSP YM2151 + PDX ADPCM oracle smoke test: OK"
+	@echo "Hatari MXDRV/DSP YM2151 + PDX ADPCM/FM mix oracle smoke test: OK"
 
 run: all
 	@if ! command -v hatari >/dev/null 2>&1; then \

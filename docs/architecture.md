@@ -12,13 +12,13 @@ routine receives the register in `d1.b` and data in `d2.b`, mirrors the byte in
 `OPMBuf`, then writes the X68000 OPM ports. `src/m68k/mxdrv_port.s` preserves
 those input conventions and replaces the hardware write with one DSP word.
 
-## Host/DSP protocol v8
+## Host/DSP protocol v9
 
 Every transport unit is one DSP/host 24-bit word. The upper byte is an opcode.
 
 | Word | Meaning | Reply |
 | --- | --- | --- |
-| `01 00 00` | ping/protocol query | `4d 58 08` (`MX`, version 8) |
+| `01 00 00` | ping/protocol query | `4d 58 09` (`MX`, version 9) |
 | `02 rr dd` | write YM2151 register `rr = dd`, including during either SSI mode | `00 00 00` |
 | `03 00 00` | reset YM2151 state | `00 00 00` |
 | `04 00 00` | clock one native 62.5 kHz sample | signed left sample |
@@ -34,6 +34,8 @@ Every transport unit is one DSP/host 24-bit word. The upper byte is an opcode.
 | `0e tt tt` + `02 rr dd` | queue `rr = dd` at absolute rolling native time `tttt` | `00 00 00`, or error if invalid/full/out of order |
 | `0f 00 00` | query the rolling 16-bit native-sample clock | unsigned 16-bit time |
 | `10 00 00` | start experimental direct synthesis and SSI transmit | `00 00 00` before transmit starts |
+| `11 00 00` + 2014 words | upload 1007 interleaved stereo PCM frames, mix with a new FM period, and start bounded SSI | `00 00 00` before transmit starts |
+| `12 00 00` | query the first nonzero mixed stereo probe | signed left+right sample sum |
 | anything else | unsupported command | `ff ff ff` |
 
 The synchronous acknowledgement intentionally provides back-pressure and keeps
@@ -47,15 +49,20 @@ FIFO, so the host can refill slots after earlier entries are consumed. The
 16-bit clock wraps naturally; entries must be no more than 32,767 samples
 ahead. Command `0f` exposes the current scheduling position to the host.
 
-Command `0a` is the one bootstrap exception to the single-word transaction
-shape: it consumes exactly 329 following host words before replying. Moving
+Commands `0a` and `11` are the exceptions to the single-word transaction
+shape. Command `0a` consumes exactly 329 following host words before replying;
+command `11` consumes 1007 interleaved signed left/right frame pairs, renders
+the matching FM period, saturates PCM+FM to signed 16-bit, and then starts the
+same bounded SSI loop used by command `0b`. Command `12` returns the sum of the
+first nonzero mixed left/right pair as a conformance probe retained after the
+stream stops. Moving
 those initialized records into the host executable recovered about 1 KiB from
-the TOS 4.02 converted-loader limit. Both audio modes accept synchronous command
+the TOS 4.02 converted-loader limit. All audio modes accept synchronous command
 `02` writes, `0e` transactions, `0f` queries, and command `0c`. In bounded mode,
 the repeated block was rendered before SSI starts, so later writes cannot alter
 that block. In direct mode, the phase cache is refreshed immediately and queued
 writes are consumed as fresh frames advance native time. The rolling clock is
-not reset by either start command, so buffered and live sessions share one
+not reset by any start command, so buffered and live sessions share one
 continuous event timeline; only chip reset returns it to zero.
 
 The constants are duplicated in `src/m68k/protocol.i` and
@@ -91,20 +98,29 @@ protocol version in the ping reply whenever either side changes incompatibly.
    phase/cache fetch plus add/store, and bypasses terminal envelopes and fully
    silent channels without changing the exact sample vectors. The SSI loop also
    services synchronous writes through the real MXDRV `WriteOPM` seam and
-   preserves them for the next render. Protocol v8 adds a checked, refillable
+   preserves them for the next render. Protocol v9 adds a checked, refillable
    32-entry ring FIFO, a queryable rolling native clock, and an experimental
    direct SSI mode that consumes exact sample-boundary writes while generating
-   fresh frames. The Hatari smoke run generated 5,679 fresh frames during its
+   fresh frames. It also accepts one exact host-rendered PCM period, combines it
+   with a newly rendered FM period on the DSP, and replays the saturated stereo
+   result through SSI. The Hatari smoke run generated 5,679 fresh frames during its
    nominal one-second direct probe, about 11.5% of codec cadence. More operator
    specialization and cycle measurement are still required before this mode is
    underrun-free on hardware and can replace the pre-rendered transport proof.
-6. **PCM/PDX (in progress):** standard raw PDX banks now have checked lookup
-   for all 96 offset/length entries and a streaming single-voice MSM6258 decoder.
-   A generated oracle checks low-nibble-first input, predictor and step updates,
-   10-bit clamping, 16-bit output scaling, sample exhaustion, empty entries, and
-   malformed bank ranges under Hatari. MDX PCM commands, playback-rate
-   conversion, pan/volume, voice allocation, FM/PCM mixing, and compatibility
-   tests with real MDX/PDX pairs remain.
+   The converted DSP image is currently 8,148 of the 8,192-byte loader budget,
+   so further DSP features also require reclaiming initialized image space.
+6. **PCM/PDX (in progress):** standard raw PDX banks have checked lookup for all
+   96 offset/length entries and eight independent streaming MSM6258 decoders. A
+   codec-rate host mixer implements the five PCM8 playback clocks with exact
+   rational phase accumulation, all 16 two-decibel volume steps, common PCM8
+   pan, voice start/stop and active masks, and signed 16-bit saturation. A
+   generated oracle checks low-nibble-first decoding, predictor and step state,
+   sample exhaustion, malformed bank ranges, and deterministic two-voice mixer
+   frames under Hatari. A protocol-v9 integration gate renders one 1007-frame
+   PCM period on the host, uploads it, checks the DSP-mixed stereo sum, and sends
+   the block through the Falcon SSI path. MDX PCM command execution, continuous
+   mixed-block scheduling, and compatibility tests with real MDX/PDX pairs
+   remain.
 
 ## Validation strategy
 

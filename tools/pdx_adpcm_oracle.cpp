@@ -12,6 +12,13 @@ constexpr std::array<std::uint8_t, 8> kEncoded = {
     0x70, 0xf1, 0x27, 0x8e, 0x45, 0xab, 0xcd, 0xef,
 };
 constexpr std::array<int, 8> kIndexShift = {-1, -1, -1, -1, 2, 4, 6, 8};
+constexpr std::array<int, 5> kRatePhase = {240, 320, 480, 640, 960};
+constexpr std::array<int, 16> kVolumeQ12 = {
+    649, 817, 1029, 1295, 1631, 2053, 2584, 3254,
+    4096, 5157, 6492, 8173, 10289, 12953, 16306, 20529,
+};
+constexpr int kPhaseDenominator = 3021;
+constexpr std::size_t kMixFrames = 20;
 
 class Decoder {
 public:
@@ -33,6 +40,42 @@ private:
     int step_ = 0;
 };
 
+class Stream {
+public:
+    std::int16_t next() {
+        const std::uint8_t byte = kEncoded[nibble_ / 2];
+        const unsigned shift = (nibble_++ & 1) ? 4 : 0;
+        return decoder_.clock((byte >> shift) & 0x0f);
+    }
+
+private:
+    Decoder decoder_;
+    std::size_t nibble_ = 0;
+};
+
+class Voice {
+public:
+    Voice(unsigned rate, unsigned volume)
+        : phase_increment_(kRatePhase[rate]), gain_(kVolumeQ12[volume]), current_(stream_.next()) {}
+
+    std::int32_t mix_frame() {
+        const std::int32_t result = (static_cast<std::int32_t>(current_) * gain_) >> 12;
+        phase_ += phase_increment_;
+        if (phase_ >= kPhaseDenominator) {
+            phase_ -= kPhaseDenominator;
+            current_ = stream_.next();
+        }
+        return result;
+    }
+
+private:
+    Stream stream_;
+    int phase_ = 0;
+    int phase_increment_;
+    int gain_;
+    std::int16_t current_;
+};
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -51,6 +94,19 @@ int main(int argc, char **argv) {
                 static_cast<std::int32_t>(decoder.clock((byte >> shift) & 0x0f)));
             std::printf("PDX_REF_ADPCM_%02zu equ      $%08x\n", index++, sample);
         }
+    }
+
+    std::printf("PDX_REF_MIX_COUNT equ      %zu\n", kMixFrames);
+    Voice fast(4, 8);  // 15.625 kHz, unity
+    Voice slow(0, 0);  // 3.90625 kHz, -16 dB
+    for (std::size_t frame = 0; frame <= kMixFrames; ++frame) {
+        const std::int32_t mixed = std::clamp(
+            fast.mix_frame() + slow.mix_frame(), -32768, 32767);
+        const std::uint32_t value = static_cast<std::uint32_t>(mixed);
+        if (frame < kMixFrames)
+            std::printf("PDX_REF_MIX_%02zu equ       $%08x\n", frame, value);
+        else
+            std::printf("PDX_REF_MIX_PAN_LEFT equ   $%08x\n", value);
     }
     return 0;
 }

@@ -74,6 +74,7 @@ mxdrv_api_reset:
         clr.b   mxdrv_option_11
         clr.b   mxdrv_option_15
         clr.b   mxdrv_stop_mode
+        bsr     mxdrv_pdx_reset
         bra     mxdrv_reset
 
 ; Calls $02/$03 retain the original copy-in ownership model.

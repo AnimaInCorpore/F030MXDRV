@@ -29,9 +29,30 @@ trace. The Falcon smoke harness copies a synthetic raw PDX through MXDRV call
 `$03`, exercises valid, empty, overlapping, overrun, out-of-range, and
 undersized cases, then compares all decoded samples with the generated vector.
 
+## PCM8 voice conversion
+
+The PCM8-facing layer has eight independent decoder states and the five MSM6258
+clock selections used by MXDRV: 3.90625, 5.20833, 7.8125, 10.4167, and 15.625
+kHz. Relative to the Falcon codec clock of `25.175 MHz / 4 / 128`, those rates
+are represented exactly by phase increments `240, 320, 480, 640, 960` over the
+common denominator `3021`. The current zero-order converter therefore has no
+long-term clock drift.
+
+PCM8 volume codes 0 through 15 map from -16 dB through +14 dB in 2 dB steps;
+code 8 is unity. The mixer uses signed Q12 gains, sums all eight voices, and
+saturates the result to 16 bits. PCM8 pan is common hardware state rather than
+per-voice state: 1 selects left, 2 right, and 3 both. Pan value 0 denotes stop
+in the original interface and is not accepted as a routing position.
+
+The generated oracle also runs two voices over the same encoded sample at the
+lowest and highest rates and at -16 dB and unity gain. Hatari checks 20 stereo
+frames, global left-only pan, active masks, explicit stops, and parameter
+bounds against that vector.
+
 ## Current boundary
 
-`src/m68k/pdx.s` provides validated lookup and one stateful decoder voice. It
-does not yet make PDX audible: MDX PCM commands are not parsed, and playback
-rate conversion, pan, volume, multiple voices, and mixing with DSP-generated FM
-audio remain to be implemented.
+`src/m68k/pdx.s` provides validated lookup plus the eight-voice host mixer. It
+can render one exact Falcon codec period, which protocol v9 uploads to the DSP,
+combines with a newly rendered FM period, and loops through SSI to the DAC. This
+is still a bounded integration proof rather than music playback: MDX PCM
+commands are not parsed and consecutive mixed periods are not yet scheduled.

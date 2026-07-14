@@ -3,6 +3,9 @@
 
         global  dsp_exchange
         global  dsp_queue_write
+        global  dsp_start_mixed_audio
+
+DSP_MIX_TRANSFER_WORDS equ   1+DSP_MIX_FRAME_COUNT*2
 
         text
 
@@ -39,6 +42,26 @@ dsp_queue_write:
         move.l  dsp_queue_reply,d0
         rts
 
+; Render one exact Falcon codec-rate PDX period on the 68030, upload its
+; interleaved signed stereo frames, and ask the DSP to combine them with a
+; freshly rendered YM period before enabling SSI.
+; out: d0.l = DSP reply
+dsp_start_mixed_audio:
+        move.l  #DSP_CMD_START_MIXED,dsp_mixed_words
+        lea     dsp_mixed_words+4,a3
+        lea     dsp_mixed_words_end,a4
+dsp_render_mixed_loop:
+        bsr     mxdrv_pdx_mix_frame
+        move.l  d0,(a3)+
+        move.l  d1,(a3)+
+        cmpa.l  a4,a3
+        bcs     dsp_render_mixed_loop
+
+        clr.l   dsp_mixed_reply
+        Dsp_BlkUnpacked dsp_mixed_words,#DSP_MIX_TRANSFER_WORDS,dsp_mixed_reply,#1
+        move.l  dsp_mixed_reply,d0
+        rts
+
         bss
 
 dsp_tx_word:
@@ -48,6 +71,11 @@ dsp_rx_word:
 dsp_queue_words:
         ds.l    2
 dsp_queue_reply:
+        ds.l    1
+dsp_mixed_words:
+        ds.l    DSP_MIX_TRANSFER_WORDS
+dsp_mixed_words_end:
+dsp_mixed_reply:
         ds.l    1
 
         end

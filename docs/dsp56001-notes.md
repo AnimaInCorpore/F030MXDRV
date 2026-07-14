@@ -56,13 +56,14 @@ clocking that channel's next feedback input to zero. Released envelopes already
 at `$3ff` bypass rate derivation until a later key-on makes them active again.
 Phase, key edges, feedback history, LFO/noise, and timers continue to clock.
 
-Frequently accessed scalar state now occupies internal `X:$0000-$003f`.
+Frequently accessed scalar state now occupies internal `X:$0000-$0041`.
 Short-address loads and stores remove an extension word and avoid external RAM;
 this reduced the initialized loader payload from 8,100 to 7,113 bytes before
-adding the FIFO and live-stream code. The protocol-v8 image is 7,818 bytes; the
-build checks it against the 8 KiB TOS limit.
+adding the FIFO and live-stream code. The current protocol-v9 image, including
+bounded PCM/FM mixing, is 8,148 bytes; the build checks it against the 8 KiB TOS
+limit.
 
-## Falcon SSI buffered and live paths
+## Falcon SSI buffered, mixed, and live paths
 
 The bounded audio probe configures SSI control A as `$4100`: 16-bit words and
 two words per synchronous network frame. Control B is `$1a00`: synchronous
@@ -85,7 +86,13 @@ Protocol command `$10` instead calls the resampler and YM kernel for every fresh
 left/right frame after enabling SSI; direct writes refresh its phase cache
 immediately.
 
-Protocol v8 implements that event shape with a rolling clock. A refillable
+Protocol command `$11` receives 1007 interleaved signed stereo frames rendered
+by the 68030 PDX mixer. The DSP renders the matching FM period, adds and clamps
+each channel to signed 16-bit, then reuses the bounded SSI loop. Buffer pointers
+use `r6/r7`; the phase-cache loop owns `r4`, so sharing that register would
+displace the left-channel write position during every YM sample.
+
+Protocol v9 implements the event shape with a rolling clock. A refillable
 32-entry ring FIFO stores an absolute 16-bit native-sample time beside each
 packed register write. Entries must be in nondecreasing modular order and
 within the 32,767-sample future horizon; all writes due at a boundary are

@@ -106,6 +106,87 @@ start:
         tst.l   d0
         bne     protocol_failed
 
+        ; Start two independent PCM8-style voices over the same PDX entry.
+        ; Their exact rational codec phases and 2 dB volume gains are compared
+        ; against the generated host mixer oracle for twenty stereo frames.
+        moveq   #0,d0                  ; voice 0
+        moveq   #0,d1                  ; sample 0
+        moveq   #4,d2                  ; 15.625 kHz
+        moveq   #3,d3                  ; both outputs
+        moveq   #8,d4                  ; unity gain
+        bsr     mxdrv_pdx_voice_start
+        tst.l   d0
+        bne     protocol_failed
+
+        moveq   #1,d0                  ; voice 1
+        moveq   #0,d1
+        moveq   #0,d2                  ; 3.90625 kHz
+        moveq   #3,d3
+        moveq   #0,d4                  ; -16 dB
+        bsr     mxdrv_pdx_voice_start
+        tst.l   d0
+        bne     protocol_failed
+
+        bsr     mxdrv_pdx_active_mask
+        cmpi.l  #3,d0
+        bne     protocol_failed
+
+        lea     pdx_mix_references(pc),a3
+        lea     pdx_mix_references_end(pc),a4
+.mix_pdx_frame:
+        bsr     mxdrv_pdx_mix_frame
+        cmp.l   (a3)+,d0
+        bne     protocol_failed
+        cmp.l   d0,d1                  ; pan 3 sends the mono mix to both sides
+        bne     protocol_failed
+        cmpa.l  a4,a3
+        bcs     .mix_pdx_frame
+
+        moveq   #1,d0                  ; PCM8 pan is global: left only
+        bsr     mxdrv_pdx_set_pan
+        tst.l   d0
+        bne     protocol_failed
+        bsr     mxdrv_pdx_mix_frame
+        cmpi.l  #PDX_REF_MIX_PAN_LEFT,d0
+        bne     protocol_failed
+        tst.l   d1
+        bne     protocol_failed
+
+        moveq   #0,d0
+        bsr     mxdrv_pdx_voice_stop
+        tst.l   d0
+        bne     protocol_failed
+        bsr     mxdrv_pdx_active_mask
+        cmpi.l  #2,d0
+        bne     protocol_failed
+
+        moveq   #1,d0
+        bsr     mxdrv_pdx_voice_stop
+        tst.l   d0
+        bne     protocol_failed
+        bsr     mxdrv_pdx_active_mask
+        tst.l   d0
+        bne     protocol_failed
+
+        moveq   #8,d0                  ; reject a ninth voice
+        moveq   #0,d1
+        moveq   #0,d2
+        moveq   #3,d3
+        moveq   #8,d4
+        bsr     mxdrv_pdx_voice_start
+        cmpi.l  #-1,d0
+        bne     protocol_failed
+
+        moveq   #0,d0                  ; pan 0 is stop, not an output position
+        bsr     mxdrv_pdx_set_pan
+        cmpi.l  #-1,d0
+        bne     protocol_failed
+
+        move.l  #DSP_CMD_PING+$ad18,d0
+        bsr     dsp_exchange
+        cmp.l   #DSP_REPLY_HELLO,d0
+        bne     protocol_failed
+
         moveq   #3,d0                  ; an undersized bank has no valid table
         move.l  #767,d1
         lea     pdx_test_bank(pc),a1
@@ -491,6 +572,61 @@ start:
         cmp.l   #DSP_REPLY_HELLO,d0
         bne     protocol_failed
 
+        ; Reload the valid bank after the malformed-bank checks, then prove
+        ; that a host-rendered PDX period reaches the DSP-owned SSI path. Keep
+        ; FM silent so the first nonzero stereo probe sums the exact second
+        ; ADPCM sample from both channels.
+        bsr     mxdrv_reset
+        tst.l   d0
+        bne     protocol_failed
+
+        moveq   #3,d0
+        move.l  #pdx_test_bank_end-pdx_test_bank,d1
+        lea     pdx_test_bank(pc),a1
+        bsr     mxdrv_call
+        tst.l   d0
+        bne     protocol_failed
+
+        moveq   #0,d0                  ; voice 0, sample 0
+        moveq   #0,d1
+        moveq   #4,d2                  ; 15.625 kHz
+        moveq   #3,d3                  ; both outputs
+        moveq   #8,d4                  ; unity gain
+        bsr     mxdrv_pdx_voice_start
+        tst.l   d0
+        bne     protocol_failed
+
+        Locksnd
+        cmpi.l  #1,d0
+        bne     sound_failed
+        Setmode #SOUND_STEREO16
+        Settracks #0,#0
+        Dsptristate #1,#0
+        Devconnect #SOUND_DSP_XMIT,#SOUND_DAC,#SOUND_CLK25M,#SOUND_CLK50K,#SOUND_NO_SHAKE
+
+        bsr     dsp_start_mixed_audio
+        cmp.l   #DSP_REPLY_OK,d0
+        bne     audio_protocol_failed
+
+        bsr     mxdrv_pdx_active_mask   ; the short test entry was exhausted
+        tst.l   d0
+        bne     audio_protocol_failed
+
+        move.l  #DSP_CMD_STOP_AUDIO,d0
+        bsr     dsp_exchange
+        cmp.l   #DSP_REPLY_OK,d0
+        bne     audio_protocol_failed
+
+        move.l  #DSP_CMD_QUERY_MIX,d0   ; first nonzero left+right probe
+        bsr     dsp_exchange
+        cmpi.l  #PDX_REF_ADPCM_01*2,d0
+        bne     audio_protocol_failed
+
+        move.l  #DSP_CMD_PING+$cd09,d0  ; mixed PDX/FM transport marker
+        bsr     dsp_exchange
+        cmp.l   #DSP_REPLY_HELLO,d0
+        bne     audio_protocol_failed
+
         ; Feed a known sustained voice into the first end-to-end DSP SSI path.
         bsr     mxdrv_reset
         tst.l   d0
@@ -529,14 +665,6 @@ start:
         bsr     dsp_queue_write
         tst.l   d0
         bne     protocol_failed
-
-        Locksnd
-        cmpi.l  #1,d0
-        bne     sound_failed
-        Setmode #SOUND_STEREO16
-        Settracks #0,#0
-        Dsptristate #1,#0
-        Devconnect #SOUND_DSP_XMIT,#SOUND_DAC,#SOUND_CLK25M,#SOUND_CLK50K,#SOUND_NO_SHAKE
 
         move.l  #DSP_CMD_START_AUDIO,d0
         bsr     dsp_exchange
@@ -806,6 +934,14 @@ pdx_adpcm_references:
         dc.l    PDX_REF_ADPCM_10,PDX_REF_ADPCM_11
         dc.l    PDX_REF_ADPCM_12,PDX_REF_ADPCM_13
         dc.l    PDX_REF_ADPCM_14,PDX_REF_ADPCM_15
+
+pdx_mix_references:
+        dc.l    PDX_REF_MIX_00,PDX_REF_MIX_01,PDX_REF_MIX_02,PDX_REF_MIX_03
+        dc.l    PDX_REF_MIX_04,PDX_REF_MIX_05,PDX_REF_MIX_06,PDX_REF_MIX_07
+        dc.l    PDX_REF_MIX_08,PDX_REF_MIX_09,PDX_REF_MIX_10,PDX_REF_MIX_11
+        dc.l    PDX_REF_MIX_12,PDX_REF_MIX_13,PDX_REF_MIX_14,PDX_REF_MIX_15
+        dc.l    PDX_REF_MIX_16,PDX_REF_MIX_17,PDX_REF_MIX_18,PDX_REF_MIX_19
+pdx_mix_references_end:
 
 algorithm_references:
         dc.l    YM_REF_ALGORITHM_0_LEFT,YM_REF_ALGORITHM_0_RIGHT

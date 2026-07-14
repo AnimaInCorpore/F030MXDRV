@@ -1,6 +1,6 @@
 ; Host/DSP protocol. Keep in sync with src/m68k/protocol.i.
 
-DSP_PROTOCOL_VERSION equ     8
+DSP_PROTOCOL_VERSION equ     9
 
 DSP_CMD_PING        equ     $010000
 DSP_CMD_WRITE_REG   equ     $020000
@@ -18,7 +18,11 @@ DSP_CMD_QUERY_AUDIO equ     $0d0000
 DSP_CMD_QUEUE_WRITE equ     $0e0000
 DSP_CMD_QUERY_TIME  equ     $0f0000
 DSP_CMD_START_LIVE  equ     $100000
+DSP_CMD_START_MIXED equ     $110000
+DSP_CMD_QUERY_MIX   equ     $120000
 
-DSP_REPLY_HELLO     equ     $4d5808
+DSP_MIX_FRAME_COUNT equ    1007
+
+DSP_REPLY_HELLO     equ     $4d5809
 DSP_REPLY_OK        equ     $000000
 DSP_REPLY_ERROR     equ     $ffffff

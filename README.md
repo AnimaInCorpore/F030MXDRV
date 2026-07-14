@@ -11,8 +11,10 @@ The current milestone is executable on TOS and under Hatari. The 68030 side now
 has the original 32-entry MXDRV call-table shape, owned MDX/PDX buffers, core
 transport state, an `OPMBuf`-compatible mirror, and a DSP-backed replacement for
 MXDRV's `WriteOPM`. Standard raw PDX banks now have validated 96-entry sample
-lookup and a streaming single-voice decoder that matches the X68000 MSM6258
-predictor, step, clamping, and nibble order. The DSP clocks stereo YM2151 samples
+lookup and eight streaming decoder voices that match the X68000 MSM6258
+predictor, step, clamping, and nibble order. The host-side PCM8 layer applies
+all five playback rates, the 16 volume steps, common hardware pan, and saturating
+stereo mixing at the Falcon codec cadence. The DSP clocks stereo YM2151 samples
 at the native 62.5 kHz
 rate with phase accumulation, ADSR envelopes, logarithmic sine/power lookup,
 operator feedback, all eight algorithms, panning, and YM3012 output rounding.
@@ -33,7 +35,10 @@ external accesses and the converted DSP image size.
 The full-rate transport path pre-renders one exact
 1280-native-sample/1007-codec-frame resampling period on the DSP, replays the
 stereo block through 16-bit SSI at 49.17 kHz, and routes DSP transmit to the
-Falcon DAC through the XBIOS sound matrix. A separate protocol-v8 live mode now
+Falcon DAC through the XBIOS sound matrix. Protocol v9 also lets the 68030
+upload one exact 1007-frame stereo PDX period; the DSP adds it to a freshly
+rendered FM period with signed 16-bit saturation and loops the mixed block
+through the same SSI path. A separate live mode
 renders every frame after SSI starts, advances the same rolling native clock,
 and consumes timestamped writes without a staging boundary. It is a measured
 optimization target rather than the final audio path: the current Hatari gate
@@ -41,11 +46,13 @@ produced 5,679 fresh frames in a nominal one-second interval, versus about
 49,170 required by the codec.
 
 This is not a complete music driver yet. MDX command replay and timer service,
-PDX rate conversion/polyphonic mixing, and continuous underrun-free synthesis
-remain. PDX samples can be located and decoded but are not yet triggered by MDX
-tracks or mixed into Falcon output. The buffered SSI mode still supplies the
+binding MDX PCM commands to the PDX voices, continuous mixed-block production,
+and underrun-free live synthesis remain. PDX lookup, decoding, rate conversion,
+gain, pan, eight-voice host mixing, and bounded PCM/FM output to the DAC are
+verified, but only in the explicit integration harness. The buffered SSI mode
+still supplies the
 full-rate transport proof, while the live mode proves the direct scheduling and
-synthesis control flow despite underrunning. Protocol v8
+synthesis control flow despite underrunning. Protocol v9
 provides a refillable 32-entry ring FIFO of exact register events on a rolling
 16-bit native sample clock; FIFO and clock-query transactions work while SSI is
 active, and the clock persists across buffered and live sessions.
@@ -82,7 +89,9 @@ make smoke
 ```
 
 The smoke test also verifies standard PDX lookup bounds, empty and malformed
-entries, and exact MSM6258 samples from a generated oracle. It then verifies
+entries, exact MSM6258 samples, and a generated two-voice rate/gain/pan mixer
+vector. It uploads a complete host-rendered PCM period and verifies the first
+nonzero DSP-mixed stereo sum before checking
 sound locking, DSP-to-DAC matrix setup, buffered and live audio start/stop,
 rolling-clock FIFO writes during live synthesis, SSI frame-count floors,
 tristating, and sound unlock under Hatari.
@@ -104,7 +113,7 @@ Hatari is installed. It is a test harness at this stage, not yet an MDX player.
 - `src/m68k/main.s`: Falcon loader and smoke test.
 - `src/m68k/mxdrv_core.s`: resident-independent 32-call MXDRV API foundation.
 - `src/m68k/mxdrv_port.s`: replacement seam for MXDRV's original `WriteOPM`.
-- `src/m68k/pdx.s`: validated standard PDX lookup and MSM6258 stream decoder.
+- `src/m68k/pdx.s`: validated PDX lookup, eight MSM6258 voices, and codec mixer.
 - `src/m68k/dsp_link.s`: packed 24-bit host/DSP exchange.
 - `src/dsp/ym2151.asm`: DSP protocol and command-clocked YM2151 sample kernel.
 - `tools/ym2151_oracle.cpp`: native executable built against vendored ymfm.

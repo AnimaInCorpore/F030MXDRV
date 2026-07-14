@@ -119,6 +119,10 @@ ym_queue_timestamp:
         ds      1
 ssi_live_mode:
         ds      1
+ssi_mix_probe_left:
+        ds      1
+ssi_mix_probe_sum:
+        ds      1
 
 ; Scratch state. Keeping it explicit makes subroutine register clobbers safe
 ; and leaves the protocol probes useful while the real-time loop evolves.
@@ -287,6 +291,14 @@ command_loop:
         cmp     x0,a
         jeq     command_start_live
 
+        move    #>DSP_CMD_START_MIXED,x0
+        cmp     x0,a
+        jeq     command_start_mixed
+
+        move    #>DSP_CMD_QUERY_MIX,x0
+        cmp     x0,a
+        jeq     command_query_mix
+
         move    #>DSP_REPLY_ERROR,a
         jsr     send_reply
         jmp     command_loop
@@ -396,28 +408,29 @@ command_start_audio:
         move    a1,x:ssi_frame_count
         move    #>1007,a
         move    a1,x:ssi_buffer_remaining
-        move    #ssi_buffer_left,r4
-        move    #ssi_buffer_right,r5
+        move    #ssi_buffer_left,r6
+        move    #ssi_buffer_right,r7
 command_start_audio_render:
         jsr     ssi_render_frame
         move    x:ym_last_left,a
         rep     #8
         asl     a
-        move    a1,x:(r4)+
+        move    a1,x:(r6)+
         move    x:ym_last_right,a
         rep     #8
         asl     a
-        move    a1,x:(r5)+
+        move    a1,x:(r7)+
         move    x:ssi_buffer_remaining,a
         move    #>1,x0
         sub     x0,a
         move    a1,x:ssi_buffer_remaining
         jne     command_start_audio_render
 
-        move    #ssi_buffer_left,r4
-        move    #ssi_buffer_right,r5
+ssi_start_buffered:
+        move    #ssi_buffer_left,r6
+        move    #ssi_buffer_right,r7
         nop
-        move    x:(r4)+,a
+        move    x:(r6)+,a
         movep   a1,x:m_tx
         move    #>1006,a
         move    a1,x:ssi_buffer_remaining
@@ -446,12 +459,78 @@ command_start_live:
         movep   #$1a00,x:m_crb
         jmp     ssi_stream_loop
 
+; Receive one exact 1007-frame stereo PCM period from the 68030, then render
+; the corresponding YM period and add it to PCM with signed 16-bit saturation.
+; The completed interleaved host transfer is acknowledged immediately before
+; the mixed block begins looping through SSI.
+command_start_mixed:
+        movep   #0,x:m_crb
+        movep   #$4100,x:m_cra
+        clr     a
+        move    a1,x:ssi_live_mode
+        move    a1,x:ssi_resample_phase
+        move    a1,x:ssi_frame_count
+        move    a1,x:ssi_mix_probe_left
+        move    a1,x:ssi_mix_probe_sum
+        move    #ssi_buffer_left,r6
+        move    #ssi_buffer_right,r7
+        do      #DSP_MIX_FRAME_COUNT,command_start_mixed_receive
+        jclr    #0,x:m_hsr,*
+        movep   x:m_hrx,a
+        move    a1,x:(r6)+
+        jclr    #0,x:m_hsr,*
+        movep   x:m_hrx,a
+        move    a1,x:(r7)+
+command_start_mixed_receive:
+
+        move    #ssi_buffer_left,r6
+        move    #ssi_buffer_right,r7
+        move    #>DSP_MIX_FRAME_COUNT,a
+        move    a1,x:ssi_buffer_remaining
+command_start_mixed_render:
+        jsr     ssi_render_frame
+
+        move    x:(r6),a
+        move    x:ym_last_left,x0
+        add     x0,a
+        jsr     ym_clamp_channel
+        move    a1,x:ssi_mix_probe_left
+        rep     #8
+        asl     a
+        move    a1,x:(r6)+
+
+        move    x:(r7),a
+        move    x:ym_last_right,x0
+        add     x0,a
+        jsr     ym_clamp_channel
+        move    a1,x0
+        move    x:ssi_mix_probe_sum,b
+        tst     b
+        jne     command_start_mixed_right_ready
+        move    x:ssi_mix_probe_left,b
+        add     x0,b
+        tst     b
+        jeq     command_start_mixed_right_ready
+        move    b1,x:ssi_mix_probe_sum
+command_start_mixed_right_ready:
+        rep     #8
+        asl     a
+        move    a1,x:(r7)+
+
+        move    x:ssi_buffer_remaining,a
+        move    #>1,x0
+        sub     x0,a
+        move    a1,x:ssi_buffer_remaining
+        jne     command_start_mixed_render
+        jmp     ssi_start_buffered
+
 ; While either audio mode is active, accept synchronous register writes,
 ; timestamped writes, clock queries, and stop. Direct writes refresh the phase
 ; cache immediately so the live renderer observes them on its next frame.
 ssi_stream_loop:
         jclr    #0,x:m_hsr,ssi_stream_data
         movep   x:m_hrx,x1
+        move    x1,x:last_command
         move    x1,a
         move    #>$ff0000,y0
         and     y0,a1
@@ -469,7 +548,10 @@ ssi_stream_loop:
 
         move    #>DSP_CMD_QUERY_TIME,x0
         cmp     x0,a
-        jne     ssi_stream_command_error
+        jeq     ssi_stream_query_time
+        jmp     ssi_stream_command_error
+
+ssi_stream_query_time:
         move    x:ssi_native_sample_count,a
         jsr     send_reply
         jmp     ssi_stream_data
@@ -499,7 +581,7 @@ ssi_stream_data:
         tst     a
         jeq     ssi_stream_left
 
-        move    x:(r5)+,a
+        move    x:(r7)+,a
         movep   a1,x:m_tx
         clr     a
         move    a1,x:ssi_output_slot
@@ -509,12 +591,12 @@ ssi_stream_left:
         move    x:ssi_buffer_remaining,a
         tst     a
         jne     ssi_stream_left_ready
-        move    #ssi_buffer_left,r4
-        move    #ssi_buffer_right,r5
+        move    #ssi_buffer_left,r6
+        move    #ssi_buffer_right,r7
         move    #>1007,a
         move    a1,x:ssi_buffer_remaining
 ssi_stream_left_ready:
-        move    x:(r4)+,a
+        move    x:(r6)+,a
         movep   a1,x:m_tx
         move    #>1,a
         move    a1,x:ssi_output_slot
@@ -582,6 +664,11 @@ command_queue_write:
 
 command_query_time:
         move    x:ssi_native_sample_count,a
+        jsr     send_reply
+        jmp     command_loop
+
+command_query_mix:
+        move    x:ssi_mix_probe_sum,a
         jsr     send_reply
         jmp     command_loop
 
@@ -780,7 +867,7 @@ ym_reset_envelope_state:
 ym_reset_runtime_loop:
         move    #ym_env_counter,r0
         clr     a
-        do      #32,ym_reset_global_loop
+        do      #34,ym_reset_global_loop
         move    a1,x:(r0)+
 ym_reset_global_loop:
         move    #>1,a
