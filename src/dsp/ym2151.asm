@@ -394,14 +394,28 @@ command_start_audio_render:
         movep   #$1a00,x:m_crb          ; sync network mode, transmit enabled
         jmp     ssi_stream_loop
 
-; While audio is active the host may stop the stream through the normal host
-; port. Other commands are rejected rather than racing the synthesis state.
+; While bounded audio is active, accept synchronous register writes as well as
+; stop. The looped block is already rendered, so phase-cache refresh is safely
+; deferred until stop; the updated chip state takes effect on the next render.
 ssi_stream_loop:
         jclr    #0,x:m_hsr,ssi_stream_data
-        movep   x:m_hrx,a
+        movep   x:m_hrx,x1
+        move    x1,a
+        move    #>$ff0000,y0
+        and     y0,a1
         move    #>DSP_CMD_STOP_AUDIO,x0
         cmp     x0,a
         jeq     command_stop_audio
+
+        move    #>DSP_CMD_WRITE_REG,x0
+        cmp     x0,a
+        jne     ssi_stream_command_error
+        jsr     ym_write_packed
+        move    #>DSP_REPLY_OK,a
+        jsr     send_reply
+        jmp     ssi_stream_data
+
+ssi_stream_command_error:
         move    #>DSP_REPLY_ERROR,a
         jsr     send_reply
 
@@ -445,6 +459,7 @@ command_stop_audio:
         clr     a
         move    a1,x:ssi_output_slot
         movep   a1,x:m_tx
+        jsr     ym_rebuild_phase_cache
         move    #>DSP_REPLY_OK,a
         jsr     send_reply
         jmp     command_loop

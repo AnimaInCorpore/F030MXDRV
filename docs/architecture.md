@@ -19,7 +19,7 @@ Every transport unit is one DSP/host 24-bit word. The upper byte is an opcode.
 | Word | Meaning | Reply |
 | --- | --- | --- |
 | `01 00 00` | ping/protocol query | `4d 58 05` (`MX`, version 5) |
-| `02 rr dd` | write YM2151 register `rr = dd` | `00 00 00` |
+| `02 rr dd` | write YM2151 register `rr = dd`, including during bounded SSI playback | `00 00 00` |
 | `03 00 00` | reset YM2151 state | `00 00 00` |
 | `04 00 00` | clock one native 62.5 kHz sample | signed left sample |
 | `05 cc oo` | query phase step for channel `cc`, logical operator `oo` | 20-bit phase step |
@@ -44,8 +44,11 @@ Command `0a` is the one bootstrap exception to the single-word transaction
 shape: it consumes exactly 329 following host words before replying. Moving
 those initialized records into the host executable recovered about 1 KiB from
 the TOS 4.02 converted-loader limit. During the bounded audio session, the
-stream loop accepts only command `0c`; live register traffic remains the next
-transport milestone.
+stream loop accepts synchronous command `02` writes and command `0c`. Because
+the repeated block was rendered before SSI starts, writes update chip state for
+the next render and the static phase cache is rebuilt after SSI stops; they do
+not retroactively change the active block. A timestamped bounded FIFO remains
+necessary for continuous synthesis and MDX replay.
 
 The constants are duplicated in `src/m68k/protocol.i` and
 `src/dsp/protocol.inc` because the two assemblers do not share syntax. Keep the
@@ -79,10 +82,11 @@ protocol version in the ping reply whenever either side changes incompatibly.
    three-second direct-stream experiment). The first optimization pass now
    caches static phase increments, reduces the no-PM phase loop to parallel
    phase/cache fetch plus add/store, and bypasses terminal envelopes and fully
-   silent channels without changing the exact sample vectors. More operator
-   specialization, cycle measurement, and a bounded register FIFO are still
-   required before the pre-rendered block can be replaced by continuous live
-   synthesis.
+   silent channels without changing the exact sample vectors. The SSI loop also
+   services synchronous writes through the real MXDRV `WriteOPM` seam and
+   preserves them for the next render. More operator specialization, cycle
+   measurement, and a timestamped bounded register FIFO are still required
+   before the pre-rendered block can be replaced by continuous live synthesis.
 6. **PCM/PDX:** add the X68000 ADPCM path and mixer, then compatibility tests
    for real MDX/PDX material.
 

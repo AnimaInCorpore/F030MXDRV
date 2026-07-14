@@ -34,9 +34,11 @@ three-second probe.
 
 This is not a complete music driver yet. MDX command replay and timer service,
 PDX mixing, and continuous underrun-free synthesis remain. The current SSI path
-loops a pre-rendered validation block; it does not yet accept live register
-writes while streaming. The exact boundary between implemented and pending work
-is kept in [the architecture notes](docs/architecture.md).
+loops a pre-rendered validation block. It now services synchronous MXDRV
+register writes while streaming and preserves them for the next render, but
+those writes cannot alter audio that was already rendered. The exact boundary
+between implemented and pending work is kept in
+[the architecture notes](docs/architecture.md).
 
 ## Build
 

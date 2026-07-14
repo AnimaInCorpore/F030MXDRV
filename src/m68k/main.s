@@ -442,6 +442,15 @@ start:
         cmp.l   #DSP_REPLY_OK,d0
         bne     audio_protocol_failed
 
+        ; Prove that the normal MXDRV WriteOPM seam remains serviced while SSI
+        ; is active. This changes DSP state for the next render; the current
+        ; bounded block was deliberately rendered before transmit started.
+        moveq   #$7e,d1
+        moveq   #$5a,d2
+        bsr     mxdrv_write_ym2151
+        cmp.l   #DSP_REPLY_OK,d0
+        bne     audio_protocol_failed
+
         Cconws  audio_text
         move.w  #149,d5               ; 150 VBLs, about three seconds
 .audio_wait:

@@ -70,3 +70,10 @@ or 49,169.921875 Hz. Relative to the native 62,500 Hz OPM rate this is exactly
 codec frame and stores the latest result. A 1007-frame stereo block occupies
 uninitialized external X RAM at `$0c00`; it adds no initialized `.LOD` records
 and ends below the reserved X-memory boundary.
+
+The streaming loop polls the host receive flag between SSI words. It accepts
+normal packed register writes and replies through the existing synchronous
+transport without stopping SSI. Since this milestone repeats a pre-rendered
+block, the write changes only the retained YM state; the phase cache is rebuilt
+after transmit is disabled. Continuous rendering will instead consume
+timestamped writes at native-sample boundaries.
