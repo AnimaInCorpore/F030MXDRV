@@ -198,8 +198,6 @@ rt2_phase:
         ds      4
 rt2_gain:
         ds      4
-rt2_fb_0:
-        ds      1
 rt2_fb_1:
         ds      1
 
@@ -259,6 +257,11 @@ ym_cache_detune:
         ds      32
 ym_cache_mul2:
         ds      32
+
+; Keep the two block-spike feedback words in opposite internal memory banks
+; so their traffic can share an instruction with the modulator ring.
+rt2_fb_0_y:
+        ds      1
 
 ; Phase and cache live in opposite internal memory banks so the common no-PM
 ; clock path can fetch both in one DSP instruction cycle. External Y below the
@@ -603,8 +606,8 @@ command_profile_realtime2:
         do      #4,rt2_clear_state
         move    a1,x:(r4)+
 rt2_clear_state:
-        move    a1,x:rt2_fb_0
         move    a1,x:rt2_fb_1
+        move    a1,y:rt2_fb_0_y
 
         move    #rt2_gain,r4
         move    #>$400000,x0           ; 0.5 signed fractional gain
@@ -627,15 +630,18 @@ rt2_clear_state:
 rt2_profile_loop_start:
         do      #DSP_RT2_PROFILE_BLOCKS,rt2_blocks_done
 
-        ; Operator 1: self-feedback, fills the modulator ring.
-        move    #rt2_stage_ring,r5
+        ; Operator 1: self-feedback, fills the modulator ring. Feedback lives
+        ; in opposite X/Y banks, so both history words load together and the
+        ; new output is stored to the history and ring in one dual move.
+        move    #rt2_stage_ring,r3
+        move    #rt2_fb_1,r2
+        move    #rt2_fb_0_y,r4
         move    x:rt2_phase,b
         move    x:rt2_gain,y0
         do      #DSP_RT2_BLOCK_FRAMES,rt2_op1_done
-        move    x:rt2_fb_0,x0
-        move    x:rt2_fb_1,a
+        move    x:(r2),x0 y:(r4),a
+        move    a1,x:(r2)              ; age the history before summing it
         add     x0,a
-        move    x0,x:rt2_fb_1          ; age the history while it is loaded
         asr     a
         asr     a
         asr     a                      ; (out[-1]+out[-2]) >> 3 feedback
@@ -643,29 +649,29 @@ rt2_profile_loop_start:
         move    a1,x0
         mpy     x0,y1,a
         move    a1,n0
-        add     x1,b                   ; phase advance fills the n0 slot
+        add     x1,b
         move    y:(r0+n0),x0
         mpy     x0,y0,a
-        move    a1,x:rt2_fb_0
-        move    a1,x:(r5)+
+        move    a,x:(r3)+ a,y:(r4)
 rt2_op1_done:
         move    b1,x:rt2_phase
 
-        ; Operator 2: modulated by the ring, overwrites it in place.
+        ; Operator 2: prefetch the next modulator beside the current MPY, then
+        ; store the result while moving that prefetched value into A.
         move    #rt2_stage_ring,r3
         move    #rt2_stage_ring,r5
         move    x:rt2_phase+1,b
         move    x:rt2_gain+1,y0
-        do      #DSP_RT2_BLOCK_FRAMES,rt2_op2_done
         move    x:(r3)+,a
+        do      #DSP_RT2_BLOCK_FRAMES,rt2_op2_done
         add     b,a
         move    a1,x0
         mpy     x0,y1,a
         move    a1,n0
         add     x1,b
         move    y:(r0+n0),x0
-        mpy     x0,y0,a
-        move    a1,x:(r5)+
+        mpy     x0,y0,a x:(r3)+,x0
+        move    a,x:(r5)+ x0,a
 rt2_op2_done:
         move    b1,x:rt2_phase+1
 
@@ -674,16 +680,16 @@ rt2_op2_done:
         move    #rt2_stage_ring,r5
         move    x:rt2_phase+2,b
         move    x:rt2_gain+2,y0
-        do      #DSP_RT2_BLOCK_FRAMES,rt2_op3_done
         move    x:(r3)+,a
+        do      #DSP_RT2_BLOCK_FRAMES,rt2_op3_done
         add     b,a
         move    a1,x0
         mpy     x0,y1,a
         move    a1,n0
         add     x1,b
         move    y:(r0+n0),x0
-        mpy     x0,y0,a
-        move    a1,x:(r5)+
+        mpy     x0,y0,a x:(r3)+,x0
+        move    a,x:(r5)+ x0,a
 rt2_op3_done:
         move    b1,x:rt2_phase+2
 
@@ -692,18 +698,17 @@ rt2_op3_done:
         move    #rt2_stage_ring,r3
         move    x:rt2_phase+3,b
         move    x:rt2_gain+3,y0
-        do      #DSP_RT2_BLOCK_FRAMES,rt2_op4_done
         move    x:(r3)+,a
+        do      #DSP_RT2_BLOCK_FRAMES,rt2_op4_done
         add     b,a
         move    a1,x0
         mpy     x0,y1,a
         move    a1,n0
         add     x1,b
         move    y:(r0+n0),x0
-        mpy     x0,y0,a
-        move    a1,x:(r1)+             ; left
-        asr     a
-        move    a1,x:(r1)+             ; right
+        mpy     x0,y0,a x:(r3)+,x0
+        asr     a a1,x:(r1)+           ; left, then half-amplitude right
+        move    a,x:(r1)+ x0,a
 rt2_op4_done:
         move    b1,x:rt2_phase+3
 

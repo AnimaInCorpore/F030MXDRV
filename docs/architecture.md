@@ -136,9 +136,9 @@ protocol version in the ping reply whenever either side changes incompatibly.
    A reproducible Hatari DSP-cycle gate now supersedes the earlier VBL-derived
    throughput estimate. With four operators active on all eight channels and
    the cached no-PM path selected, rendering one 1280-sample period consumes
-   16,459,267 instruction cycles, or 12,858.80 per native sample. The Falcon
+   15,389,137 instruction cycles, or 12,022.76 per native sample. The Falcon
    budget is 256.68 cycles per sample, so the exact scalar kernel misses real
-   time by 50.10x before steady SSI and host-port overhead. Protocol v11 makes
+   time by 46.84x before steady SSI and host-port overhead. Protocol v11 makes
    that miss safe by repeating the last complete block, but it does not make
    playback temporally accurate. The exact kernel is retained as the
    conformance reference; the real-time output contract now requires an
@@ -214,15 +214,17 @@ feed later operator state.
 
 ## Remaining roadmap
 
-1. Close the measured 1.47x block-spike gap. Command `14` now renders one
+1. Close the measured 1.23x block-spike gap. Command `14` now renders one
    complete serial algorithm-0 channel — operator-1 feedback, per-frame
-   modulation, block-rate envelope gains, and interleaved stereo — in 60.10
-   cycles per codec frame, a 1.53x surcharge over the 39.16-cycle four-carrier
-   floor. The linear eight-channel projection is 480.77 cycles against the
-   326.27-cycle budget. Recover the difference with dual X:Y parallel moves in
-   the modulated stages, cheaper carrier-only stages for parallel algorithms,
-   per-frame envelope slopes with block-rate segment derivation, and SSI/event
-   service costs measured in place.
+   modulation, block-rate envelope gains, and interleaved stereo — in 50.17
+   cycles per codec frame, a 1.28x surcharge over the 39.16-cycle four-carrier
+   floor. The linear eight-channel projection is 401.39 cycles against the
+   326.27-cycle budget. Feedback state now uses dual X:Y moves, modulated stages
+   pipeline their ring reads with MPY/store traffic, and the carrier overlaps
+   its left output store with the pan shift. Recover the remaining difference
+   with cheaper carrier-only stages for parallel algorithms, less costly
+   indexed sine addressing, per-frame envelope slopes with block-rate segment
+   derivation, and SSI/event service costs measured in place.
 2. Add exact-to-perceptual comparison vectors for pitch, key/write timing,
    envelopes, LFO/noise rates, feedback spectra, and all eight algorithms.
 3. Integrate the selected real-time kernel with the rolling write FIFO and

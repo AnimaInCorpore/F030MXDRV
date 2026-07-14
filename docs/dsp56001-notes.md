@@ -184,17 +184,23 @@ extracts the sine-table index; envelope gains step once per 64-frame block.
 The carrier stage writes interleaved stereo into the reused audio buffers,
 and the reply is that block's checksum (`$000eb5`), gated by the smoke suite.
 
-Hatari measures 123,076 instruction cycles for the block, or 60.10 cycles
-per channel/frame — a 1.53x surcharge over the 39.16-cycle four-carrier
-floor for the full modulation topology. The linear eight-channel projection
-is 480.77 cycles against the 326.27-cycle codec-frame budget: the worst-case
-all-algorithm-0 workload misses real time by 1.47x, compared to the exact
-kernel's 46.84x. The remaining gap is addressable with dual X:Y parallel
-moves in the modulated stages (currently unpacked), cheaper carrier-only
-stages for parallel algorithms, and shared block overhead; the spike's
-block-rate envelope gains must also become per-frame slopes with block-rate
-segment derivation to satisfy the compatibility contract's codec-frame
-quantization bound.
+The optimized loop splits feedback history across internal X/Y memory so it
+can fetch and update both words with the modulator ring, prefetches the next
+ring word beside each modulated-stage `MPY`, transfers that word into `A` while
+storing the previous result, and overlaps the carrier's left output store with
+its right-pan shift. These schedules retain the original checksum.
+
+Hatari measures 102,756 instruction cycles for the block, or 50.17 cycles
+per channel/frame — a 1.28x surcharge over the 39.16-cycle four-carrier
+floor for the full modulation topology and 16.5% below the spike's first
+60.10-cycle implementation. The linear eight-channel projection is 401.39
+cycles against the 326.27-cycle codec-frame budget: the worst-case
+all-algorithm-0 workload misses real time by 1.23x, compared to the exact
+kernel's 46.84x. Remaining headroom includes cheaper carrier-only stages for
+parallel algorithms, the serialized indexed sine reads, and shared block
+overhead; the spike's block-rate envelope gains must also become per-frame
+slopes with block-rate segment derivation to satisfy the compatibility
+contract's codec-frame quantization bound.
 
 ## Embedded second-stage program loader
 
@@ -206,7 +212,7 @@ final YM program deliberately begins at `P:$0080`, leaving
 through `Dsp_BlkUnpacked`.
 
 The generated stream starts with magic `$4d584c`, followed by a section count
-and address/count/data records. The current program contains 2,751 initialized
+and address/count/data records. The current program contains 2,926 initialized
 words in five sparse P sections. After installing them, the loader replies
 `$4c4f41` and jumps through the replaced reset vector at `P:$0000`. The build
 generator rejects a bootstrap above the 512-word XBIOS limit, any overlap with

@@ -63,11 +63,12 @@ why the project publishes its own profiler.
   modulo rings and parallel X/Y moves. A second, block-oriented spike now
   renders a complete serial algorithm-0 channel — operator-1 feedback,
   per-frame modulation, block-rate envelope gains, and interleaved stereo —
-  in 60.10 cycles per codec frame. Its linear eight-channel projection is
-  480.77 cycles against the 326.27-cycle frame budget, so the worst-case
-  all-algorithm-0 workload currently misses real time by **1.47x** (not the
-  exact kernel's 46.84x), with dual-move packing and cheaper parallel-
-  algorithm stages still unexploited.
+  in 50.17 cycles per codec frame. Its linear eight-channel projection is
+  401.39 cycles against the 326.27-cycle frame budget, so the worst-case
+  all-algorithm-0 workload currently misses real time by **1.23x** (not the
+  exact kernel's 46.84x). Split X/Y feedback state and software-pipelined
+  ring/output traffic removed 16.5% from the first version of this spike;
+  cheaper parallel-algorithm stages remain unexploited.
 - MDX synchronization/modulation and real-time mixed-block production
   remain. The exact boundary between implemented and pending work is kept in
   [the architecture notes](docs/architecture.md).
@@ -76,7 +77,7 @@ why the project publishes its own profiler.
 
 - The 68030 executable embeds everything the DSP needs: packed immutable
   ymfm tables, plus the complete sparse DSP program behind a 111-word
-  `Dsp_ExecBoot` first stage that receives 2,751 initialized P-memory words
+  `Dsp_ExecBoot` first stage that receives 2,926 initialized P-memory words
   through the host port — removing the 8 KiB converted-LOD ceiling.
 - The DSP kernel caches all 32 unmodulated phase increments across register
   writes in internal Y RAM and advances them with parallel X/Y fetches.
