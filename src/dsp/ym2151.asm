@@ -192,7 +192,7 @@ rt_envelope_gain:
         ds      4
 
 ; Block-oriented spike state: four 8.16 operator phases in table-entry
-; units, four block-rate signed fractional gains, and the operator-1
+; units, four signed fractional gains advanced by per-frame slopes, and the
 ; feedback output history.
 rt2_phase:
         ds      4
@@ -262,6 +262,13 @@ ym_cache_mul2:
 ; so their traffic can share an instruction with the modulator ring.
 rt2_fb_0_y:
         ds      1
+
+; One operator at a time consumes this 64-frame gain ramp. Building it once
+; per stage lets the synthesis MPY fetch the next per-frame gain for free in
+; its otherwise-unused Y-memory parallel-move slot.
+        org     y:$c0
+rt2_gain_ramp:
+        ds      64
 
 ; Phase and cache live in opposite internal memory banks so the common no-PM
 ; clock path can fetch both in one DSP instruction cycle. External Y below the
@@ -594,7 +601,7 @@ rt_profile_loop_done:
 
 ; Profile one block-oriented, algorithm-0-shaped codec-rate channel: a
 ; serial M1(feedback)->C1->M2->C2 chain with per-frame feedback and
-; modulation, block-rate envelope gains, and interleaved stereo output.
+; modulation, per-frame envelope gain slopes, and interleaved stereo output.
 ; Each operator processes one 64-frame block so its phase and gain stay
 ; in registers while the modulator ring is consumed in place by the next
 ; stage. This adds the work the four-carrier lower bound deliberately
@@ -624,6 +631,7 @@ rt2_clear_state:
         move    #ssi_buffer_a,r1
         move    #>63,m3
         move    #>63,m5
+        move    #>63,m7
         move    #>$40,y1               ; (phase*64*2)>>46 = table index
         move    #>$024a74,x1           ; 440 Hz: 2 + $4a74/65536 entries
 
@@ -637,7 +645,18 @@ rt2_profile_loop_start:
         move    #rt2_fb_1,r2
         move    #rt2_fb_0_y,r4
         move    x:rt2_phase,b
-        move    x:rt2_gain,y0
+
+        ; Derive a 64-frame operator gain ramp. The parallel store observes
+        ; A before SUB, leaving A at the next block's starting gain.
+        move    x:rt2_gain,a
+        move    #>$10,x0
+        move    #rt2_gain_ramp,r7
+        do      #DSP_RT2_BLOCK_FRAMES,rt2_op1_gain_ramp_done
+        sub     x0,a a1,y:(r7)+
+rt2_op1_gain_ramp_done:
+        move    a1,x:rt2_gain
+        move    y:(r7)+,y0
+
         do      #DSP_RT2_BLOCK_FRAMES,rt2_op1_done
         move    x:(r2),x0 y:(r4),a
         move    a1,x:(r2)              ; age the history before summing it
@@ -651,7 +670,7 @@ rt2_profile_loop_start:
         move    a1,n0
         add     x1,b
         move    y:(r0+n0),x0
-        mpy     x0,y0,a
+        mpy     x0,y0,a y:(r7)+,y0
         move    a,x:(r3)+ a,y:(r4)
 rt2_op1_done:
         move    b1,x:rt2_phase
@@ -661,7 +680,16 @@ rt2_op1_done:
         move    #rt2_stage_ring,r3
         move    #rt2_stage_ring,r5
         move    x:rt2_phase+1,b
-        move    x:rt2_gain+1,y0
+
+        move    x:rt2_gain+1,a
+        move    #>$0c,x0
+        move    #rt2_gain_ramp,r7
+        do      #DSP_RT2_BLOCK_FRAMES,rt2_op2_gain_ramp_done
+        sub     x0,a a1,y:(r7)+
+rt2_op2_gain_ramp_done:
+        move    a1,x:rt2_gain+1
+        move    y:(r7)+,y0
+
         move    x:(r3)+,a
         do      #DSP_RT2_BLOCK_FRAMES,rt2_op2_done
         add     b,a
@@ -670,7 +698,7 @@ rt2_op1_done:
         move    a1,n0
         add     x1,b
         move    y:(r0+n0),x0
-        mpy     x0,y0,a x:(r3)+,x0
+        mpy     x0,y0,a x:(r3)+,x0 y:(r7)+,y0
         move    a,x:(r5)+ x0,a
 rt2_op2_done:
         move    b1,x:rt2_phase+1
@@ -679,7 +707,16 @@ rt2_op2_done:
         move    #rt2_stage_ring,r3
         move    #rt2_stage_ring,r5
         move    x:rt2_phase+2,b
-        move    x:rt2_gain+2,y0
+
+        move    x:rt2_gain+2,a
+        move    #>$08,x0
+        move    #rt2_gain_ramp,r7
+        do      #DSP_RT2_BLOCK_FRAMES,rt2_op3_gain_ramp_done
+        sub     x0,a a1,y:(r7)+
+rt2_op3_gain_ramp_done:
+        move    a1,x:rt2_gain+2
+        move    y:(r7)+,y0
+
         move    x:(r3)+,a
         do      #DSP_RT2_BLOCK_FRAMES,rt2_op3_done
         add     b,a
@@ -688,7 +725,7 @@ rt2_op2_done:
         move    a1,n0
         add     x1,b
         move    y:(r0+n0),x0
-        mpy     x0,y0,a x:(r3)+,x0
+        mpy     x0,y0,a x:(r3)+,x0 y:(r7)+,y0
         move    a,x:(r5)+ x0,a
 rt2_op3_done:
         move    b1,x:rt2_phase+2
@@ -697,7 +734,16 @@ rt2_op3_done:
         ; fixed half-amplitude pan.
         move    #rt2_stage_ring,r3
         move    x:rt2_phase+3,b
-        move    x:rt2_gain+3,y0
+
+        move    x:rt2_gain+3,a
+        move    #>$04,x0
+        move    #rt2_gain_ramp,r7
+        do      #DSP_RT2_BLOCK_FRAMES,rt2_op4_gain_ramp_done
+        sub     x0,a a1,y:(r7)+
+rt2_op4_gain_ramp_done:
+        move    a1,x:rt2_gain+3
+        move    y:(r7)+,y0
+
         move    x:(r3)+,a
         do      #DSP_RT2_BLOCK_FRAMES,rt2_op4_done
         add     b,a
@@ -706,30 +752,11 @@ rt2_op3_done:
         move    a1,n0
         add     x1,b
         move    y:(r0+n0),x0
-        mpy     x0,y0,a x:(r3)+,x0
+        mpy     x0,y0,a x:(r3)+,x0 y:(r7)+,y0
         asr     a a1,x:(r1)+           ; left, then half-amplitude right
         move    a,x:(r1)+ x0,a
 rt2_op4_done:
         move    b1,x:rt2_phase+3
-
-        ; Block-rate envelopes: fixed per-operator decrements stand in for
-        ; segment-derived slopes at this stage of the spike.
-        move    x:rt2_gain,a
-        move    #>$400,x0
-        sub     x0,a
-        move    a1,x:rt2_gain
-        move    x:rt2_gain+1,a
-        move    #>$300,x0
-        sub     x0,a
-        move    a1,x:rt2_gain+1
-        move    x:rt2_gain+2,a
-        move    #>$200,x0
-        sub     x0,a
-        move    a1,x:rt2_gain+2
-        move    x:rt2_gain+3,a
-        move    #>$100,x0
-        sub     x0,a
-        move    a1,x:rt2_gain+3
 rt2_blocks_done:
         nop
 rt2_profile_loop_done:
@@ -747,6 +774,7 @@ rt2_checksum_done:
         move    #>-1,m0
         move    #>-1,m3
         move    #>-1,m5
+        move    #>-1,m7
         move    #>0,n0
         jsr     send_reply
         jmp     command_loop

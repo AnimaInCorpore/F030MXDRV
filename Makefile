@@ -216,7 +216,7 @@ smoke: check
 	@rg -q "Direct Transfer 0x01c0de" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x01c3c0" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x140000" build/hatari-smoke.trace
-	@rg -q "Transfer 0x000eb5" build/hatari-smoke.trace
+	@rg -q "Transfer 0x000e8e" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x01c3de" build/hatari-smoke.trace
 	@rg -q "XBIOS 0x80 Locksnd" build/hatari-smoke.trace
 	@rg -q "XBIOS 0x89 Dsptristate\\(0x1, 0x0\\)" build/hatari-smoke.trace

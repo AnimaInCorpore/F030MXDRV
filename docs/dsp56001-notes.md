@@ -180,27 +180,29 @@ M1(feedback)->C1->M2->C2 channel for 2048 codec frames in operator-major
 registers, writes a 64-word internal-X modulator ring, and the next stage
 consumes that ring in place. Feedback and modulation are applied on every
 frame by adding the previous output into the phase word before a single MPY
-extracts the sine-table index; envelope gains step once per 64-frame block.
-The carrier stage writes interleaved stereo into the reused audio buffers,
-and the reply is that block's checksum (`$000eb5`), gated by the smoke suite.
+extracts the sine-table index. Each stage first derives a 64-word gain ramp in
+internal Y RAM, then consumes one gain per codec frame. The carrier writes
+interleaved stereo into the reused audio buffers, and the reply is that block's
+checksum (`$000e8e`), gated by the smoke suite.
 
 The optimized loop splits feedback history across internal X/Y memory so it
 can fetch and update both words with the modulator ring, prefetches the next
 ring word beside each modulated-stage `MPY`, transfers that word into `A` while
 storing the previous result, and overlaps the carrier's left output store with
-its right-pan shift. These schedules retain the original checksum.
+its right-pan shift. The gain-ramp fetch occupies the remaining parallel Y slot
+on each synthesis `MPY`, so frame-accurate gain consumption adds no instruction
+to the operator loop itself; only block-rate ramp derivation remains visible.
 
-Hatari measures 102,756 instruction cycles for the block, or 50.17 cycles
-per channel/frame — a 1.28x surcharge over the 39.16-cycle four-carrier
-floor for the full modulation topology and 16.5% below the spike's first
-60.10-cycle implementation. The linear eight-channel projection is 401.39
-cycles against the 326.27-cycle codec-frame budget: the worst-case
-all-algorithm-0 workload misses real time by 1.23x, compared to the exact
+Hatari measures 111,204 instruction cycles for the block, or 54.30 cycles
+per channel/frame — a 1.39x surcharge over the 39.16-cycle four-carrier
+floor for the full modulation topology. Per-frame ramps add 4.13 cycles to
+the optimized block-rate spike but leave the completed version 9.7% below
+the first 60.10-cycle implementation. The linear eight-channel projection is
+434.39 cycles against the 326.27-cycle codec-frame budget: the worst-case
+all-algorithm-0 workload misses real time by 1.33x, compared to the exact
 kernel's 46.84x. Remaining headroom includes cheaper carrier-only stages for
-parallel algorithms, the serialized indexed sine reads, and shared block
-overhead; the spike's block-rate envelope gains must also become per-frame
-slopes with block-rate segment derivation to satisfy the compatibility
-contract's codec-frame quantization bound.
+parallel algorithms, the serialized indexed sine reads, shared ramp
+derivation, and shared block overhead.
 
 ## Embedded second-stage program loader
 
@@ -212,7 +214,7 @@ final YM program deliberately begins at `P:$0080`, leaving
 through `Dsp_BlkUnpacked`.
 
 The generated stream starts with magic `$4d584c`, followed by a section count
-and address/count/data records. The current program contains 2,926 initialized
+and address/count/data records. The current program contains 2,938 initialized
 words in five sparse P sections. After installing them, the loader replies
 `$4c4f41` and jumps through the replaced reset vector at `P:$0000`. The build
 generator rejects a bootstrap above the 512-word XBIOS limit, any overlap with

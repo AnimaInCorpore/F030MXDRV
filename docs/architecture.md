@@ -37,7 +37,7 @@ Every transport unit is one DSP/host 24-bit word. The upper byte is an opcode.
 | `11 00 00` + 2014 words | upload 1007 interleaved stereo PCM frames, mix with a new FM period, and start interrupt-fed SSI | `00 00 00` before transmit starts |
 | `12 00 00` | query the first nonzero mixed stereo probe | signed left+right sample sum |
 | `13 00 00` + 2014 words | upload PCM to the inactive buffer, render FM in place, and switch at a stereo boundary | `00 00 00` after the switch |
-| `14 00 00` | run the 2048-frame block-oriented algorithm-0 channel spike | deterministic checksum `00 0e b5` |
+| `14 00 00` | run the 2048-frame block-oriented algorithm-0 channel spike | deterministic checksum `00 0e 8e` |
 | anything else | unsupported command | `ff ff ff` |
 
 The synchronous acknowledgement intentionally provides back-pressure and keeps
@@ -80,8 +80,8 @@ move regressions cannot silently invalidate the timing result.
 
 Command `14` is the block-oriented successor spike. It renders one serial
 M1(feedback)->C1->M2->C2 channel for 2048 codec frames in operator-major
-64-frame blocks, with per-frame feedback and modulation, block-rate envelope
-gains, and interleaved stereo output. It owns `r0-r5`, `m0/m3/m5`, and `n0`
+64-frame blocks, with per-frame feedback, modulation, envelope gain slopes,
+and interleaved stereo output. It owns `r0-r5/r7`, `m0/m3/m5/m7`, and `n0`
 while SSI is stopped, reuses both audio buffers as its stereo output block,
 and replies with that block's deterministic checksum, which the smoke suite
 gates like command `10`'s.
@@ -214,17 +214,19 @@ feed later operator state.
 
 ## Remaining roadmap
 
-1. Close the measured 1.23x block-spike gap. Command `14` now renders one
+1. Close the measured 1.33x block-spike gap. Command `14` now renders one
    complete serial algorithm-0 channel — operator-1 feedback, per-frame
-   modulation, block-rate envelope gains, and interleaved stereo — in 50.17
-   cycles per codec frame, a 1.28x surcharge over the 39.16-cycle four-carrier
-   floor. The linear eight-channel projection is 401.39 cycles against the
-   326.27-cycle budget. Feedback state now uses dual X:Y moves, modulated stages
+   modulation, per-frame envelope gain slopes, and interleaved stereo — in
+   54.30 cycles per codec frame, a 1.39x surcharge over the 39.16-cycle four-
+   carrier floor. The linear eight-channel projection is 434.39 cycles against
+   the 326.27-cycle budget. Feedback state uses dual X:Y moves, modulated stages
    pipeline their ring reads with MPY/store traffic, and the carrier overlaps
-   its left output store with the pan shift. Recover the remaining difference
-   with cheaper carrier-only stages for parallel algorithms, less costly
-   indexed sine addressing, per-frame envelope slopes with block-rate segment
-   derivation, and SSI/event service costs measured in place.
+   its left output store with the pan shift. A reusable internal-Y ramp derives
+   each operator's 64 per-frame gains at block rate, then supplies the next
+   gain in the synthesis MPY's parallel Y slot. Recover the remaining
+   difference with cheaper carrier-only stages for parallel algorithms, less
+   costly indexed sine addressing, shared ramp derivation, and SSI/event
+   service costs measured in place.
 2. Add exact-to-perceptual comparison vectors for pitch, key/write timing,
    envelopes, LFO/noise rates, feedback spectra, and all eight algorithms.
 3. Integrate the selected real-time kernel with the rolling write FIFO and
