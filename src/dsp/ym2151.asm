@@ -1315,9 +1315,8 @@ ym_compute_phase_step:
         sub     y1,a
         move    a1,y0
         move    x:ym_lfo_pm,a
-        do      y0,ym_query_pm_shift_right
+        rep     y0
         asr     a
-ym_query_pm_shift_right:
         jmp     ym_query_pm_add
 
 ym_query_pm_high:
@@ -1326,9 +1325,8 @@ ym_query_pm_high:
         sub     x0,a
         move    a1,y0
         move    x:ym_lfo_pm,a
-        do      y0,ym_query_pm_shift_left
+        rep     y0
         asl     a
-ym_query_pm_shift_left:
 ym_query_pm_add:
         move    x:query_pm_delta,x0
         add     x0,a
@@ -1411,9 +1409,8 @@ ym_query_eff_ready:
         tst     b
         jeq     ym_query_phase_shifted
         move    b1,x0
-        do      x0,ym_query_phase_shift_loop
+        rep     x0
         lsr     a
-ym_query_phase_shift_loop:
         jmp     ym_query_phase_shifted
 
 ym_query_phase_clamp:
@@ -1478,13 +1475,13 @@ ym_query_multiple_half:
         move    #>1,y0
 
 ym_query_apply_multiple:
+        ; B = step*mul2 doubled at the B0 end; two arithmetic shifts leave
+        ; (step*mul2) >> 1, which fits 24 bits for every OPM step/MUL pair.
         move    a1,x0
-        clr     b
-        do      y0,ym_query_multiple_loop
-        add     x0,b
-ym_query_multiple_loop:
-        lsr     b
-        move    b1,a
+        mpy     x0,y0,b
+        asr     b
+        asr     b
+        move    b0,a
         rts
 
 ym_query_error:
@@ -1509,11 +1506,13 @@ ym_lookup_detune:
         move    x:table_slots,a
         tst     a
         jeq     ym_lookup_detune_mask
+        move    a1,y1                 ; shift count = slot*5 in one REP
+        rep     #2
+        asl     a
+        add     y1,a
         move    a1,y0
-        do      y0,ym_lookup_detune_shift
-        rep     #5
+        rep     y0
         lsr     b
-ym_lookup_detune_shift:
 ym_lookup_detune_mask:
         move    #>$1f,y0
         and     y0,b1
@@ -1719,19 +1718,6 @@ ym_expand_done:
 ; helpers after the main kernel so the LOD records stay small and monotonic.
 ym_lfo_code macro
 
-; Multiply signed x0 by unsigned y0 (only bits 0-7 are consumed). The 56001
-; multiplier is fractional, so this counted add keeps ymfm's integer domain
-; explicit and returns the unscaled product in a1.
-ym_multiply_s8_u8:
-        clr     a
-        move    y0,b
-        tst     b
-        jeq     ym_multiply_done
-        do      y0,ym_multiply_done
-        add     x0,a
-ym_multiply_done:
-        rts
-
 ; Sign-extend the low byte of a1 to a 24-bit integer.
 ym_sign_extend_byte:
         move    #>$ff,y0
@@ -1742,35 +1728,30 @@ ym_sign_extend_byte:
 ym_sign_extend_done:
         rts
 
-; Advance the continually-running 25-bit noise history once.
+; Advance the continually-running 25-bit noise history once. Direct bit
+; tests replace the former shift-and-mask extraction of single LFSR bits.
 ym_clock_noise_once:
-        move    x:ym_noise_lfsr_low,a
-        move    a1,b
-        rep     #16
-        lsr     a
-        rep     #13
-        lsr     b
         move    #>1,y0
-        and     y0,a1
-        and     y0,b1
-        move    b1,y1
-        add     y1,a
-        move    #>1,x0
-        add     x0,a
-        and     y0,a1
+        move    y0,a                  ; newbit = 1 ^ bit16 ^ bit13
+        jclr    #16,x:ym_noise_lfsr_low,ym_noise_bit16_clear
+        eor     y0,a
+ym_noise_bit16_clear:
+        jclr    #13,x:ym_noise_lfsr_low,ym_noise_bit13_clear
+        eor     y0,a
+ym_noise_bit13_clear:
         move    a1,x:ym_noise_newbit
 
-        move    x:ym_noise_lfsr_low,a
-        rep     #23
-        lsr     a
-        and     y0,a1
-        move    a1,x:ym_noise_lfsr_high
+        clr     b
+        jclr    #23,x:ym_noise_lfsr_low,ym_noise_bit23_clear
+        move    y0,b
+ym_noise_bit23_clear:
+        move    b1,x:ym_noise_lfsr_high
 
-        move    x:ym_noise_lfsr_low,a
-        asl     a
-        move    x:ym_noise_newbit,x0
-        add     x0,a
-        move    a1,x:ym_noise_lfsr_low
+        move    x:ym_noise_lfsr_low,b
+        asl     b
+        move    a1,x0
+        add     x0,b
+        move    b1,x:ym_noise_lfsr_low
 
         ; C++ post-increment semantics: compare the old counter, then either
         ; latch/reset or increment it.
@@ -1780,11 +1761,9 @@ ym_clock_noise_once:
         jlt     ym_clock_noise_increment
         clr     a
         move    a1,x:ym_noise_counter
-        move    x:ym_noise_lfsr_low,a
-        rep     #17
-        lsr     a
-        move    #>1,y0
-        and     y0,a1
+        jclr    #17,x:ym_noise_lfsr_low,ym_noise_state_clear
+        move    y0,a
+ym_noise_state_clear:
         move    a1,x:ym_noise_state
         rts
 ym_clock_noise_increment:
@@ -1823,9 +1802,8 @@ ym_clock_noise_lfo:
         tst     b
         jeq     ym_lfo_increment_ready
         move    b1,y0
-        do      y0,ym_lfo_increment_shift
+        rep     y0
         asl     a
-ym_lfo_increment_shift:
 ym_lfo_increment_ready:
         move    x:ym_lfo_fraction,x0
         add     x0,a
@@ -1952,6 +1930,8 @@ ym_lfo_wave_noise:
         move    a1,x:ym_lfo_raw_pm
 
 ym_lfo_apply_depth:
+        ; MPY leaves the integer product doubled at the A0 end of the
+        ; accumulator, so shifting one extra bit yields raw*depth >> 7.
         move    #ym_regdata+$19,r0
         nop
         move    x:(r0),a
@@ -1959,10 +1939,10 @@ ym_lfo_apply_depth:
         and     y0,a1
         move    a1,y0
         move    x:ym_lfo_raw_am,x0
-        jsr     ym_multiply_s8_u8
-        rep     #7
-        lsr     a
-        move    a1,x:ym_lfo_am
+        mpy     x0,y0,a
+        rep     #8
+        asr     a
+        move    a0,x:ym_lfo_am
 
         move    #ym_regdata+$1a,r0
         nop
@@ -1971,10 +1951,10 @@ ym_lfo_apply_depth:
         and     y0,a1
         move    a1,y0
         move    x:ym_lfo_raw_pm,x0
-        jsr     ym_multiply_s8_u8
-        rep     #7
+        mpy     x0,y0,a
+        rep     #8
         asr     a
-        move    a1,x:ym_lfo_pm
+        move    a0,x:ym_lfo_pm
         rts
 
         endm
@@ -1989,29 +1969,23 @@ ym_select_operator:
         move    a1,x:query_channel
         move    a1,x:synth_channel
 
+        ; The raw slot swaps the two operator bits into a 3-bit-aligned
+        ; field: offset = ((op&1)<<4) + ((op&2)<<2), giving 0,16,8,24.
         move    b1,a
         move    #>3,y0
         and     y0,a1
         move    a1,x:synth_operator
-        tst     a
-        jeq     ym_select_m1
-        move    #>1,x0
-        cmp     x0,a
-        jeq     ym_select_c1
-        move    #>2,x0
-        cmp     x0,a
-        jeq     ym_select_m2
-        move    #>24,a
-        jmp     ym_select_add_channel
-ym_select_m1:
-        clr     a
-        jmp     ym_select_add_channel
-ym_select_c1:
-        move    #>16,a
-        jmp     ym_select_add_channel
-ym_select_m2:
-        move    #>8,a
-ym_select_add_channel:
+        move    a1,b
+        rep     #4
+        asl     a
+        move    #>$10,y0
+        and     y0,a1
+        rep     #2
+        asl     b
+        move    #>8,y0
+        and     y0,b1
+        move    b1,x0
+        add     x0,a
         move    x:query_channel,x0
         add     x0,a
         move    a1,x:query_raw_operator
@@ -2047,9 +2021,8 @@ ym_effective_rate:
         move    x:synth_increment,a
         tst     b
         jeq     ym_rate_ksr_ready
-        do      x0,ym_rate_ksr_shift
+        rep     x0
         lsr     a
-ym_rate_ksr_shift:
 ym_rate_ksr_ready:
         move    a1,x:synth_increment  ; temporary ksrval
 
@@ -2264,9 +2237,8 @@ ym_env_state_ready:
         tst     b
         jeq     ym_env_no_mask
         move    #>1,a
-        do      x0,ym_env_mask_shift
+        rep     x0
         asl     a
-ym_env_mask_shift:
         move    #>1,y0
         sub     y0,a                  ; a = (1 << count)-1
         move    a1,y0
@@ -2278,9 +2250,8 @@ ym_env_no_mask:
         move    x0,b
         tst     b
         jeq     ym_env_index_ready
-        do      x0,ym_env_index_shift
+        rep     x0
         lsr     a
-ym_env_index_shift:
         jmp     ym_env_index_ready
 
 ym_env_fast_rate:
@@ -2313,23 +2284,21 @@ ym_env_index_ready:
         cmp     x0,b
         jge     ym_env_done
         move    x:synth_increment,b
-        tst     b
-        jeq     ym_env_done
 
+        ; env += (~env * increment) >> 4. The signed MPY leaves the doubled
+        ; product at the A0 end, so five arithmetic shifts complete the >>4.
+        ; A zero increment multiplies to a zero delta, needing no guard.
         move    #ym_envelope,r0
         nop
         move    x:(r0+n0),a
         not     a
         move    a1,x0
-        clr     a
         move    b1,y0
-        do      y0,ym_env_attack_multiply
-        add     x0,a
-ym_env_attack_multiply:
-        rep     #4
+        mpy     x0,y0,a
+        rep     #5
         asr     a
-        move    x:(r0+n0),b
-        move    b1,y1
+        move    a0,y1
+        move    x:(r0+n0),a
         add     y1,a
         move    a1,x:(r0+n0)
         rts
@@ -2434,9 +2403,8 @@ ym_volume_env_ready:
         tst     b
         jeq     ym_volume_shifted
         move    b1,y0
-        do      y0,ym_volume_power_shift
+        rep     y0
         lsr     a
-ym_volume_power_shift:
 ym_volume_shifted:
         move    x:volume_sign,b
         tst     b
@@ -2525,9 +2493,8 @@ ym_compute_am_offset:
         move    y0,b
         tst     b
         jeq     ym_compute_am_store
-        do      y0,ym_compute_am_shift
+        rep     y0
         asl     a
-ym_compute_am_shift:
 ym_compute_am_store:
         move    a1,x:synth_am_offset
         rts
@@ -2598,9 +2565,8 @@ ym_output_channel_active:
         tst     b
         jeq     ym_output_feedback_unshifted
         move    x:synth_result,a
-        do      y0,ym_output_feedback_shift
+        rep     y0
         asr     a
-ym_output_feedback_shift:
         move    a1,b
         jmp     ym_output_feedback_ready
 ym_output_feedback_unshifted:
@@ -2792,9 +2758,8 @@ ym_roundtrip_mask:
         jeq     ym_roundtrip_unmasked
         move    a1,y0
         move    #>1,a
-        do      y0,ym_roundtrip_mask_shift
+        rep     y0
         asl     a
-ym_roundtrip_mask_shift:
         move    #>1,x0
         sub     x0,a
         not     a
