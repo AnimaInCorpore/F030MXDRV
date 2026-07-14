@@ -542,6 +542,67 @@ start:
         cmp.l   #YM_REF_PHASE_CH0_OP0,d0
         bne     audio_protocol_failed
 
+        ; Exercise the direct-synthesis SSI path without claiming real-time
+        ; readiness. FIFO events must be consumed while fresh frames advance
+        ; the same rolling clock beyond the two bounded render periods.
+        moveq   #$28,d1
+        moveq   #$4a,d2
+        bsr     mxdrv_write_ym2151
+        tst.l   d0
+        bne     audio_protocol_failed
+
+        move.l  #2560,d0
+        moveq   #$28,d1
+        moveq   #$4b,d2
+        bsr     dsp_queue_write
+        tst.l   d0
+        bne     audio_protocol_failed
+
+        move.l  #2624,d0
+        moveq   #$28,d1
+        moveq   #$4c,d2
+        bsr     dsp_queue_write
+        tst.l   d0
+        bne     audio_protocol_failed
+
+        move.l  #DSP_CMD_START_LIVE,d0
+        bsr     dsp_exchange
+        cmp.l   #DSP_REPLY_OK,d0
+        bne     audio_protocol_failed
+
+        Cconws  live_audio_text
+        move.w  #49,d5                ; one second of measured fresh synthesis
+.live_audio_wait:
+        Vsync
+        dbra    d5,.live_audio_wait
+
+        move.l  #DSP_CMD_QUERY_TIME,d0
+        bsr     dsp_exchange
+        cmpi.l  #2625,d0               ; both scheduled writes must be consumed
+        bcs     audio_protocol_failed
+
+        move.l  #DSP_CMD_STOP_AUDIO,d0
+        bsr     dsp_exchange
+        cmp.l   #DSP_REPLY_OK,d0
+        bne     audio_protocol_failed
+
+        move.l  #DSP_CMD_QUERY_AUDIO,d0
+        bsr     dsp_exchange
+        cmpi.l  #512,d0                ; reject a stalled direct renderer
+        bcs     audio_protocol_failed
+
+        moveq   #0,d1
+        moveq   #0,d2
+        bsr     mxdrv_query_phase_step
+        cmp.l   #YM_REF_PHASE_CH0_OP0,d0
+        bne     audio_protocol_failed
+
+        ; Unique completion marker for the live-render integration gate.
+        move.l  #DSP_CMD_PING+$b00b,d0
+        bsr     dsp_exchange
+        cmp.l   #DSP_REPLY_HELLO,d0
+        bne     audio_protocol_failed
+
         Dsptristate #0,#0
         Unlocksnd
 
@@ -598,6 +659,9 @@ ready_text:
 
 audio_text:
         dc.b    'Playing a three-second DSP YM2151 SSI burst...',13,10,0
+
+live_audio_text:
+        dc.b    'Measuring one second of fresh DSP YM2151 synthesis...',13,10,0
 
 reserve_error_text:
         dc.b    'Error: unable to reserve the Falcon DSP.',13,10

@@ -56,13 +56,13 @@ clocking that channel's next feedback input to zero. Released envelopes already
 at `$3ff` bypass rate derivation until a later key-on makes them active again.
 Phase, key edges, feedback history, LFO/noise, and timers continue to clock.
 
-Frequently accessed scalar state now occupies internal `X:$0000-$003e`.
+Frequently accessed scalar state now occupies internal `X:$0000-$003f`.
 Short-address loads and stores remove an extension word and avoid external RAM;
 this reduced the initialized loader payload from 8,100 to 7,113 bytes before
-adding the FIFO code. The build checks the converted payload against the 8 KiB
-TOS limit.
+adding the FIFO and live-stream code. The protocol-v8 image is 7,818 bytes; the
+build checks it against the 8 KiB TOS limit.
 
-## Falcon SSI staging path
+## Falcon SSI buffered and live paths
 
 The bounded audio probe configures SSI control A as `$4100`: 16-bit words and
 two words per synchronous network frame. Control B is `$1a00`: synchronous
@@ -77,16 +77,24 @@ codec frame and stores the latest result. A 1007-frame stereo block occupies
 uninitialized external X RAM at `$0c00`; it adds no initialized `.LOD` records
 and ends below the reserved X-memory boundary.
 
-The streaming loop polls the host receive flag between SSI words. It accepts
-normal packed register writes and replies through the existing synchronous
-transport without stopping SSI. Since this milestone repeats a pre-rendered
-block, the write changes only the retained YM state; the phase cache is rebuilt
-after transmit is disabled. Continuous rendering will instead consume
-timestamped writes at native-sample boundaries.
+The common streaming loop polls the host receive flag between SSI words. It
+accepts normal packed register writes and replies through the existing
+synchronous transport without stopping SSI. Buffered mode repeats the
+pre-rendered block, so a later write cannot change audio already in that block.
+Protocol command `$10` instead calls the resampler and YM kernel for every fresh
+left/right frame after enabling SSI; direct writes refresh its phase cache
+immediately.
 
-Protocol v7 implements that event shape with a rolling clock. A 32-entry FIFO
-stores an absolute 16-bit native-sample time beside each packed register write.
-Entries must be in nondecreasing modular order and within the 32,767-sample
-future horizon; all writes due at a boundary are applied before clocking that
-YM sample. FIFO and clock-query transactions are serviced during SSI, and the
-clock continues across renders instead of restarting at zero.
+Protocol v8 implements that event shape with a rolling clock. A refillable
+32-entry ring FIFO stores an absolute 16-bit native-sample time beside each
+packed register write. Entries must be in nondecreasing modular order and
+within the 32,767-sample future horizon; all writes due at a boundary are
+applied before clocking that YM sample. FIFO and clock-query transactions are
+serviced during either SSI mode, and the clock continues across sessions
+instead of restarting at zero.
+
+The direct mode is currently a throughput instrument, not an underrun-free
+player. The Hatari smoke gate generated 5,679 fresh codec frames and advanced
+7,217 native samples during a nominal 50-VBL interval. That is about 11.5% of
+the required 49,169.921875 frames per second and gives future kernel
+specialization a concrete end-to-end target.

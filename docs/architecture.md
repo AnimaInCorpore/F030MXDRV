@@ -12,14 +12,14 @@ routine receives the register in `d1.b` and data in `d2.b`, mirrors the byte in
 `OPMBuf`, then writes the X68000 OPM ports. `src/m68k/mxdrv_port.s` preserves
 those input conventions and replaces the hardware write with one DSP word.
 
-## Host/DSP protocol v7
+## Host/DSP protocol v8
 
 Every transport unit is one DSP/host 24-bit word. The upper byte is an opcode.
 
 | Word | Meaning | Reply |
 | --- | --- | --- |
-| `01 00 00` | ping/protocol query | `4d 58 07` (`MX`, version 7) |
-| `02 rr dd` | write YM2151 register `rr = dd`, including during bounded SSI playback | `00 00 00` |
+| `01 00 00` | ping/protocol query | `4d 58 08` (`MX`, version 8) |
+| `02 rr dd` | write YM2151 register `rr = dd`, including during either SSI mode | `00 00 00` |
 | `03 00 00` | reset YM2151 state | `00 00 00` |
 | `04 00 00` | clock one native 62.5 kHz sample | signed left sample |
 | `05 cc oo` | query phase step for channel `cc`, logical operator `oo` | 20-bit phase step |
@@ -33,6 +33,7 @@ Every transport unit is one DSP/host 24-bit word. The upper byte is an opcode.
 | `0d 00 00` | query completed SSI stereo frames | unsigned 24-bit frame count |
 | `0e tt tt` + `02 rr dd` | queue `rr = dd` at absolute rolling native time `tttt` | `00 00 00`, or error if invalid/full/out of order |
 | `0f 00 00` | query the rolling 16-bit native-sample clock | unsigned 16-bit time |
+| `10 00 00` | start experimental direct synthesis and SSI transmit | `00 00 00` before transmit starts |
 | anything else | unsupported command | `ff ff ff` |
 
 The synchronous acknowledgement intentionally provides back-pressure and keeps
@@ -41,21 +42,21 @@ until command `04` advances the 64 input clocks represented by one native
 sample. Command `04` is a testable sample clock, not the eventual real-time
 audio path. Command `0e` establishes the event transport needed by the future
 SSI-driven synthesis loop: up to 32 writes are accepted in nondecreasing
-modular order and applied before the exact native sample. The 16-bit clock
-wraps naturally; entries must be no more than 32,767 samples ahead. Command
-`0f` exposes the current scheduling position to the host.
+modular order and applied before the exact native sample. The storage is a ring
+FIFO, so the host can refill slots after earlier entries are consumed. The
+16-bit clock wraps naturally; entries must be no more than 32,767 samples
+ahead. Command `0f` exposes the current scheduling position to the host.
 
 Command `0a` is the one bootstrap exception to the single-word transaction
 shape: it consumes exactly 329 following host words before replying. Moving
 those initialized records into the host executable recovered about 1 KiB from
-the TOS 4.02 converted-loader limit. During the bounded audio session, the
-stream loop accepts synchronous command `02` writes and command `0c`. Because
-the repeated block was rendered before SSI starts, writes update chip state for
-the next render and the static phase cache is rebuilt after SSI stops; they do
-not retroactively change the active block. It also accepts `0e` transactions,
-which remain queued for the next render. The rolling clock is not reset by
-`0b`, so consecutive renders consume one continuous event timeline; only chip
-reset returns it to zero.
+the TOS 4.02 converted-loader limit. Both audio modes accept synchronous command
+`02` writes, `0e` transactions, `0f` queries, and command `0c`. In bounded mode,
+the repeated block was rendered before SSI starts, so later writes cannot alter
+that block. In direct mode, the phase cache is refreshed immediately and queued
+writes are consumed as fresh frames advance native time. The rolling clock is
+not reset by either start command, so buffered and live sessions share one
+continuous event timeline; only chip reset returns it to zero.
 
 The constants are duplicated in `src/m68k/protocol.i` and
 `src/dsp/protocol.inc` because the two assemblers do not share syntax. Keep the
@@ -85,17 +86,18 @@ protocol version in the ping reply whenever either side changes incompatibly.
    SSI network frames. The 68030 locks the sound system, connects DSP transmit
    to the DAC without handshaking, validates the transmitted frame count, stops
    and tristates SSI, and unlocks sound. The current scalar YM kernel cannot
-   synthesize at codec cadence (Hatari measured only 3,241 fresh frames in a
-   three-second direct-stream experiment). The first optimization pass now
+   synthesize at codec cadence. The first optimization pass now
    caches static phase increments, reduces the no-PM phase loop to parallel
    phase/cache fetch plus add/store, and bypasses terminal envelopes and fully
    silent channels without changing the exact sample vectors. The SSI loop also
    services synchronous writes through the real MXDRV `WriteOPM` seam and
-   preserves them for the next render. Protocol v7 adds a checked 32-entry FIFO,
-   a queryable rolling native clock, and exact sample-boundary writes across
-   consecutive renders. More operator specialization and cycle measurement are
-   still required before the pre-rendered block can be replaced by continuous
-   live synthesis.
+   preserves them for the next render. Protocol v8 adds a checked, refillable
+   32-entry ring FIFO, a queryable rolling native clock, and an experimental
+   direct SSI mode that consumes exact sample-boundary writes while generating
+   fresh frames. The Hatari smoke run generated 5,679 fresh frames during its
+   nominal one-second direct probe, about 11.5% of codec cadence. More operator
+   specialization and cycle measurement are still required before this mode is
+   underrun-free on hardware and can replace the pre-rendered transport proof.
 6. **PCM/PDX:** add the X68000 ADPCM path and mixer, then compatibility tests
    for real MDX/PDX material.
 

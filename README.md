@@ -27,21 +27,23 @@ silent channels also bypass work that cannot affect chip state or output. Hot
 scalar state now occupies short-addressable internal X RAM, reducing both
 external accesses and the converted DSP image size.
 
-That path pre-renders one exact 1280-native-sample/1007-codec-frame resampling
-period on the DSP, replays the stereo block through 16-bit SSI at 49.17 kHz, and
-routes DSP transmit to the Falcon DAC through the XBIOS sound matrix. The host
-locks and releases the sound system, stops and tristates the DSP output, and
-checks that at least 100,000 stereo frames crossed SSI during the bounded
-three-second probe.
+The full-rate transport path pre-renders one exact
+1280-native-sample/1007-codec-frame resampling period on the DSP, replays the
+stereo block through 16-bit SSI at 49.17 kHz, and routes DSP transmit to the
+Falcon DAC through the XBIOS sound matrix. A separate protocol-v8 live mode now
+renders every frame after SSI starts, advances the same rolling native clock,
+and consumes timestamped writes without a staging boundary. It is a measured
+optimization target rather than the final audio path: the current Hatari gate
+produced 5,679 fresh frames in a nominal one-second interval, versus about
+49,170 required by the codec.
 
 This is not a complete music driver yet. MDX command replay and timer service,
-PDX mixing, and continuous underrun-free synthesis remain. The current SSI path
-loops a pre-rendered validation block. It now services synchronous MXDRV
-register writes while streaming and preserves them for the next render, but
-those writes cannot alter audio that was already rendered. Protocol v7 also
-provides a 32-entry FIFO of exact register events on a rolling 16-bit native
-sample clock; the same FIFO and clock-query transactions work while SSI is
-active, and the clock persists across consecutive renders.
+PDX mixing and continuous underrun-free synthesis remain. The buffered SSI mode
+still supplies the full-rate transport proof, while the live mode proves the
+direct scheduling and synthesis control flow despite underrunning. Protocol v8
+provides a refillable 32-entry ring FIFO of exact register events on a rolling
+16-bit native sample clock; FIFO and clock-query transactions work while SSI is
+active, and the clock persists across buffered and live sessions.
 The exact boundary between implemented and pending work is kept in
 [the architecture notes](docs/architecture.md).
 
@@ -74,8 +76,9 @@ and a timer-driven CSM key sample:
 make smoke
 ```
 
-The smoke test also verifies sound locking, DSP-to-DAC matrix setup, audio
-start/stop, an SSI frame-count floor, tristating, and sound unlock under Hatari.
+The smoke test also verifies sound locking, DSP-to-DAC matrix setup, buffered
+and live audio start/stop, rolling-clock FIFO writes during live synthesis, SSI
+frame-count floors, tristating, and sound unlock under Hatari.
 
 The outputs are:
 
@@ -85,9 +88,9 @@ release/ym2151.lod
 ```
 
 Keep both files in the same Falcon directory. `f030mxdrv.tos` loads
-`ym2151.lod`, runs the conformance checks and bounded SSI burst, and reports the
-result on the TOS console. `make run` starts it in Hatari when Hatari is
-installed. It is a test harness at this stage, not yet an MDX player.
+`ym2151.lod`, runs the conformance checks plus buffered and live SSI probes, and
+reports the result on the TOS console. `make run` starts it in Hatari when
+Hatari is installed. It is a test harness at this stage, not yet an MDX player.
 
 ## Source map
 

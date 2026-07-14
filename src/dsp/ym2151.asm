@@ -117,6 +117,8 @@ ym_queue_read_index:
         ds      1
 ym_queue_timestamp:
         ds      1
+ssi_live_mode:
+        ds      1
 
 ; Scratch state. Keeping it explicit makes subroutine register clobbers safe
 ; and leaves the protocol probes useful while the real-time loop evolves.
@@ -281,6 +283,10 @@ command_loop:
         cmp     x0,a
         jeq     command_query_time
 
+        move    #>DSP_CMD_START_LIVE,x0
+        cmp     x0,a
+        jeq     command_start_live
+
         move    #>DSP_REPLY_ERROR,a
         jsr     send_reply
         jmp     command_loop
@@ -385,9 +391,9 @@ command_start_audio:
         movep   #0,x:m_crb
         movep   #$4100,x:m_cra          ; 16-bit, two-word network frame
         clr     a
+        move    a1,x:ssi_live_mode
         move    a1,x:ssi_resample_phase
         move    a1,x:ssi_frame_count
-        move    a1,x:ym_queue_read_index
         move    #>1007,a
         move    a1,x:ssi_buffer_remaining
         move    #ssi_buffer_left,r4
@@ -422,9 +428,27 @@ command_start_audio_render:
         movep   #$1a00,x:m_crb          ; sync network mode, transmit enabled
         jmp     ssi_stream_loop
 
-; While bounded audio is active, accept synchronous register writes as well as
-; stop. The looped block is already rendered, so phase-cache refresh is safely
-; deferred until stop; the updated chip state takes effect on the next render.
+; Start an experimental direct-synthesis stream. Unlike command 0b, every
+; transmitted frame is rendered after SSI starts and advances the rolling
+; native clock. This is intentionally a throughput probe until the scalar YM
+; kernel is fast enough to meet the codec deadline without underruns.
+command_start_live:
+        movep   #0,x:m_crb
+        movep   #$4100,x:m_cra
+        clr     a
+        move    a1,x:ssi_resample_phase
+        move    a1,x:ssi_frame_count
+        move    a1,x:ssi_output_slot
+        move    #>1,a
+        move    a1,x:ssi_live_mode
+        move    #>DSP_REPLY_OK,a
+        jsr     send_reply
+        movep   #$1a00,x:m_crb
+        jmp     ssi_stream_loop
+
+; While either audio mode is active, accept synchronous register writes,
+; timestamped writes, clock queries, and stop. Direct writes refresh the phase
+; cache immediately so the live renderer observes them on its next frame.
 ssi_stream_loop:
         jclr    #0,x:m_hsr,ssi_stream_data
         movep   x:m_hrx,x1
@@ -457,6 +481,7 @@ ssi_stream_queue_write:
 
 ssi_stream_write:
         jsr     ym_write_packed
+        jsr     ym_refresh_phase_cache
         move    #>DSP_REPLY_OK,a
         jsr     send_reply
         jmp     ssi_stream_data
@@ -467,6 +492,9 @@ ssi_stream_command_error:
 
 ssi_stream_data:
         jclr    #m_tde,x:m_sr,ssi_stream_loop
+        move    x:ssi_live_mode,a
+        tst     a
+        jne     ssi_stream_live
         move    x:ssi_output_slot,a
         tst     a
         jeq     ssi_stream_left
@@ -500,9 +528,37 @@ ssi_stream_left_ready:
         move    a1,x:ssi_frame_count
         jmp     ssi_stream_loop
 
+ssi_stream_live:
+        move    x:ssi_output_slot,a
+        tst     a
+        jeq     ssi_stream_live_left
+
+        move    x:ym_last_right,a
+        rep     #8
+        asl     a
+        movep   a1,x:m_tx
+        clr     a
+        move    a1,x:ssi_output_slot
+        jmp     ssi_stream_loop
+
+ssi_stream_live_left:
+        jsr     ssi_render_frame
+        move    x:ym_last_left,a
+        rep     #8
+        asl     a
+        movep   a1,x:m_tx
+        move    #>1,a
+        move    a1,x:ssi_output_slot
+        move    x:ssi_frame_count,a
+        move    #>1,x0
+        add     x0,a
+        move    a1,x:ssi_frame_count
+        jmp     ssi_stream_loop
+
 command_stop_audio:
         movep   #0,x:m_crb
         clr     a
+        move    a1,x:ssi_live_mode
         move    a1,x:ssi_output_slot
         movep   a1,x:m_tx
         jsr     ym_rebuild_phase_cache
@@ -597,8 +653,13 @@ ym_enqueue_write:
         tst     a
         jeq     ym_enqueue_store
 
+        move    x:ym_queue_read_index,a
+        move    x:ym_queue_count,x0
+        add     x0,a
         move    #>1,x0
         sub     x0,a
+        move    #>31,y0
+        and     y0,a1
         move    a1,n0
         move    #ym_write_queue_times,r0
         nop
@@ -613,7 +674,12 @@ ym_enqueue_write:
         jlt     ym_enqueue_error
 
 ym_enqueue_store:
-        move    x:ym_queue_count,n0
+        move    x:ym_queue_read_index,a
+        move    x:ym_queue_count,x0
+        add     x0,a
+        move    #>31,y0
+        and     y0,a1
+        move    a1,n0
         move    n0,n1
         move    #ym_write_queue_times,r0
         move    #ym_write_queue_commands,r1
@@ -663,6 +729,8 @@ ym_apply_queued_due:
         move    x:ym_queue_read_index,a
         move    #>1,x0
         add     x0,a
+        move    #>31,y0
+        and     y0,a1
         move    a1,x:ym_queue_read_index
         move    x:ym_queue_count,a
         sub     x0,a
@@ -712,7 +780,7 @@ ym_reset_envelope_state:
 ym_reset_runtime_loop:
         move    #ym_env_counter,r0
         clr     a
-        do      #24,ym_reset_global_loop
+        do      #32,ym_reset_global_loop
         move    a1,x:(r0)+
 ym_reset_global_loop:
         move    #>1,a
