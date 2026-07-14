@@ -1,98 +1,99 @@
 # F030MXDRV
 
-F030MXDRV is an Atari Falcon port/recreation of MXDRV 2.06+17. The intended
-division of work is:
+**Sharp X68000 music on an Atari Falcon — with the Yamaha YM2151 emulated,
+bit-exact, on the Falcon's own DSP.**
 
-- the Falcon 68030 runs the MXDRV-compatible MDX/PDX driver and timing;
-- the Falcon DSP56001 emulates the X68000's Yamaha YM2151 (OPM);
-- the Falcon crossbar/codec ultimately receives stereo samples from the DSP.
+F030MXDRV is a native Atari Falcon port/recreation of MXDRV 2.06+17, the
+X68000's canonical MDX/PDX music driver. The Falcon 68030 runs the
+MXDRV-compatible driver and timing, the Falcon DSP56001 emulates the X68000's
+Yamaha YM2151 (OPM), and the Falcon crossbar/codec receives the stereo result.
 
-The current milestone is executable on TOS and under Hatari. The 68030 side now
-has the original 32-entry MXDRV call-table shape, owned MDX/PDX buffers, core
-transport state, an `OPMBuf`-compatible mirror, and a DSP-backed replacement for
-MXDRV's `WriteOPM`. A bounded MDX executor validates the sequence/voice table
-and all 16 track offsets, advances encoded waits and notes, loads standard FM
-voice records, performs tempo/raw OPM writes and FM key-on/off, and maps PCM
-tracks 8-15 to the eight PDX voices. E9/EA repeats and EB final-pass escape use
-the original mutable in-stream counter layout with bounds checks. A guarded
-timer-service entry reports exact YM Timer-B periods in native sample units,
-and public play connects it to an otherwise-idle MFP Timer A. Its 1024 Hz ISR
-only accumulates pending ticks; a foreground pump performs the XBIOS/DSP work
-and stop restores timer/vector ownership. A TTP command-line mode now loads an
-MDX plus an optional PDX through GEMDOS, runs that pump once per VBL, accepts a
-key to stop, and restores MFP, DSP SSI, crossbar, and sound-lock ownership on
-every exit path. Standard raw PDX banks now have validated 96-entry sample
-lookup and eight streaming decoder voices that match the X68000 MSM6258
-predictor, step, clamping, and nibble order. The host-side PCM8 layer applies
-all five playback rates, the 16 volume steps, common hardware pan, and saturating
-stereo mixing at the Falcon codec cadence. The DSP clocks stereo YM2151 samples
-at the native 62.5 kHz
-rate with phase accumulation, ADSR envelopes, logarithmic sine/power lookup,
-operator feedback, all eight algorithms, panning, and YM3012 output rounding.
-The DSP also clocks all four LFO waveforms, AM/PM depth and sensitivity,
-operator AM gating, the channel-7 noise generator, Timer A/B status and reload
-semantics, CSM keying, and the 64-clock busy flag. Generated tables and expected
-tone/noise/CSM samples come mechanically from the vendored ymfm implementation.
-Packed immutable tables now live in the 68030 executable and are uploaded during
-DSP bootstrap. The complete sparse program is embedded there as well: a
-111-word `Dsp_ExecBoot` first stage receives 2,824 initialized P-memory words
-through the host port, removing the former 8 KiB converted-LOD ceiling. The
-first cycle-oriented pass caches all 32 unmodulated phase
-increments across register writes in internal Y RAM, advances them with
-parallel X/Y fetches, and retains the full frequency calculation only on
-samples with non-zero phase modulation. Terminal release envelopes and fully
-silent channels also bypass work that cannot affect chip state or output. Hot
-scalar state now occupies short-addressable internal X RAM, reducing both
-external accesses and the converted DSP image size.
+To our knowledge this is a world first: a register- and sample-exact YM2151
+running on the Falcon's DSP56001, verified against MAME's ymfm down to
+individual stereo samples — surrounded by the complete MXDRV call-table,
+a bounded MDX executor, X68000-exact MSM6258 ADPCM (PDX) decoding, and
+interrupt-fed DAC transport, all on stock Falcon hardware.
 
-The full-rate transport path uses the DSP56001 SSI transmit interrupt to replay
-one exact 1280-native-sample/1007-codec-frame resampling period through 16-bit
-SSI at 49.17 kHz, with DSP transmit routed to the Falcon DAC through the XBIOS
-sound matrix. Protocol v11 gives the DSP two interleaved stereo buffers in
-external X RAM. The 68030 uploads one 1007-frame PDX period into the inactive
-buffer; the DSP renders the matching FM period in place with signed 16-bit
-saturation, switches buffers at a stereo boundary, and leaves the last complete
-block repeating if a refill misses one or more codec periods. Timestamped YM
-writes retain one rolling native-sample clock across refills.
+## Highlights
 
-A deterministic Hatari DSP profile now measures the exact renderer with all 32
-operators active on the cached no-PM path. It consumes 16,459,267 instruction
-cycles for one 1280-sample period, or 12,858.80 cycles per native sample against
-the Falcon's 256.68-cycle budget. The resulting 50.10x miss rules out treating
-the current scalar, ymfm-equivalent kernel as the eventual real-time engine.
-It remains the conformance reference. The selected real-time target is a
-perceptual codec-rate FM kernel with exact write ordering, register semantics,
-and drift-free pitch/control timing, rather than sample equality.
+- **Bit-exact OPM synthesis on the DSP56001.** Phase accumulation, ADSR
+  envelopes, logarithmic sine/power lookup, operator feedback, all eight
+  algorithms, panning, and YM3012 output rounding — every table and expected
+  sample generated mechanically from the vendored ymfm implementation.
+- **The whole chip, not just the tone path.** All four LFO waveforms, AM/PM
+  depth and sensitivity, operator AM gating, the channel-7 noise generator,
+  Timer A/B status and reload semantics, CSM keying, and the 64-clock busy
+  flag.
+- **A real MXDRV, not a shim.** The original 32-entry call-table shape, owned
+  MDX/PDX buffers, an `OPMBuf`-compatible mirror, a DSP-backed `WriteOPM`,
+  and a bounded MDX executor covering voice loading, tempo and raw OPM
+  writes, FM key-on/off, E9/EA repeats with the original mutable in-stream
+  counter layout, EB final-pass escapes, and PCM tracks 8–15 mapped to eight
+  PDX voices.
+- **X68000-exact ADPCM.** Validated 96-entry PDX sample lookup and eight
+  streaming decoder voices matching the MSM6258 predictor, step, clamping,
+  and nibble order, with all five playback rates, 16 volume steps, hardware
+  pan, and saturating stereo mixing at the Falcon codec cadence.
+- **Continuous DAC transport.** The DSP SSI transmit interrupt replays exact
+  1280-native-sample/1007-codec-frame resampling periods through 16-bit SSI
+  at 49.17 kHz into the Falcon DAC, double-buffered, with timestamped YM
+  register events on a rolling native-sample clock that survives refills.
+- **Verified, measured, reproducible.** A native ymfm oracle, golden
+  tone/noise/CSM/vibrato traces, a Hatari integration smoke test, and two
+  deterministic DSP cycle profilers gate every change.
 
-The first codec-rate feasibility kernel now provides a second, narrower cycle
-gate. It uses DSP modulo address rings and parallel X/Y moves to advance four
-drift-free phases, dual-fetch a 256-entry linear sine table and four distinct
-static gains, multiply/sum one algorithm-7 channel, and retain a checksum in
-39.16 instruction cycles per codec frame. A linear
-eight-channel projection is 313.31 cycles against the 326.27-cycle frame
-budget. The 12.96-cycle margin is only 4.0% and excludes envelope evolution, feedback,
-modulation routing, event service, stereo output, and SSI. This establishes
-that the oscillator arithmetic itself fits, but also rules out simply adding
-those features to a conventional scalar channel loop. The next real-time spike
-is therefore block-oriented and specialized by YM algorithm so amplitude and
-modulation work can occupy otherwise-parallel memory slots.
+## Honest status
 
-This is not a complete music driver yet. MDX synchronization/modulation and
-real-time mixed-block production remain.
-FM E4/E5/E6 now preserve algorithm-specific modulator TLs and rewrite only
-carrier TLs through MXDRV's indexed/raw attenuation rules; PCM volume changes
-also update active PDX voices without restarting their decoders. The
-command-line player now feeds both FM and PDX through the interrupt-buffered
-path. It produces uninterrupted DAC transport, but not accurate wall-clock
-playback yet: the exact full-load DSP kernel needs about 1,026 ms of modeled DSP
-time to render the 20.48 ms of fresh audio in one block, so the completed block
-repeats while the next one is prepared. Protocol v11 also provides a refillable
-32-entry ring FIFO of exact register events on a rolling 16-bit native-sample
-clock; FIFO and
-clock-query transactions work while SSI is active, and the clock persists
-across buffered refills.
-The exact boundary between implemented and pending work is kept in
-[the architecture notes](docs/architecture.md).
+This is not a finished music driver yet — and the numbers below are exactly
+why the project publishes its own profiler.
+
+- The command-line player feeds FM and PDX through the interrupt-buffered
+  path with uninterrupted DAC transport, but **not accurate wall-clock
+  playback**: the sample-exact FM kernel currently needs about 959 ms of
+  modeled DSP time to render each 20.48 ms block, so a completed block
+  repeats while the next one renders.
+- The exact kernel measures **12,022.76 instruction cycles per native
+  62.5 kHz sample** against the Falcon's **256.68-cycle** budget — a 46.84x
+  real-time miss (down from 50.10x before the current optimization pass).
+  It is kept as the conformance reference.
+- The selected real-time target is a perceptual codec-rate FM kernel with
+  exact write ordering, register semantics, and drift-free pitch/control
+  timing, rather than sample equality. A first codec-rate feasibility kernel
+  already advances four drift-free oscillators in 39.16 cycles per codec
+  frame using modulo rings and parallel X/Y moves; its linear eight-channel
+  projection is 313.31 cycles against the 326.27-cycle frame budget. That
+  4.0% margin excludes envelopes, feedback, modulation routing, event
+  service, and SSI — so the eventual engine will be block-oriented and
+  specialized by YM algorithm.
+- MDX synchronization/modulation and real-time mixed-block production
+  remain. The exact boundary between implemented and pending work is kept in
+  [the architecture notes](docs/architecture.md).
+
+## How it fits together
+
+- The 68030 executable embeds everything the DSP needs: packed immutable
+  ymfm tables, plus the complete sparse DSP program behind a 111-word
+  `Dsp_ExecBoot` first stage that receives 2,751 initialized P-memory words
+  through the host port — removing the 8 KiB converted-LOD ceiling.
+- The DSP kernel caches all 32 unmodulated phase increments across register
+  writes in internal Y RAM and advances them with parallel X/Y fetches.
+  Samples with non-zero phase modulation combine cached per-operator
+  frequency data with the live LFO value instead of re-decoding registers.
+  Terminal release envelopes and fully silent channels bypass work that
+  cannot affect chip state or output; hot scalar state lives in
+  short-addressable internal X RAM.
+- Protocol v11 gives the DSP two interleaved stereo buffers in external
+  X RAM. The 68030 uploads one 1007-frame PDX period into the inactive
+  buffer; the DSP renders the matching FM period in place with signed 16-bit
+  saturation, switches buffers at a stereo boundary, and leaves the last
+  complete block repeating if a refill misses a codec period. A refillable
+  32-entry ring FIFO carries exact register events with native-sample
+  timestamps while SSI runs.
+- A guarded timer-service entry reports exact YM Timer-B periods in native
+  sample units; public play connects it to an otherwise-idle MFP Timer A
+  whose 1024 Hz ISR only accumulates ticks, with a foreground pump doing the
+  XBIOS/DSP work. Every exit path restores MFP, DSP SSI, crossbar, and
+  sound-lock ownership.
 
 ## Build
 
@@ -101,55 +102,48 @@ The repository uses the same tools bundled with `third_party/f030dsp3d`:
 - vasm/vlink are bootstrapped from its source archives;
 - Motorola's DSP assembler and `CLDLOD` run under DOSBox Staging (or DOSBox).
 
-On the current development setup:
-
 ```sh
 make check
 ```
 
-This also compiles a native MAME/ymfm oracle, mechanically generates compressed
-DSP lookup tables, and emits a 256-sample reference trace under
+This also compiles a native MAME/ymfm oracle, mechanically generates
+compressed DSP lookup tables, and emits a 256-sample reference trace under
 `build/reference/`.
 
-When Hatari is installed, the non-interactive integration smoke test boots TOS
-4.02, loads the DSP program, and verifies ping/reset/register-write traffic,
-the MXDRV `OPMBuf` seam, an exact phase step, envelope state, stereo sample
-checkpoints, and all eight algorithms with feedback against ymfm, including
-signed YM3012 rounding. It also checks busy/status, a deterministic LFO
-boundary, channel-7 noise output, Timer A/B boundaries and status reset/cancel,
-and a timer-driven CSM key sample:
+## Verify
+
+When Hatari is installed, the non-interactive integration smoke test boots
+TOS 4.02, loads the DSP program, and verifies ping/reset/register-write
+traffic, the MXDRV `OPMBuf` seam, an exact phase step, envelope state, stereo
+sample checkpoints, and all eight algorithms with feedback against ymfm,
+including signed YM3012 rounding. It also checks busy/status, a deterministic
+LFO boundary, a maximum-depth saw-vibrato sample through the dynamic PM path,
+channel-7 noise output, Timer A/B boundaries and status reset/cancel, and a
+timer-driven CSM key sample:
 
 ```sh
 make smoke
 ```
 
-The smoke test also verifies standard PDX lookup bounds, empty and malformed
-entries, exact MSM6258 samples, and a generated two-voice rate/gain/pan mixer
-vector. It uploads a complete host-rendered PCM period and verifies the first
-nonzero DSP-mixed stereo sum before checking
-sound locking, DSP-to-DAC matrix setup, interrupt-fed A/B buffer refills,
-rolling-clock FIFO writes during both refill directions, prepared-frame counts,
-three seconds of safe block repetition, tristating, and sound unlock under
-Hatari.
-It also copies a 16-track MDX fixture through the public API, verifies E2 FM
-voice loading, E0/E1 writes, FM note duration/key-off, and a timed track-8 PDX
-trigger. The fixture also covers two-pass E9/EA repetition, EB final-pass escape,
-Timer-B period changes, rejection of an out-of-range repeat target, automatic
-MFP tick accumulation, foreground draining, and timer release on stop.
+The same run verifies standard PDX lookup bounds, empty and malformed
+entries, exact MSM6258 samples, a generated two-voice rate/gain/pan mixer
+vector, a complete host-rendered PCM period mixed by the DSP, sound locking,
+DSP-to-DAC matrix setup, interrupt-fed A/B buffer refills, rolling-clock FIFO
+writes during both refill directions, three seconds of safe block repetition,
+and clean teardown. It also copies a 16-track MDX fixture through the public
+API, covering FM voice loading, E0/E1 writes, note duration/key-off, a timed
+track-8 PDX trigger, two-pass E9/EA repetition, EB final-pass escape, Timer-B
+period changes, rejection of an out-of-range repeat target, and timer release
+on stop.
 
-Hatari can also capture a cycle profile of the deterministic eight-channel
-renderer and write its summary to `build/dsp-profile/report.txt`:
+Hatari can also capture the cycle profiles behind the status numbers above:
 
 ```sh
-make profile-dsp
+make profile-dsp      # exact eight-channel renderer -> build/dsp-profile/report.txt
+make profile-dsp-rt   # codec-rate four-operator floor -> build/dsp-profile-rt/report.txt
 ```
 
-The optimized codec-rate four-operator floor has its own reproducible report at
-`build/dsp-profile-rt/report.txt`:
-
-```sh
-make profile-dsp-rt
-```
+## Run
 
 The outputs are:
 
@@ -162,7 +156,7 @@ release/ym2151.lod
 The DSP bootstrap and program are embedded in the executable. `ym2151.lod` is
 retained as a readable assembler artifact and is reopened only by the
 no-argument conformance mode to cover the GEMDOS player file path.
-`f030mxdrv.tos` runs those conformance checks plus the interrupt-buffered SSI
+`f030mxdrv.tos` runs the conformance checks plus the interrupt-buffered SSI
 probe and reports the result on the TOS console. `f030mxdrv.ttp` is the same
 executable with a Desktop command-line entry point:
 
@@ -173,9 +167,9 @@ F030MXDRV.TTP song.mdx [bank.pdx]
 The MDX is limited to 65,536 bytes and the optional raw PDX bank to 319,488
 bytes. Filenames are whitespace-delimited TOS paths. Press any key during
 playback to stop. This is an integration player rather than a finished audio
-path: SSI transport remains continuous, but the exact full-load FM renderer is
-about 50.10 times slower than the codec consumes it.
-`make run` starts the no-argument conformance mode in Hatari.
+path: SSI transport remains continuous, but the exact full-load FM renderer
+is about 46.84 times slower than the codec consumes it. `make run` starts the
+no-argument conformance mode in Hatari.
 
 ## Source map
 
@@ -197,6 +191,7 @@ about 50.10 times slower than the codec consumes it.
 - `tests/traces/attack_all_carriers.trace`: timestamped oracle input trace.
 - `tests/traces/noise_channel7.trace`: fastest-rate channel-7 noise trace.
 - `tests/traces/timer_csm.trace`: two-sample Timer A/CSM oracle trace.
+- `tests/traces/vibrato_pm.trace`: maximum-rate saw-vibrato PM oracle trace.
 - `docs/ym2151-ground-truth.md`: facts extracted from the vendored MAME core.
 - `docs/pdx-ground-truth.md`: PDX table and X68000 ADPCM decoding facts.
 - `docs/mdx-ground-truth.md`: MDX sequence, track, duration, and command facts.
