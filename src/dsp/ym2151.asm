@@ -112,6 +112,18 @@ ym_timer_b_counter:
 ym_timer_b_phase:
         ds      1
 
+; Falcon SSI output state. The codec's 25.175 MHz / 4 / 128 rate is
+; 49,169.921875 Hz, so 62.5 kHz native OPM time advances by exactly 1280/1007
+; samples per codec frame.
+ssi_output_slot:
+        ds      1
+ssi_resample_phase:
+        ds      1
+ssi_frame_count:
+        ds      1
+ssi_buffer_remaining:
+        ds      1
+
 ; Scratch state. Keeping it explicit makes subroutine register clobbers safe
 ; and leaves the protocol probes useful while the real-time loop evolves.
 synth_index:
@@ -163,7 +175,6 @@ table_current:
 start:
         movep   #1,x:m_pbc              ; enable the Falcon host port
         move    #>-1,m0                 ; linear addressing for ym_regdata
-        jsr     ym_expand_tables
         jsr     ym_reset
 
 command_loop:
@@ -210,6 +221,22 @@ command_loop:
         move    #>DSP_CMD_QUERY_LFO,x0
         cmp     x0,a
         jeq     command_query_lfo
+
+        move    #>DSP_CMD_LOAD_TABLES,x0
+        cmp     x0,a
+        jeq     command_load_tables
+
+        move    #>DSP_CMD_START_AUDIO,x0
+        cmp     x0,a
+        jeq     command_start_audio
+
+        move    #>DSP_CMD_STOP_AUDIO,x0
+        cmp     x0,a
+        jeq     command_stop_audio
+
+        move    #>DSP_CMD_QUERY_AUDIO,x0
+        cmp     x0,a
+        jeq     command_query_audio
 
         move    #>DSP_REPLY_ERROR,a
         jsr     send_reply
@@ -285,6 +312,147 @@ command_query_lfo:
         add     x0,a
         jsr     send_reply
         jmp     command_loop
+
+; Receive the packed ymfm tables from the 68030, expand the runtime lookup
+; arrays, and reset the chip before acknowledging the bootstrap transaction.
+; Keeping immutable source data in the host executable leaves the constrained
+; TOS DSP loader responsible only for code.
+command_load_tables:
+        move    #opm_uploaded_tables,r0
+        do      #YM_TABLE_WORDS,command_load_tables_loop
+        jclr    #0,x:m_hsr,*
+        movep   x:m_hrx,a
+        move    a1,y:(r0)+
+command_load_tables_loop:
+        jsr     ym_expand_tables
+        jsr     ym_reset
+        move    #>DSP_REPLY_OK,a
+        jsr     send_reply
+        jmp     command_loop
+
+; Start a bounded host-controlled Falcon audio session. First pre-render one
+; exact 1007-frame resampling period while SSI is disabled; the tight streaming
+; loop can then prove full-rate crossbar transport without synthesis underruns.
+; Continuous playback will replace this looped staging buffer once the YM
+; kernel is cycle-budgeted for the 56001.
+command_start_audio:
+        movep   #0,x:m_crb
+        movep   #$4100,x:m_cra          ; 16-bit, two-word network frame
+        clr     a
+        move    a1,x:ssi_resample_phase
+        move    a1,x:ssi_frame_count
+        move    #>1007,a
+        move    a1,x:ssi_buffer_remaining
+        move    #ssi_buffer_left,r4
+        move    #ssi_buffer_right,r5
+command_start_audio_render:
+        jsr     ssi_render_frame
+        move    x:ym_last_left,a
+        rep     #8
+        asl     a
+        move    a1,x:(r4)+
+        move    x:ym_last_right,a
+        rep     #8
+        asl     a
+        move    a1,x:(r5)+
+        move    x:ssi_buffer_remaining,a
+        move    #>1,x0
+        sub     x0,a
+        move    a1,x:ssi_buffer_remaining
+        jne     command_start_audio_render
+
+        move    #ssi_buffer_left,r4
+        move    #ssi_buffer_right,r5
+        nop
+        move    x:(r4)+,a
+        movep   a1,x:m_tx
+        move    #>1006,a
+        move    a1,x:ssi_buffer_remaining
+        move    #>1,a
+        move    a1,x:ssi_output_slot
+        move    #>DSP_REPLY_OK,a
+        jsr     send_reply
+        movep   #$1a00,x:m_crb          ; sync network mode, transmit enabled
+        jmp     ssi_stream_loop
+
+; While audio is active the host may stop the stream through the normal host
+; port. Other commands are rejected rather than racing the synthesis state.
+ssi_stream_loop:
+        jclr    #0,x:m_hsr,ssi_stream_data
+        movep   x:m_hrx,a
+        move    #>DSP_CMD_STOP_AUDIO,x0
+        cmp     x0,a
+        jeq     command_stop_audio
+        move    #>DSP_REPLY_ERROR,a
+        jsr     send_reply
+
+ssi_stream_data:
+        jclr    #m_tde,x:m_sr,ssi_stream_loop
+        move    x:ssi_output_slot,a
+        tst     a
+        jeq     ssi_stream_left
+
+        move    x:(r5)+,a
+        movep   a1,x:m_tx
+        clr     a
+        move    a1,x:ssi_output_slot
+        jmp     ssi_stream_loop
+
+ssi_stream_left:
+        move    x:ssi_buffer_remaining,a
+        tst     a
+        jne     ssi_stream_left_ready
+        move    #ssi_buffer_left,r4
+        move    #ssi_buffer_right,r5
+        move    #>1007,a
+        move    a1,x:ssi_buffer_remaining
+ssi_stream_left_ready:
+        move    x:(r4)+,a
+        movep   a1,x:m_tx
+        move    #>1,a
+        move    a1,x:ssi_output_slot
+        move    x:ssi_buffer_remaining,a
+        move    #>1,x0
+        sub     x0,a
+        move    a1,x:ssi_buffer_remaining
+        move    x:ssi_frame_count,a
+        move    #>1,x0
+        add     x0,a
+        move    a1,x:ssi_frame_count
+        jmp     ssi_stream_loop
+
+command_stop_audio:
+        movep   #0,x:m_crb
+        clr     a
+        move    a1,x:ssi_output_slot
+        movep   a1,x:m_tx
+        move    #>DSP_REPLY_OK,a
+        jsr     send_reply
+        jmp     command_loop
+
+command_query_audio:
+        move    x:ssi_frame_count,a
+        jsr     send_reply
+        jmp     command_loop
+
+; Zero-order native-rate conversion. Each 49.17 kHz codec frame advances the
+; 62.5 kHz YM kernel once or twice according to the exact 1280:1007 ratio.
+ssi_render_frame:
+        move    x:ssi_resample_phase,a
+        move    #>1280,x0
+        add     x0,a
+ssi_render_frame_loop:
+        move    #>1007,x0
+        cmp     x0,a
+        jlt     ssi_render_frame_done
+        sub     x0,a
+        move    a1,x:ssi_resample_phase
+        jsr     ym_clock_sample
+        move    x:ssi_resample_phase,a
+        jmp     ssi_render_frame_loop
+ssi_render_frame_done:
+        move    a1,x:ssi_resample_phase
+        rts
 
 ; Send a single 24-bit reply from a1.
 send_reply:
@@ -2198,6 +2366,15 @@ ym_clock_timers_done:
         rts
 
         ym_lfo_code
+
+; Uninitialized external X RAM does not consume TOS's converted .LOD budget.
+; One stereo block spans the exact 1007-frame denominator of the native-to-
+; codec rate ratio and is replayed only by the bounded SSI transport probe.
+        org     x:$c00
+ssi_buffer_left:
+        ds      1007
+ssi_buffer_right:
+        ds      1007
 
         include 'ymtables.inc'          ; DOS assembler requires an 8.3 name
 

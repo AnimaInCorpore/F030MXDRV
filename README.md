@@ -17,11 +17,22 @@ The DSP also clocks all four LFO waveforms, AM/PM depth and sensitivity,
 operator AM gating, the channel-7 noise generator, Timer A/B status and reload
 semantics, CSM keying, and the 64-clock busy flag. Generated tables and expected
 tone/noise/CSM samples come mechanically from the vendored ymfm implementation.
+Packed immutable tables now live in the 68030 executable and are uploaded during
+DSP bootstrap, leaving enough of TOS 4.02's loader budget for the first Falcon
+audio path.
+
+That path pre-renders one exact 1280-native-sample/1007-codec-frame resampling
+period on the DSP, replays the stereo block through 16-bit SSI at 49.17 kHz, and
+routes DSP transmit to the Falcon DAC through the XBIOS sound matrix. The host
+locks and releases the sound system, stops and tristates the DSP output, and
+checks that at least 100,000 stereo frames crossed SSI during the bounded
+three-second probe.
 
 This is not a complete music driver yet. MDX command replay and timer service,
-PDX mixing, resampling, and Falcon SSI/crossbar output remain. The exact
-boundary between implemented and pending work is kept in [the architecture
-notes](docs/architecture.md).
+PDX mixing, and continuous underrun-free synthesis remain. The current SSI path
+loops a pre-rendered validation block; it does not yet accept live register
+writes while streaming. The exact boundary between implemented and pending work
+is kept in [the architecture notes](docs/architecture.md).
 
 ## Build
 
@@ -52,6 +63,9 @@ and a timer-driven CSM key sample:
 make smoke
 ```
 
+The smoke test also verifies sound locking, DSP-to-DAC matrix setup, audio
+start/stop, an SSI frame-count floor, tristating, and sound unlock under Hatari.
+
 The outputs are:
 
 ```text
@@ -60,9 +74,9 @@ release/ym2151.lod
 ```
 
 Keep both files in the same Falcon directory. `f030mxdrv.tos` loads
-`ym2151.lod`, runs the conformance checks, and reports the result on the TOS
-console. `make run` starts it in Hatari when Hatari is installed. It is a test
-harness at this stage, not yet an MDX player.
+`ym2151.lod`, runs the conformance checks and bounded SSI burst, and reports the
+result on the TOS console. `make run` starts it in Hatari when Hatari is
+installed. It is a test harness at this stage, not yet an MDX player.
 
 ## Source map
 

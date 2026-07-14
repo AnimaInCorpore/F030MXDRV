@@ -18,6 +18,58 @@
         trap    #1
         endm
 
+        macro   Vsync
+        move.w  #37,-(sp)
+        trap    #14
+        addq.l  #2,sp
+        endm
+
+        macro   Locksnd
+        move.w  #128,-(sp)
+        trap    #14
+        addq.l  #2,sp
+        endm
+
+        macro   Unlocksnd
+        move.w  #129,-(sp)
+        trap    #14
+        addq.l  #2,sp
+        endm
+
+        macro   Setmode mode
+        move.w  \1,-(sp)
+        move.w  #132,-(sp)
+        trap    #14
+        addq.l  #4,sp
+        endm
+
+        macro   Settracks play,record
+        move.w  \2,-(sp)
+        move.w  \1,-(sp)
+        move.w  #133,-(sp)
+        trap    #14
+        addq.l  #6,sp
+        endm
+
+        macro   Dsptristate transmit,receive
+        move.w  \2,-(sp)
+        move.w  \1,-(sp)
+        move.w  #137,-(sp)
+        trap    #14
+        addq.l  #6,sp
+        endm
+
+        macro   Devconnect source,destinations,clock,prescale,protocol
+        move.w  \5,-(sp)
+        move.w  \4,-(sp)
+        move.w  \3,-(sp)
+        move.w  \2,-(sp)
+        move.w  \1,-(sp)
+        move.w  #139,-(sp)
+        trap    #14
+        lea     12(sp),sp
+        endm
+
         macro   Dsp_Unlock
         move.w  #105,-(sp)
         trap    #14

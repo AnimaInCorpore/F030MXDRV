@@ -18,6 +18,7 @@ RELEASE_DIR := release
 
 YM2151_ORACLE := $(NATIVE_BUILD)/ym2151_oracle
 YM2151_TABLES := $(GENERATED_BUILD)/ym2151_tables.inc
+YM2151_HOST_TABLES := $(GENERATED_BUILD)/ym2151_host_tables.i
 YM2151_REFERENCE := $(GENERATED_BUILD)/ym2151_reference.i
 YM2151_VECTORS := $(REFERENCE_BUILD)/attack_all_carriers.tsv
 
@@ -39,7 +40,7 @@ host: $(RELEASE_DIR)/f030mxdrv.tos
 
 dsp: $(RELEASE_DIR)/ym2151.lod
 
-reference: $(YM2151_REFERENCE) $(YM2151_TABLES) $(YM2151_VECTORS)
+reference: $(YM2151_REFERENCE) $(YM2151_TABLES) $(YM2151_HOST_TABLES) $(YM2151_VECTORS)
 
 tools: $(VASM) $(VLINK)
 
@@ -76,12 +77,16 @@ $(YM2151_TABLES): tools/generate_ym2151_tables.py $(YMFM_SOURCE)/ymfm_fm.ipp
 	@mkdir -p $(GENERATED_BUILD)
 	python3 tools/generate_ym2151_tables.py $(YMFM_SOURCE)/ymfm_fm.ipp > $@
 
+$(YM2151_HOST_TABLES): tools/generate_ym2151_tables.py $(YMFM_SOURCE)/ymfm_fm.ipp
+	@mkdir -p $(GENERATED_BUILD)
+	python3 tools/generate_ym2151_tables.py --host $(YMFM_SOURCE)/ymfm_fm.ipp > $@
+
 $(YM2151_VECTORS): $(YM2151_ORACLE) tests/traces/attack_all_carriers.trace
 	@mkdir -p $(REFERENCE_BUILD)
 	$(YM2151_ORACLE) --vectors tests/traces/attack_all_carriers.trace 256 > $@
 
 $(M68K_BUILD)/%.o: src/m68k/%.s src/m68k/xbios.i src/m68k/protocol.i \
-		$(YM2151_REFERENCE) $(VASM)
+		$(YM2151_REFERENCE) $(YM2151_HOST_TABLES) $(VASM)
 	@mkdir -p $(M68K_BUILD)
 	$(VASM) $< -quiet -Felf -m68030 -Isrc/m68k -I$(GENERATED_BUILD) \
 		-o $@ -L $(M68K_BUILD)/$*.lst
@@ -129,12 +134,12 @@ smoke: check
 		--machine falcon --dsp emu \
 		--tos third_party/f030dsp3d/tools/tos402.rom --patch-tos true \
 		--fast-boot true --fast-forward true --sound off \
-		--confirm-quit false --run-vbls 800 \
+		--confirm-quit false --run-vbls 1200 \
 		--log-file build/hatari-smoke.log \
 		--trace-file build/hatari-smoke.trace \
 		--trace gemdos,dsp_host_interface,xbios \
 		$(RELEASE_DIR)/f030mxdrv.tos
-	@rg -q "Transfer 0x4d5804" build/hatari-smoke.trace
+	@rg -q "Transfer 0x4d5805" build/hatari-smoke.trace
 	@rg -q "Transfer 0x000080" build/hatari-smoke.trace
 	@rg -q "Transfer 0x01fc00" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x021b00" build/hatari-smoke.trace
@@ -151,6 +156,13 @@ smoke: check
 	@rg -q "Transfer 0x000002" build/hatari-smoke.trace
 	@rg -q "Transfer 0x0001aa" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x01c0de" build/hatari-smoke.trace
+	@rg -q "XBIOS 0x80 Locksnd" build/hatari-smoke.trace
+	@rg -q "XBIOS 0x89 Dsptristate\\(0x1, 0x0\\)" build/hatari-smoke.trace
+	@rg -q "XBIOS 0x8B Devconnect\\(1, 0x8, 0, 1, 1\\)" build/hatari-smoke.trace
+	@rg -q "Direct Transfer 0x0b0000" build/hatari-smoke.trace
+	@rg -q "Direct Transfer 0x0c0000" build/hatari-smoke.trace
+	@rg -q "XBIOS 0x89 Dsptristate\\(0x0, 0x0\\)" build/hatari-smoke.trace
+	@rg -q "XBIOS 0x81 Unlocksnd" build/hatari-smoke.trace
 	@echo "Hatari MXDRV/DSP ymfm sample-oracle smoke test: OK"
 
 run: all

@@ -25,15 +25,16 @@ def integers(body: str) -> list[int]:
     return [int(token, 0) for token in re.findall(r"0x[0-9a-fA-F]+|\b\d+\b", body)]
 
 
-def emit_table(name: str, values: list[int], width: int = 8) -> None:
+def emit_dsp_reservation(name: str, values: list[int]) -> None:
     print(f"{name}:")
+    print(f"        ds      {len(values)}")
+    print()
+
+
+def emit_m68k_table(values: list[int], width: int = 8) -> None:
     for offset in range(0, len(values), width):
         row = ",".join(str(value) for value in values[offset : offset + width])
-        print(f"        dc      {row}")
-    # Force CLDLOD to emit bounded blocks. TOS 4.02's LOD converter rejects
-    # very large contiguous data records even when the reserved RAM is ample.
-    print("        ds      1")
-    print()
+        print(f"        dc.l    {row}")
 
 
 def pack_nibbles(values: list[int]) -> list[int]:
@@ -69,11 +70,15 @@ def pack_fixed(values: list[int], bits: int) -> list[int]:
 
 
 def main() -> int:
-    if len(sys.argv) != 2:
-        print(f"usage: {Path(sys.argv[0]).name} path/to/ymfm_fm.ipp", file=sys.stderr)
+    host_output = len(sys.argv) == 3 and sys.argv[1] == "--host"
+    if len(sys.argv) != 2 and not host_output:
+        print(
+            f"usage: {Path(sys.argv[0]).name} [--host] path/to/ymfm_fm.ipp",
+            file=sys.stderr,
+        )
         return 2
 
-    source_path = Path(sys.argv[1])
+    source_path = Path(sys.argv[2] if host_output else sys.argv[1])
     source = source_path.read_text(encoding="utf-8")
 
     phase = integers(initializer(source, "static const uint32_t s_phase_step[12*64]"))
@@ -99,50 +104,61 @@ def main() -> int:
     if actual != expected:
         raise RuntimeError(f"ymfm table shape changed: expected {expected}, got {actual}")
 
-    print("; Generated from third_party/mame/3rdparty/ymfm/src/ymfm_fm.ipp.")
-    print("; The source tables are BSD-3-Clause licensed by their ymfm authors.")
-    print("; Do not edit this build artifact by hand.")
-    print()
-    # Falcon external P memory aliases external X/Y RAM. Keep the generated
-    # lookup block above the complete command kernel and its clock helpers.
-    print("        org     y:$c00")
-    print()
     phase_deltas = [(right - left) // 32 for left, right in zip(phase, phase[1:])]
     if any((right - left) % 32 for left, right in zip(phase, phase[1:])):
         raise RuntimeError("phase table is no longer delta-packable in 32-unit steps")
 
-    print("opm_phase_step:")
-    print(f"        ds      {len(phase)}")
-    print()
-    print("opm_envelope_increment:")
-    print(f"        ds      {len(increments)}")
-    print()
-    print("opm_detune_adjustment:")
-    print(f"        ds      {len(detune)}")
-    print()
-    print("opm_sine_attenuation:")
-    print(f"        ds      {len(sine)}")
-    print()
-    print("opm_power:")
-    print(f"        ds      {len(power)}")
-    print()
-
-    emit_table("opm_phase_step_packed", [phase[0], *pack_fixed(phase_deltas, 3)])
-    emit_table("opm_detune_adjustment_packed", pack_fixed(detune, 5))
+    packed_phase = [phase[0], *pack_fixed(phase_deltas, 3)]
+    packed_detune = pack_fixed(detune, 5)
     sine_deltas = [left - right for left, right in zip(sine, sine[1:])]
-    emit_table(
-        "opm_sine_attenuation_packed",
-        [sine[0], *sine_deltas[:5], *pack_fixed(sine_deltas[5:], 6)],
-    )
+    packed_sine = [sine[0], *sine_deltas[:5], *pack_fixed(sine_deltas[5:], 6)]
     if any(value & 3 for value in power):
         raise RuntimeError("power table is no longer exactly quarter-packable")
     quarter_power = [value >> 2 for value in power]
     power_deltas = [left - right for left, right in zip(quarter_power, quarter_power[1:])]
-    emit_table("opm_power_packed", [quarter_power[0], *pack_fixed(power_deltas, 3)])
-    emit_table("opm_envelope_increment_packed", pack_nibbles(increments))
-    # Packed exactly like fm_channel::output_4op's s_algorithm_ops table.
-    emit_table("opm_algorithm_ops", [0x035, 0x03A, 0x064, 0x071, 0x131, 0x313, 0x301, 0x380])
-    emit_table("opm_dt2_delta", [0, 384, 500, 608], width=4)
+    packed_power = [quarter_power[0], *pack_fixed(power_deltas, 3)]
+    packed_increments = pack_nibbles(increments)
+    algorithm_ops = [0x035, 0x03A, 0x064, 0x071, 0x131, 0x313, 0x301, 0x380]
+    dt2_delta = [0, 384, 500, 608]
+    uploaded_tables = [
+        ("opm_phase_step_packed", packed_phase),
+        ("opm_detune_adjustment_packed", packed_detune),
+        ("opm_sine_attenuation_packed", packed_sine),
+        ("opm_power_packed", packed_power),
+        ("opm_envelope_increment_packed", packed_increments),
+        ("opm_algorithm_ops", algorithm_ops),
+        ("opm_dt2_delta", dt2_delta),
+    ]
+    table_words = sum(len(values) for _, values in uploaded_tables)
+
+    print("; Generated from third_party/mame/3rdparty/ymfm/src/ymfm_fm.ipp.")
+    print("; The source tables are BSD-3-Clause licensed by their ymfm authors.")
+    print("; Do not edit this build artifact by hand.")
+    print()
+
+    if host_output:
+        print(f"YM_TABLE_WORDS        equ     {table_words}")
+        print(f"YM_TABLE_UPLOAD_WORDS equ     {table_words + 1}")
+        print()
+        print("ym2151_table_upload:")
+        print("        dc.l    DSP_CMD_LOAD_TABLES")
+        for _, values in uploaded_tables:
+            emit_m68k_table(values)
+    else:
+        # Falcon external P memory aliases external X/Y RAM. Keep the runtime
+        # lookup block above the complete command kernel and its clock helpers.
+        print("        org     y:$c00")
+        print()
+        emit_dsp_reservation("opm_phase_step", phase)
+        emit_dsp_reservation("opm_envelope_increment", increments)
+        emit_dsp_reservation("opm_detune_adjustment", detune)
+        emit_dsp_reservation("opm_sine_attenuation", sine)
+        emit_dsp_reservation("opm_power", power)
+        print(f"YM_TABLE_WORDS equ     {table_words}")
+        print("opm_uploaded_tables:")
+        for name, values in uploaded_tables:
+            emit_dsp_reservation(name, values)
+        print("opm_uploaded_tables_end:")
 
     return 0
 

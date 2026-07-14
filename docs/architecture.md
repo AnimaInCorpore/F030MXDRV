@@ -12,13 +12,13 @@ routine receives the register in `d1.b` and data in `d2.b`, mirrors the byte in
 `OPMBuf`, then writes the X68000 OPM ports. `src/m68k/mxdrv_port.s` preserves
 those input conventions and replaces the hardware write with one DSP word.
 
-## Host/DSP protocol v4
+## Host/DSP protocol v5
 
 Every transport unit is one DSP/host 24-bit word. The upper byte is an opcode.
 
 | Word | Meaning | Reply |
 | --- | --- | --- |
-| `01 00 00` | ping/protocol query | `4d 58 04` (`MX`, version 4) |
+| `01 00 00` | ping/protocol query | `4d 58 05` (`MX`, version 5) |
 | `02 rr dd` | write YM2151 register `rr = dd` | `00 00 00` |
 | `03 00 00` | reset YM2151 state | `00 00 00` |
 | `04 00 00` | clock one native 62.5 kHz sample | signed left sample |
@@ -27,6 +27,10 @@ Every transport unit is one DSP/host 24-bit word. The upper byte is an opcode.
 | `07 00 ii` | query logical operator `ii` | 10-bit envelope attenuation |
 | `08 00 00` | query chip status | timer flags plus busy in bit 7 |
 | `09 00 00` | query LFO state | packed phase, AM, signed PM bytes |
+| `0a 00 00` + 329 words | upload packed immutable ymfm tables | `00 00 00` after expansion/reset |
+| `0b 00 00` | pre-render and start the bounded SSI block | `00 00 00` before transmit starts |
+| `0c 00 00` | stop and disable DSP SSI transmit | `00 00 00` |
+| `0d 00 00` | query completed SSI stereo frames | unsigned 24-bit frame count |
 | anything else | unsupported command | `ff ff ff` |
 
 The synchronous acknowledgement intentionally provides back-pressure and keeps
@@ -35,6 +39,13 @@ until command `04` advances the 64 input clocks represented by one native
 sample. Command `04` is a testable sample clock, not the eventual real-time
 audio path. A bounded write FIFO plus an SSI-driven synthesis loop should
 replace per-write/per-sample exchanges once playback is running.
+
+Command `0a` is the one bootstrap exception to the single-word transaction
+shape: it consumes exactly 329 following host words before replying. Moving
+those initialized records into the host executable recovered about 1 KiB from
+the TOS 4.02 converted-loader limit. During the bounded audio session, the
+stream loop accepts only command `0c`; live register traffic remains the next
+transport milestone.
 
 The constants are duplicated in `src/m68k/protocol.i` and
 `src/dsp/protocol.inc` because the two assemblers do not share syntax. Keep the
@@ -58,9 +69,16 @@ protocol version in the ping reply whenever either side changes incompatibly.
    10.3-float round-trip behavior, all LFO waveforms, AM/PM modulation,
    channel-7 noise, Timer A/B load/reload/reset/status behavior, CSM keying,
    and the write-busy status bit are implemented.
-5. **Falcon audio:** clock the DSP synthesis kernel, resample the X68000's
-   62.5 kHz OPM stream for a supported Falcon codec rate, and transmit stereo
-   through SSI/crossbar. Restore all locked audio/DSP resources on exit.
+5. **Falcon audio (in progress):** the DSP now converts 1280 native 62.5 kHz
+   samples into 1007 frames at the Falcon's 25.175 MHz / 4 / 128 codec rate,
+   then a bounded probe loops that exact stereo block through 16-bit, two-word
+   SSI network frames. The 68030 locks the sound system, connects DSP transmit
+   to the DAC without handshaking, validates the transmitted frame count, stops
+   and tristates SSI, and unlocks sound. The current scalar YM kernel cannot
+   synthesize at codec cadence (Hatari measured only 3,241 fresh frames in a
+   three-second direct-stream experiment), so cycle optimization and a bounded
+   register FIFO are required before the pre-rendered block can be replaced by
+   continuous live synthesis.
 6. **PCM/PDX:** add the X68000 ADPCM path and mixer, then compatibility tests
    for real MDX/PDX material.
 

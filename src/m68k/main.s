@@ -9,6 +9,13 @@ DSP_Y_WORDS     equ     8192
 DSP_ABILITY     equ     3
 DSP_LOAD_BUFFER equ     40000
 
+SOUND_STEREO16  equ     1
+SOUND_DSP_XMIT  equ     1
+SOUND_DAC       equ     8
+SOUND_CLK25M    equ     0
+SOUND_CLK50K    equ     1
+SOUND_NO_SHAKE  equ     1
+
         text
 
 start:
@@ -25,6 +32,12 @@ start:
         move.l  #DSP_CMD_PING,d0
         bsr     dsp_exchange
         cmp.l   #DSP_REPLY_HELLO,d0
+        bne     protocol_failed
+
+        clr.l   dsp_table_reply
+        Dsp_BlkUnpacked ym2151_table_upload,#YM_TABLE_UPLOAD_WORDS,dsp_table_reply,#1
+        move.l  dsp_table_reply,d0
+        cmp.l   #DSP_REPLY_OK,d0
         bne     protocol_failed
 
         moveq   #0,d0                  ; MXDRV call $00: reset
@@ -400,9 +413,59 @@ start:
         cmp.l   #DSP_REPLY_HELLO,d0
         bne     protocol_failed
 
+        ; Feed a known sustained voice into the first end-to-end DSP SSI path.
+        bsr     mxdrv_reset
+        tst.l   d0
+        bne     protocol_failed
+        lea     attack_trace(pc),a3
+        moveq   #27,d3
+.write_audio_trace:
+        moveq   #0,d1
+        moveq   #0,d2
+        move.b  (a3)+,d1
+        move.b  (a3)+,d2
+        bsr     mxdrv_write_ym2151
+        tst.l   d0
+        bne     protocol_failed
+        dbra    d3,.write_audio_trace
+
+        Locksnd
+        cmpi.l  #1,d0
+        bne     sound_failed
+        Setmode #SOUND_STEREO16
+        Settracks #0,#0
+        Dsptristate #1,#0
+        Devconnect #SOUND_DSP_XMIT,#SOUND_DAC,#SOUND_CLK25M,#SOUND_CLK50K,#SOUND_NO_SHAKE
+
+        move.l  #DSP_CMD_START_AUDIO,d0
+        bsr     dsp_exchange
+        cmp.l   #DSP_REPLY_OK,d0
+        bne     audio_protocol_failed
+
+        Cconws  audio_text
+        move.w  #149,d5               ; 150 VBLs, about three seconds
+.audio_wait:
+        Vsync
+        dbra    d5,.audio_wait
+.audio_stop:
+        move.l  #DSP_CMD_STOP_AUDIO,d0
+        bsr     dsp_exchange
+        cmp.l   #DSP_REPLY_OK,d0
+        bne     audio_protocol_failed
+        move.l  #DSP_CMD_QUERY_AUDIO,d0
+        bsr     dsp_exchange
+        cmpi.l  #100000,d0             ; reject a stalled/underrunning SSI path
+        bcs     audio_protocol_failed
+        Dsptristate #0,#0
+        Unlocksnd
+
         Cconws  ready_text
-        Cconin
         bra     clean_exit
+
+audio_protocol_failed:
+        Dsptristate #0,#0
+        Unlocksnd
+        bra     protocol_failed
 
 protocol_failed:
         Cconws  protocol_error_text
@@ -412,6 +475,12 @@ protocol_failed:
 load_failed:
         Cconws  load_error_text
         Cconin
+        bra     clean_exit
+
+sound_failed:
+        Cconws  sound_error_text
+        Cconin
+        bra     clean_exit
 
 clean_exit:
         Dsp_Unlock
@@ -431,13 +500,18 @@ clock_samples:
 
         data
 
+        include "ym2151_host_tables.i"
+
 banner:
         dc.b    27,'E','F030MXDRV DSP core',13,10
         dc.b    '68030 MXDRV host + DSP56001 YM2151',13,10,13,10,0
 
 ready_text:
         dc.b    'MXDRV API + DSP YM2151 oracle samples: OK',13,10
-        dc.b    'Press a key to exit.',13,10,0
+        dc.b    'Falcon DSP SSI/crossbar burst: OK',13,10,0
+
+audio_text:
+        dc.b    'Playing a three-second DSP YM2151 SSI burst...',13,10,0
 
 reserve_error_text:
         dc.b    'Error: unable to reserve the Falcon DSP.',13,10
@@ -450,6 +524,10 @@ load_error_text:
 
 protocol_error_text:
         dc.b    'Error: DSP protocol mismatch.',13,10
+        dc.b    'Press a key to exit.',13,10,0
+
+sound_error_text:
+        dc.b    'Error: unable to lock the Falcon sound system.',13,10
         dc.b    'Press a key to exit.',13,10,0
 
 dsp_filename:
@@ -493,5 +571,7 @@ algorithm_references:
 
 dsp_load_buffer:
         ds.b    DSP_LOAD_BUFFER
+dsp_table_reply:
+        ds.l    1
 
         end

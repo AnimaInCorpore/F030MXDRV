@@ -35,3 +35,18 @@ kept to simple ALU or memory moves and are checked by Motorola ASM56000.
 These constraints are part of correctness, not just optimization: violating
 either the address delay or zero-count behavior produces valid assembly with
 incorrect chip state at runtime.
+
+## Falcon SSI staging path
+
+The bounded audio probe configures SSI control A as `$4100`: 16-bit words and
+two words per synchronous network frame. Control B is `$1a00`: synchronous
+network mode with transmit enabled, while serial clock and transmit frame sync
+remain crossbar inputs. Each signed 16-bit YM sample is therefore shifted into
+the upper 16 bits of the DSP's 24-bit transmit register.
+
+The Falcon DAC rate selected by the host is 25.175 MHz divided by 4 and 128,
+or 49,169.921875 Hz. Relative to the native 62,500 Hz OPM rate this is exactly
+`1280/1007`, so the staging renderer advances one or two native samples per
+codec frame and stores the latest result. A 1007-frame stereo block occupies
+uninitialized external X RAM at `$0c00`; it adds no initialized `.LOD` records
+and ends below the reserved X-memory boundary.
