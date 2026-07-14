@@ -52,7 +52,9 @@ bounds against that vector.
 ## Current boundary
 
 `src/m68k/pdx.s` provides validated lookup plus the eight-voice host mixer. It
-can render one exact Falcon codec period, which protocol v9 uploads to the DSP,
-combines with a newly rendered FM period, and loops through SSI to the DAC. This
-is still a bounded integration proof rather than music playback: MDX PCM
-commands are not parsed and consecutive mixed periods are not yet scheduled.
+can render one exact Falcon codec period, which protocol v10 uploads to the DSP,
+combines with a newly rendered FM period, and loops through SSI to the DAC. MDX
+tracks 8-15 now start and stop those voices, and the TTP player uploads each
+successive period through the inactive-buffer refill command. This is not yet
+real-time music playback: while the DSP spends about 177 ms rendering the next
+20.48 ms period, SSI repeats the previous completed FM/PCM block.

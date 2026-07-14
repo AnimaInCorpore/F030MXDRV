@@ -147,6 +147,29 @@ run_conformance:
         cmpi.l  #3,d0
         bne     protocol_failed
 
+        moveq   #0,d0
+        bsr     mxdrv_pdx_voice_volume
+        cmpi.l  #8,d0
+        bne     protocol_failed
+        moveq   #1,d0
+        bsr     mxdrv_pdx_voice_volume
+        tst.l   d0
+        bne     protocol_failed
+        moveq   #1,d0
+        moveq   #8,d1
+        bsr     mxdrv_pdx_voice_set_volume
+        tst.l   d0
+        bne     protocol_failed
+        moveq   #1,d0
+        bsr     mxdrv_pdx_voice_volume
+        cmpi.l  #8,d0
+        bne     protocol_failed
+        moveq   #1,d0
+        moveq   #0,d1
+        bsr     mxdrv_pdx_voice_set_volume
+        tst.l   d0
+        bne     protocol_failed
+
         lea     pdx_mix_references(pc),a3
         lea     pdx_mix_references_end(pc),a4
 .mix_pdx_frame:
@@ -247,9 +270,17 @@ run_conformance:
         bne     protocol_failed
         cmpi.b  #$78,$08(a0)
         bne     protocol_failed
-        cmpi.b  #$c7,$20(a0)           ; E2 voice 1, pan 3, algorithm 7
+        cmpi.b  #$c0,$20(a0)           ; E2 voice 1, pan 3, algorithm 0
         bne     protocol_failed
         cmpi.b  #$01,$40(a0)
+        bne     protocol_failed
+        cmpi.b  #$01,$60(a0)           ; modulators retain their base TL
+        bne     protocol_failed
+        cmpi.b  #$02,$68(a0)
+        bne     protocol_failed
+        cmpi.b  #$03,$70(a0)
+        bne     protocol_failed
+        cmpi.b  #$06,$78(a0)           ; carrier base 4 + volume-15 offset 2
         bne     protocol_failed
         cmpi.b  #$1f,$80(a0)
         bne     protocol_failed
@@ -296,6 +327,70 @@ run_conformance:
         bne     protocol_failed
         bsr     mxdrv_mdx_timer_ticks
         cmpi.l  #3,d0
+        bne     protocol_failed
+
+        ; Normal and direct FM volume encodings rewrite only algorithm-0's C2
+        ; carrier. E5/E6 step raw attenuation in the opposite byte direction
+        ; from indexed volume, and $ff remains saturated at silence.
+        moveq   #2,d0
+        move.l  #mdx_volume_song_end-mdx_volume_song,d1
+        lea     mdx_volume_song(pc),a1
+        bsr     mxdrv_call
+        tst.l   d0
+        bne     protocol_failed
+        moveq   #4,d0
+        bsr     mxdrv_call
+        tst.l   d0
+        bne     protocol_failed
+
+        bsr     mxdrv_mdx_timer_service
+        cmpi.l  #1,d0
+        bne     protocol_failed
+        moveq   #$10,d0
+        bsr     mxdrv_call
+        move.l  d0,a0
+        cmpi.b  #4,$78(a0)             ; direct $80 means +0 attenuation
+        bne     protocol_failed
+
+        bsr     mxdrv_mdx_timer_service
+        cmpi.l  #1,d0
+        bne     protocol_failed
+        moveq   #$10,d0
+        bsr     mxdrv_call
+        move.l  d0,a0
+        cmpi.b  #5,$78(a0)             ; E5: $80 -> $81
+        bne     protocol_failed
+
+        bsr     mxdrv_mdx_timer_service
+        cmpi.l  #1,d0
+        bne     protocol_failed
+        moveq   #$10,d0
+        bsr     mxdrv_call
+        move.l  d0,a0
+        cmpi.b  #4,$78(a0)             ; E6: $81 -> $80
+        bne     protocol_failed
+
+        bsr     mxdrv_mdx_timer_service
+        cmpi.l  #1,d0
+        bne     protocol_failed
+        moveq   #$10,d0
+        bsr     mxdrv_call
+        move.l  d0,a0
+        cmpi.b  #$7f,$78(a0)           ; base 4 + direct 127 saturates
+        bne     protocol_failed
+
+        bsr     mxdrv_mdx_timer_service
+        cmpi.l  #1,d0
+        bne     protocol_failed
+        moveq   #$10,d0
+        bsr     mxdrv_call
+        move.l  d0,a0
+        cmpi.b  #$7f,$78(a0)           ; E5 clamps at direct $ff
+        bne     protocol_failed
+        bsr     mxdrv_mdx_timer_service
+        tst.l   d0
+        bne     protocol_failed
+        tst.b   mxdrv_mdx_error
         bne     protocol_failed
 
         ; A syntactically valid MDX whose EA target leaves the copied image
@@ -858,7 +953,7 @@ run_conformance:
         bne     audio_protocol_failed
 
         ; The first render advances the rolling native clock by exactly 1280
-        ; samples. Query it while the bounded SSI stream is active.
+        ; samples. Query it while the interrupt-fed SSI stream is active.
         move.l  #DSP_CMD_QUERY_TIME,d0
         bsr     dsp_exchange
         cmpi.l  #1280,d0
@@ -866,7 +961,7 @@ run_conformance:
 
         ; Prove that the normal MXDRV WriteOPM seam remains serviced while SSI
         ; is active. This changes DSP state for the next render; the current
-        ; bounded block was deliberately rendered before transmit started.
+        ; first block was deliberately rendered before transmit started.
         moveq   #$7e,d1
         moveq   #$5a,d2
         bsr     mxdrv_write_ym2151
@@ -889,32 +984,10 @@ run_conformance:
         cmp.l   #DSP_REPLY_OK,d0
         bne     audio_protocol_failed
 
-        Cconws  audio_text
-        move.w  #149,d5               ; 150 VBLs, about three seconds
-.audio_wait:
-        Vsync
-        dbra    d5,.audio_wait
-.audio_stop:
-        move.l  #DSP_CMD_STOP_AUDIO,d0
-        bsr     dsp_exchange
-        cmp.l   #DSP_REPLY_OK,d0
-        bne     audio_protocol_failed
-
-        moveq   #0,d1
-        moveq   #0,d2
-        bsr     mxdrv_query_phase_step
-        cmp.l   #YM_REF_PHASE_CH0_OP0,d0
-        bne     audio_protocol_failed
-
-        move.l  #DSP_CMD_QUERY_AUDIO,d0
-        bsr     dsp_exchange
-        cmpi.l  #100000,d0             ; reject a stalled/underrunning SSI path
-        bcs     audio_protocol_failed
-
-        ; Render a second consecutive block. The queued rolling-clock events
-        ; must be consumed without resetting time, ending at native sample 2560.
-        move.l  #DSP_CMD_START_AUDIO,d0
-        bsr     dsp_exchange
+        ; Fill and switch to buffer B while the SSI interrupt continues to
+        ; repeat the complete block in buffer A. The scheduled writes above
+        ; must be consumed on the same rolling clock.
+        bsr     dsp_refill_mixed_audio
         cmp.l   #DSP_REPLY_OK,d0
         bne     audio_protocol_failed
 
@@ -923,20 +996,8 @@ run_conformance:
         cmpi.l  #2560,d0
         bne     audio_protocol_failed
 
-        move.l  #DSP_CMD_STOP_AUDIO,d0
-        bsr     dsp_exchange
-        cmp.l   #DSP_REPLY_OK,d0
-        bne     audio_protocol_failed
-
-        moveq   #0,d1
-        moveq   #0,d2
-        bsr     mxdrv_query_phase_step
-        cmp.l   #YM_REF_PHASE_CH0_OP0,d0
-        bne     audio_protocol_failed
-
-        ; Exercise the direct-synthesis SSI path without claiming real-time
-        ; readiness. FIFO events must be consumed while fresh frames advance
-        ; the same rolling clock beyond the two bounded render periods.
+        ; Exercise the other half of the double buffer. These events land in
+        ; buffer A while completed buffer B remains available to the ISR.
         moveq   #$28,d1
         moveq   #$4a,d2
         bsr     mxdrv_write_ym2151
@@ -957,21 +1018,22 @@ run_conformance:
         tst.l   d0
         bne     audio_protocol_failed
 
-        move.l  #DSP_CMD_START_LIVE,d0
-        bsr     dsp_exchange
+        bsr     dsp_refill_mixed_audio
         cmp.l   #DSP_REPLY_OK,d0
         bne     audio_protocol_failed
 
-        Cconws  live_audio_text
-        move.w  #49,d5                ; one second of measured fresh synthesis
-.live_audio_wait:
-        Vsync
-        dbra    d5,.live_audio_wait
-
         move.l  #DSP_CMD_QUERY_TIME,d0
         bsr     dsp_exchange
-        cmpi.l  #2625,d0               ; both scheduled writes must be consumed
-        bcs     audio_protocol_failed
+        cmpi.l  #3840,d0
+        bne     audio_protocol_failed
+
+        ; Leave SSI repeating the most recent complete block for three seconds
+        ; to prove that host-side scheduling latency does not stop transport.
+        Cconws  audio_text
+        move.w  #149,d5
+.audio_wait:
+        Vsync
+        dbra    d5,.audio_wait
 
         move.l  #DSP_CMD_STOP_AUDIO,d0
         bsr     dsp_exchange
@@ -980,8 +1042,8 @@ run_conformance:
 
         move.l  #DSP_CMD_QUERY_AUDIO,d0
         bsr     dsp_exchange
-        cmpi.l  #512,d0                ; reject a stalled direct renderer
-        bcs     audio_protocol_failed
+        cmpi.l  #DSP_MIX_FRAME_COUNT*3,d0
+        bne     audio_protocol_failed
 
         moveq   #0,d1
         moveq   #0,d2
@@ -989,8 +1051,8 @@ run_conformance:
         cmp.l   #YM_REF_PHASE_CH0_OP0,d0
         bne     audio_protocol_failed
 
-        ; Unique completion marker for the live-render integration gate.
-        move.l  #DSP_CMD_PING+$b00b,d0
+        ; Unique completion marker for the interrupt/double-buffer gate.
+        move.l  #DSP_CMD_PING+$db10,d0
         bsr     dsp_exchange
         cmp.l   #DSP_REPLY_HELLO,d0
         bne     audio_protocol_failed
@@ -1057,9 +1119,6 @@ ready_text:
 audio_text:
         dc.b    'Playing a three-second DSP YM2151 SSI burst...',13,10,0
 
-live_audio_text:
-        dc.b    'Measuring one second of fresh DSP YM2151 synthesis...',13,10,0
-
 usage_text:
         dc.b    'Usage: F030MXDRV.TTP song.mdx [bank.pdx]',13,10,0
 
@@ -1124,15 +1183,16 @@ mdx_test_sequence:
         dc.w    mdx_test_pcm_track-mdx_test_sequence
         dcb.w   7,mdx_test_end_track-mdx_test_sequence
 mdx_test_voice_table:
-        dc.b    1,$07,$00               ; ID, algorithm 7, PMS/AMS 0
+        dc.b    1,$00,$00               ; ID, algorithm 0, PMS/AMS 0
         dc.b    $01,$01,$01,$01         ; DT1/MUL
-        dc.b    $00,$00,$00,$00         ; TL
+        dc.b    $01,$02,$03,$04         ; base TL (only C2 is a carrier)
         dc.b    $1f,$1f,$1f,$1f         ; KS/AR
         dc.b    $00,$00,$00,$00         ; AMS/D1R
         dc.b    $00,$00,$00,$00         ; DT2/D2R
         dc.b    $0f,$0f,$0f,$0f         ; D1L/RR
 mdx_test_fm_track:
         dc.b    $e2,$01                ; select the standard voice record
+        dc.b    $e4,$0f                ; loudest normal volume: +2 carrier TL
         dc.b    $e1,$1b,$5a            ; raw OPM write
         dc.b    $e0,$a4                ; tempo
         dc.b    $80,$00                ; note 0 for one tick
@@ -1205,6 +1265,40 @@ mdx_clock_track:
 mdx_clock_end_track:
         dc.b    $f9
 mdx_clock_song_end:
+        even
+
+; Algorithm-0 carrier-volume fixture. Modulators use base TL 1/2/3 and C2
+; uses base TL 4, making each direct-attenuation transition observable at $78.
+mdx_volume_song:
+        dc.w    0,$ffff
+        dc.w    mdx_volume_sequence-mdx_volume_song
+        dc.w    mdx_volume_title-mdx_volume_song
+mdx_volume_title:
+        dc.b    'FM volume',0
+        even
+mdx_volume_sequence:
+        dc.w    mdx_volume_voice-mdx_volume_sequence
+        dc.w    mdx_volume_track-mdx_volume_sequence
+        dcb.w   15,mdx_volume_end_track-mdx_volume_sequence
+mdx_volume_voice:
+        dc.b    1,$00,$00
+        dc.b    $01,$01,$01,$01
+        dc.b    $01,$02,$03,$04
+        dc.b    $1f,$1f,$1f,$1f
+        dc.b    $00,$00,$00,$00
+        dc.b    $00,$00,$00,$00
+        dc.b    $0f,$0f,$0f,$0f
+mdx_volume_track:
+        dc.b    $e2,$01
+        dc.b    $e4,$80                ; direct +0 attenuation
+        dc.b    $80,$00                ; one-tick note
+        dc.b    $e5,$00                ; direct +1, then one-tick rest
+        dc.b    $e6,$00                ; direct -1, then one-tick rest
+        dc.b    $e4,$ff,$80,$00        ; saturating direct attenuation
+        dc.b    $e5,$00,$f9            ; $ff clamp, rest, end
+mdx_volume_end_track:
+        dc.b    $f9
+mdx_volume_song_end:
         even
 
 ; Standard PDX table: 96 big-endian offset/length pairs. Entry 0 is valid,

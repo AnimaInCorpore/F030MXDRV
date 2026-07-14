@@ -243,9 +243,9 @@ player_load_return:
         movem.l (sp)+,d1-d7/a0-a6
         rts
 
-; Run the first real foreground player loop. FM register changes reach the
-; direct DSP renderer immediately. PDX voices are decoded/sequenced on the
-; host, but continuous PCM delivery is intentionally left to the next stage.
+; Run the foreground player loop. MDX/PDX state advances on the 68030, then
+; each completed host PCM block is uploaded to the inactive DSP buffer and
+; combined with the matching FM period before an interrupt-fed SSI switch.
 ; out: d0=0 after natural/user stop, -1 after a reported setup failure
 player_run:
         movem.l d1-d7/a0-a6,-(sp)
@@ -281,16 +281,21 @@ player_files_loaded:
         Dsptristate #1,#0
         Devconnect #PLAYER_SOUND_DSP_XMIT,#PLAYER_SOUND_DAC,#PLAYER_SOUND_CLK25M,#PLAYER_SOUND_CLK50K,#PLAYER_SOUND_NO_SHAKE
 
-        move.l  #DSP_CMD_START_LIVE,d0
-        bsr     dsp_exchange
-        cmp.l   #DSP_REPLY_OK,d0
-        bne     player_dsp_error
-        move.b  #1,player_audio_started
-
         moveq   #4,d0
         bsr     mxdrv_call
         tst.l   d0
         bne     player_play_error
+
+        ; Prime the tracks before rendering the first block so their initial
+        ; voices, notes, and PDX triggers are represented immediately.
+        bsr     mxdrv_mdx_timer_service
+        tst.w   d0
+        beq     player_finished
+
+        bsr     dsp_start_mixed_audio
+        cmp.l   #DSP_REPLY_OK,d0
+        bne     player_dsp_error
+        move.b  #1,player_audio_started
 
         Cconws  player_playing_text
         Cconws  player_mdx_filename
@@ -306,9 +311,15 @@ player_loop:
         beq     player_finished
         Cconis
         tst.l   d0
-        beq     player_loop
+        beq     player_refill
         Cconin
         bra     player_stopped
+
+player_refill:
+        bsr     dsp_refill_mixed_audio
+        cmp.l   #DSP_REPLY_OK,d0
+        bne     player_dsp_error
+        bra     player_loop
 
 player_finished:
         Cconws  player_finished_text
@@ -363,9 +374,9 @@ player_playing_text:
         dc.b    'Playing ',0
 player_playing_suffix:
         dc.b    13,10,'Press any key to stop.',13,10
-        dc.b    'Warning: live DSP synthesis is not real-time yet.',13,10,0
+        dc.b    'Buffered SSI repeats the last complete block while refilling.',13,10,0
 player_pdx_warning:
-        dc.b    'PDX is sequenced, but continuous PCM output is not connected yet.',13,10,0
+        dc.b    'PDX voices are mixed into each DSP refill block.',13,10,0
 player_finished_text:
         dc.b    'Song finished.',13,10,0
 player_stopped_text:
@@ -377,7 +388,7 @@ player_pdx_error_text:
 player_sound_error_text:
         dc.b    'Error: unable to lock the Falcon sound system.',13,10,0
 player_dsp_error_text:
-        dc.b    'Error: unable to start live DSP synthesis.',13,10,0
+        dc.b    'Error: unable to start or refill DSP audio.',13,10,0
 player_play_error_text:
         dc.b    'Error: malformed MDX or MFP Timer A is already in use.',13,10,0
 

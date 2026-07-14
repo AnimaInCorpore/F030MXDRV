@@ -4,6 +4,7 @@
         global  dsp_exchange
         global  dsp_queue_write
         global  dsp_start_mixed_audio
+        global  dsp_refill_mixed_audio
 
 DSP_MIX_TRANSFER_WORDS equ   1+DSP_MIX_FRAME_COUNT*2
 
@@ -49,7 +50,16 @@ dsp_queue_write:
 ; freshly rendered YM period before enabling SSI.
 ; out: d0.l = DSP reply
 dsp_start_mixed_audio:
-        move.l  #DSP_CMD_START_MIXED,dsp_mixed_words
+        move.l  #DSP_CMD_START_MIXED,d0
+        bra     dsp_send_mixed_audio
+
+; Refill the inactive DSP buffer while SSI continues replaying the current
+; complete block. The DSP swaps only after rendering finishes.
+dsp_refill_mixed_audio:
+        move.l  #DSP_CMD_REFILL_MIXED,d0
+
+dsp_send_mixed_audio:
+        move.l  d0,dsp_mixed_words
         lea     dsp_mixed_words+4,a3
         lea     dsp_mixed_words_end,a4
 dsp_render_mixed_loop:

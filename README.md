@@ -43,33 +43,29 @@ silent channels also bypass work that cannot affect chip state or output. Hot
 scalar state now occupies short-addressable internal X RAM, reducing both
 external accesses and the converted DSP image size.
 
-The full-rate transport path pre-renders one exact
-1280-native-sample/1007-codec-frame resampling period on the DSP, replays the
-stereo block through 16-bit SSI at 49.17 kHz, and routes DSP transmit to the
-Falcon DAC through the XBIOS sound matrix. Protocol v9 also lets the 68030
-upload one exact 1007-frame stereo PDX period; the DSP adds it to a freshly
-rendered FM period with signed 16-bit saturation and loops the mixed block
-through the same SSI path. A separate live mode
-renders every frame after SSI starts, advances the same rolling native clock,
-and consumes timestamped writes without a staging boundary. It is a measured
-optimization target rather than the final audio path: the current Hatari gate
-produced 5,679 fresh frames in a nominal one-second interval, versus about
-49,170 required by the codec.
+The full-rate transport path uses the DSP56001 SSI transmit interrupt to replay
+one exact 1280-native-sample/1007-codec-frame resampling period through 16-bit
+SSI at 49.17 kHz, with DSP transmit routed to the Falcon DAC through the XBIOS
+sound matrix. Protocol v10 gives the DSP two interleaved stereo buffers in
+external X RAM. The 68030 uploads one 1007-frame PDX period into the inactive
+buffer; the DSP renders the matching FM period in place with signed 16-bit
+saturation, switches buffers at a stereo boundary, and leaves the last complete
+block repeating if a refill misses one or more codec periods. Timestamped YM
+writes retain one rolling native-sample clock across refills.
 
-This is not a complete music driver yet. MDX synchronization/modulation,
-full FM volume handling, continuous mixed-block production, and underrun-free
-live synthesis remain. The command-line player uses the experimental live DSP
-mode, so FM follows sequencer writes but currently underruns. PDX files load and
-their voices are sequenced/decoded on the 68030, but those PCM frames are not
-yet continuously delivered to the DAC. PDX lookup, decoding, rate conversion,
-gain, pan, eight-voice host mixing, and bounded PCM/FM output to the DAC are
-verified, but only in the explicit integration harness. The buffered SSI mode
-still supplies the
-full-rate transport proof, while the live mode proves the direct scheduling and
-synthesis control flow despite underrunning. Protocol v9
-provides a refillable 32-entry ring FIFO of exact register events on a rolling
-16-bit native sample clock; FIFO and clock-query transactions work while SSI is
-active, and the clock persists across buffered and live sessions.
+This is not a complete music driver yet. MDX synchronization/modulation and
+real-time mixed-block production remain.
+FM E4/E5/E6 now preserve algorithm-specific modulator TLs and rewrite only
+carrier TLs through MXDRV's indexed/raw attenuation rules; PCM volume changes
+also update active PDX voices without restarting their decoders. The
+command-line player now feeds both FM and PDX through the interrupt-buffered
+path. It produces uninterrupted DAC transport, but not accurate wall-clock
+playback yet: the measured scalar DSP kernel needs about 177 ms to render the
+20.48 ms of fresh audio in one block, so the completed block repeats while the
+next one is prepared. Protocol v10 also provides a refillable 32-entry ring FIFO
+of exact register events on a rolling 16-bit native-sample clock; FIFO and
+clock-query transactions work while SSI is active, and the clock persists
+across buffered refills.
 The exact boundary between implemented and pending work is kept in
 [the architecture notes](docs/architecture.md).
 
@@ -106,9 +102,10 @@ The smoke test also verifies standard PDX lookup bounds, empty and malformed
 entries, exact MSM6258 samples, and a generated two-voice rate/gain/pan mixer
 vector. It uploads a complete host-rendered PCM period and verifies the first
 nonzero DSP-mixed stereo sum before checking
-sound locking, DSP-to-DAC matrix setup, buffered and live audio start/stop,
-rolling-clock FIFO writes during live synthesis, SSI frame-count floors,
-tristating, and sound unlock under Hatari.
+sound locking, DSP-to-DAC matrix setup, interrupt-fed A/B buffer refills,
+rolling-clock FIFO writes during both refill directions, prepared-frame counts,
+three seconds of safe block repetition, tristating, and sound unlock under
+Hatari.
 It also copies a 16-track MDX fixture through the public API, verifies E2 FM
 voice loading, E0/E1 writes, FM note duration/key-off, and a timed track-8 PDX
 trigger. The fixture also covers two-pass E9/EA repetition, EB final-pass escape,
@@ -125,8 +122,8 @@ release/ym2151.lod
 
 Keep the executable and `ym2151.lod` in the same Falcon directory.
 `f030mxdrv.tos` loads
-`ym2151.lod`, runs the conformance checks plus buffered and live SSI probes, and
-reports the result on the TOS console. `f030mxdrv.ttp` is the same executable
+`ym2151.lod`, runs the conformance checks plus the interrupt-buffered SSI probe,
+and reports the result on the TOS console. `f030mxdrv.ttp` is the same executable
 with a Desktop command-line entry point:
 
 ```text
@@ -136,7 +133,8 @@ F030MXDRV.TTP song.mdx [bank.pdx]
 The MDX is limited to 65,536 bytes and the optional raw PDX bank to 319,488
 bytes. Filenames are whitespace-delimited TOS paths. Press any key during
 playback to stop. This is an integration player rather than a finished audio
-path: live FM is below real-time and continuous PDX output is still pending.
+path: SSI transport remains continuous, but fresh FM/PDX production is still
+about 8.6 times slower than the codec consumes it.
 `make run` starts the no-argument conformance mode in Hatari.
 
 ## Source map

@@ -59,49 +59,58 @@ Phase, key edges, feedback history, LFO/noise, and timers continue to clock.
 Frequently accessed scalar state now occupies internal `X:$0000-$0041`.
 Short-address loads and stores remove an extension word and avoid external RAM;
 this reduced the initialized loader payload from 8,100 to 7,113 bytes before
-adding the FIFO and live-stream code. The current protocol-v9 image, including
-bounded PCM/FM mixing, is 8,148 bytes; the build checks it against the 8 KiB TOS
-limit.
+adding the FIFO and audio transport. The current protocol-v10 image, including
+interrupt-fed double buffering and PCM/FM mixing, is 8,082 bytes; the build
+checks it against the 8 KiB TOS limit.
 
-## Falcon SSI buffered, mixed, and live paths
+## Falcon SSI interrupt-buffered mixed path
 
-The bounded audio probe configures SSI control A as `$4100`: 16-bit words and
-two words per synchronous network frame. Control B is `$1a00`: synchronous
-network mode with transmit enabled, while serial clock and transmit frame sync
-remain crossbar inputs. Each signed 16-bit YM sample is therefore shifted into
-the upper 16 bits of the DSP's 24-bit transmit register.
+The audio path configures SSI control A as `$4100`: 16-bit words and two words
+per synchronous network frame. Control B is `$5a00`: synchronous network mode,
+transmit enabled, and transmit interrupts enabled, while serial clock and
+transmit frame sync remain crossbar inputs. SSI priority is level 2 through IPR
+`$3000`. Each signed 16-bit YM sample is shifted into the upper 16 bits of the
+DSP's 24-bit transmit register.
+
+The normal SSI transmit vector at `P:$0010` is a two-instruction fast interrupt:
+it moves `X:(r6)+` to TX and returns through the implicit fast-interrupt path.
+The dedicated `r6/m6` pair is not used by synthesis, so refills can be
+interrupted without saving ALU state or disturbing a hardware `DO` loop. The
+transmit-exception vector at `P:$0012` is a long interrupt that reads SSISR and
+then writes TX, the required sequence for clearing TUE. It is a recovery path,
+not part of normal block playback.
 
 The Falcon DAC rate selected by the host is 25.175 MHz divided by 4 and 128,
 or 49,169.921875 Hz. Relative to the native 62,500 Hz OPM rate this is exactly
 `1280/1007`, so the staging renderer advances one or two native samples per
-codec frame and stores the latest result. A 1007-frame stereo block occupies
-uninitialized external X RAM at `$0c00`; it adds no initialized `.LOD` records
-and ends below the reserved X-memory boundary.
-
-The common streaming loop polls the host receive flag between SSI words. It
-accepts normal packed register writes and replies through the existing
-synchronous transport without stopping SSI. Buffered mode repeats the
-pre-rendered block, so a later write cannot change audio already in that block.
-Protocol command `$10` instead calls the resampler and YM kernel for every fresh
-left/right frame after enabling SSI; direct writes refresh its phase cache
-immediately.
+codec frame and stores the latest result. Each 1007-frame block uses 2014
+interleaved stereo words. Buffer A starts at external `X:$1000`, buffer B at
+`X:$1800`; both are 2048-word aligned so `m6=2013` wraps each non-power-of-two
+block correctly. They are uninitialized storage, add no `.LOD` records, and
+both fit below the 8192-word external-X reservation.
 
 Protocol command `$11` receives 1007 interleaved signed stereo frames rendered
 by the 68030 PDX mixer. The DSP renders the matching FM period, adds and clamps
-each channel to signed 16-bit, then reuses the bounded SSI loop. Buffer pointers
-use `r6/r7`; the phase-cache loop owns `r4`, so sharing that register would
-displace the left-channel write position during every YM sample.
+each channel to signed 16-bit, then starts interrupt-fed playback from buffer A.
+Command `$13` selects the inactive buffer with `r7`, receives and mixes the next
+period there while `r6` keeps the active block repeating, then switches only
+after a complete stereo pair. The switch clears TIE while retaining transmit,
+waits for TDE, supplies a matching right word if the active pointer is between
+channels, preloads the new block's first left word, and restores `$5a00`.
+Buffer pointers use `r6/r7`; the phase-cache loop owns `r4`, so sharing that
+register would displace the refill position during every YM sample.
 
-Protocol v9 implements the event shape with a rolling clock. A refillable
+Protocol v10 implements the event shape with a rolling clock. A refillable
 32-entry ring FIFO stores an absolute 16-bit native-sample time beside each
 packed register write. Entries must be in nondecreasing modular order and
 within the 32,767-sample future horizon; all writes due at a boundary are
 applied before clocking that YM sample. FIFO and clock-query transactions are
-serviced during either SSI mode, and the clock continues across sessions
-instead of restarting at zero.
+serviced while SSI is active, and the clock continues across refills instead of
+restarting at zero.
 
-The direct mode is currently a throughput instrument, not an underrun-free
-player. The Hatari smoke gate generated 5,679 fresh codec frames and advanced
-7,217 native samples during a nominal 50-VBL interval. That is about 11.5% of
-the required 49,169.921875 frames per second and gives future kernel
-specialization a concrete end-to-end target.
+The previous direct-mode throughput instrument generated 5,679 fresh codec
+frames and advanced 7,217 native samples during a nominal 50-VBL interval.
+That is about 11.5% of the required 49,169.921875 frames per second. Direct mode
+was removed to recover loader space; the double buffer now keeps transport
+alive by repeating the last complete block, while the same result remains the
+concrete optimization target for real-time fresh synthesis.

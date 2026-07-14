@@ -14,6 +14,17 @@
         org     p:$0
         jmp     start
 
+; Buffered SSI owns r6/m6 while active. The normal fast interrupt transfers
+; one prepared word without disturbing synthesis state. The exception vector
+; enters a recovery ISR because clearing TUE requires reading SSISR and then
+; writing TX. The normal path remains a two-instruction fast interrupt.
+        org     p:$10
+        movep   x:(r6)+,x:m_tx
+        nop
+
+        org     p:$12
+        jsr     ssi_tx_exception
+
 ; -----------------------------------------------------------------------------
 ; YM2151 state in X memory
 ; -----------------------------------------------------------------------------
@@ -105,23 +116,23 @@ ym_phase_cache_saved_pm:
 ; Falcon SSI output state. The codec's 25.175 MHz / 4 / 128 rate is
 ; 49,169.921875 Hz, so 62.5 kHz native OPM time advances by exactly 1280/1007
 ; samples per codec frame.
-ssi_output_slot:
-        ds      1
 ssi_resample_phase:
         ds      1
 ssi_frame_count:
-        ds      1
-ssi_buffer_remaining:
         ds      1
 ym_queue_read_index:
         ds      1
 ym_queue_timestamp:
         ds      1
-ssi_live_mode:
-        ds      1
 ssi_mix_probe_left:
         ds      1
 ssi_mix_probe_sum:
+        ds      1
+ssi_active_buffer:
+        ds      1
+ssi_refill_buffer:
+        ds      1
+ssi_status_snapshot:
         ds      1
 
 ; Scratch state. Keeping it explicit makes subroutine register clobbers safe
@@ -215,6 +226,7 @@ ym_phase_step_cache:
 
 start:
         movep   #1,x:m_pbc              ; enable the Falcon host port
+        movep   #$3000,x:m_ipr          ; SSI interrupt priority level 2
         move    #>-1,m0                 ; linear addressing for ym_regdata
         jsr     ym_reset
 
@@ -287,10 +299,6 @@ command_loop:
         cmp     x0,a
         jeq     command_query_time
 
-        move    #>DSP_CMD_START_LIVE,x0
-        cmp     x0,a
-        jeq     command_start_live
-
         move    #>DSP_CMD_START_MIXED,x0
         cmp     x0,a
         jeq     command_start_mixed
@@ -307,6 +315,13 @@ command_ping:
         move    #>DSP_REPLY_HELLO,a
         jsr     send_reply
         jmp     command_loop
+
+; SSI transmit-underrun recovery. Reading SSISR followed by writing TX clears
+; TUE; this long exception path is not part of normal buffered playback.
+ssi_tx_exception:
+        movep   x:m_sr,x:ssi_status_snapshot
+        movep   x:(r6)+,x:m_tx
+        rti
 
 command_write:
         jsr     ym_write_packed
@@ -394,23 +409,19 @@ command_load_tables_loop:
         jsr     send_reply
         jmp     command_loop
 
-; Start a bounded host-controlled Falcon audio session. First pre-render one
-; exact 1007-frame resampling period while SSI is disabled; the tight streaming
-; loop can then prove full-rate crossbar transport without synthesis underruns.
-; Continuous playback will replace this looped staging buffer once the YM
-; kernel is cycle-budgeted for the 56001.
+; Start a host-controlled Falcon audio session. First pre-render one exact
+; 1007-frame resampling period while SSI is disabled, then let the transmit
+; interrupt repeat it until the host supplies an inactive-buffer refill.
 command_start_audio:
         movep   #0,x:m_crb
         movep   #$4100,x:m_cra          ; 16-bit, two-word network frame
         clr     a
-        move    a1,x:ssi_live_mode
         move    a1,x:ssi_resample_phase
         move    a1,x:ssi_frame_count
-        move    #>1007,a
-        move    a1,x:ssi_buffer_remaining
-        move    #ssi_buffer_left,r6
-        move    #ssi_buffer_right,r7
-command_start_audio_render:
+        move    a1,x:ssi_active_buffer
+        move    #>-1,m6
+        move    #ssi_buffer_a,r6
+        do      #DSP_MIX_FRAME_COUNT,command_start_audio_render_done
         jsr     ssi_render_frame
         move    x:ym_last_left,a
         rep     #8
@@ -419,44 +430,20 @@ command_start_audio_render:
         move    x:ym_last_right,a
         rep     #8
         asl     a
-        move    a1,x:(r7)+
-        move    x:ssi_buffer_remaining,a
-        move    #>1,x0
-        sub     x0,a
-        move    a1,x:ssi_buffer_remaining
-        jne     command_start_audio_render
+        move    a1,x:(r6)+
+command_start_audio_render_done:
 
 ssi_start_buffered:
-        move    #ssi_buffer_left,r6
-        move    #ssi_buffer_right,r7
+        move    #ssi_buffer_a,r6
+        move    #>2013,m6              ; one aligned 2014-word stereo block
         nop
         move    x:(r6)+,a
         movep   a1,x:m_tx
-        move    #>1006,a
-        move    a1,x:ssi_buffer_remaining
-        move    #>1,a
-        move    a1,x:ssi_output_slot
-        move    #>DSP_REPLY_OK,a
-        jsr     send_reply
-        movep   #$1a00,x:m_crb          ; sync network mode, transmit enabled
-        jmp     ssi_stream_loop
-
-; Start an experimental direct-synthesis stream. Unlike command 0b, every
-; transmitted frame is rendered after SSI starts and advances the rolling
-; native clock. This is intentionally a throughput probe until the scalar YM
-; kernel is fast enough to meet the codec deadline without underruns.
-command_start_live:
-        movep   #0,x:m_crb
-        movep   #$4100,x:m_cra
-        clr     a
-        move    a1,x:ssi_resample_phase
+        move    #>DSP_MIX_FRAME_COUNT,a
         move    a1,x:ssi_frame_count
-        move    a1,x:ssi_output_slot
-        move    #>1,a
-        move    a1,x:ssi_live_mode
         move    #>DSP_REPLY_OK,a
         jsr     send_reply
-        movep   #$1a00,x:m_crb
+        movep   #$5a00,x:m_crb          ; network TX + SSI transmit interrupt
         jmp     ssi_stream_loop
 
 ; Receive one exact 1007-frame stereo PCM period from the 68030, then render
@@ -467,37 +454,34 @@ command_start_mixed:
         movep   #0,x:m_crb
         movep   #$4100,x:m_cra
         clr     a
-        move    a1,x:ssi_live_mode
         move    a1,x:ssi_resample_phase
         move    a1,x:ssi_frame_count
         move    a1,x:ssi_mix_probe_left
         move    a1,x:ssi_mix_probe_sum
-        move    #ssi_buffer_left,r6
-        move    #ssi_buffer_right,r7
+        move    a1,x:ssi_active_buffer
+        move    #>-1,m6
+        move    #ssi_buffer_a,r6
         do      #DSP_MIX_FRAME_COUNT,command_start_mixed_receive
         jclr    #0,x:m_hsr,*
         movep   x:m_hrx,a
         move    a1,x:(r6)+
         jclr    #0,x:m_hsr,*
         movep   x:m_hrx,a
-        move    a1,x:(r7)+
+        move    a1,x:(r6)+
 command_start_mixed_receive:
 
-        move    #ssi_buffer_left,r6
-        move    #ssi_buffer_right,r7
-        move    #>DSP_MIX_FRAME_COUNT,a
-        move    a1,x:ssi_buffer_remaining
-command_start_mixed_render:
+        move    #ssi_buffer_a,r7
+        do      #DSP_MIX_FRAME_COUNT,command_start_mixed_render_done
         jsr     ssi_render_frame
 
-        move    x:(r6),a
+        move    x:(r7),a
         move    x:ym_last_left,x0
         add     x0,a
         jsr     ym_clamp_channel
         move    a1,x:ssi_mix_probe_left
         rep     #8
         asl     a
-        move    a1,x:(r6)+
+        move    a1,x:(r7)+
 
         move    x:(r7),a
         move    x:ym_last_right,x0
@@ -516,17 +500,11 @@ command_start_mixed_right_ready:
         rep     #8
         asl     a
         move    a1,x:(r7)+
-
-        move    x:ssi_buffer_remaining,a
-        move    #>1,x0
-        sub     x0,a
-        move    a1,x:ssi_buffer_remaining
-        jne     command_start_mixed_render
+command_start_mixed_render_done:
         jmp     ssi_start_buffered
 
-; While either audio mode is active, accept synchronous register writes,
-; timestamped writes, clock queries, and stop. Direct writes refresh the phase
-; cache immediately so the live renderer observes them on its next frame.
+; While interrupt-fed buffered audio is active, accept refills, synchronous
+; register writes, timestamped writes, clock queries, and stop.
 ssi_stream_loop:
         jclr    #0,x:m_hsr,ssi_stream_data
         movep   x:m_hrx,x1
@@ -537,6 +515,10 @@ ssi_stream_loop:
         move    #>DSP_CMD_STOP_AUDIO,x0
         cmp     x0,a
         jeq     command_stop_audio
+
+        move    #>DSP_CMD_REFILL_MIXED,x0
+        cmp     x0,a
+        jeq     command_refill_mixed
 
         move    #>DSP_CMD_WRITE_REG,x0
         cmp     x0,a
@@ -573,75 +555,81 @@ ssi_stream_command_error:
         jsr     send_reply
 
 ssi_stream_data:
-        jclr    #m_tde,x:m_sr,ssi_stream_loop
-        move    x:ssi_live_mode,a
-        tst     a
-        jne     ssi_stream_live
-        move    x:ssi_output_slot,a
-        tst     a
-        jeq     ssi_stream_left
-
-        move    x:(r7)+,a
-        movep   a1,x:m_tx
-        clr     a
-        move    a1,x:ssi_output_slot
         jmp     ssi_stream_loop
 
-ssi_stream_left:
-        move    x:ssi_buffer_remaining,a
+; Receive one host-rendered PDX block into the inactive buffer while the SSI
+; transmit interrupt keeps the previous complete block looping. Render FM into
+; the new block in place, then switch at a stereo boundary. If rendering misses
+; one or more codec periods, the old block remains untouched and audible.
+command_refill_mixed:
+        move    x:ssi_active_buffer,a
         tst     a
-        jne     ssi_stream_left_ready
-        move    #ssi_buffer_left,r6
-        move    #ssi_buffer_right,r7
-        move    #>1007,a
-        move    a1,x:ssi_buffer_remaining
-ssi_stream_left_ready:
+        jne     command_refill_buffer_a
+        move    #ssi_buffer_b,r7
+        jmp     command_refill_receive
+command_refill_buffer_a:
+        move    #ssi_buffer_a,r7
+command_refill_receive:
+        move    r7,x:ssi_refill_buffer
+        do      #DSP_MIX_FRAME_COUNT,command_refill_receive_done
+        jclr    #0,x:m_hsr,*
+        movep   x:m_hrx,a
+        move    a1,x:(r7)+
+        jclr    #0,x:m_hsr,*
+        movep   x:m_hrx,a
+        move    a1,x:(r7)+
+command_refill_receive_done:
+        move    x:ssi_refill_buffer,r7
+        do      #DSP_MIX_FRAME_COUNT,command_refill_render_done
+        jsr     ssi_render_frame
+        move    x:(r7),a
+        move    x:ym_last_left,x0
+        add     x0,a
+        jsr     ym_clamp_channel
+        rep     #8
+        asl     a
+        move    a1,x:(r7)+
+
+        move    x:(r7),a
+        move    x:ym_last_right,x0
+        add     x0,a
+        jsr     ym_clamp_channel
+        rep     #8
+        asl     a
+        move    a1,x:(r7)+
+command_refill_render_done:
+
+        ; Quiesce transmit interrupts after the current prepared word moves to
+        ; the shift register. If that word was a left sample, send its matching
+        ; right sample before installing the next block's first left sample.
+        movep   #$1a00,x:m_crb
+        jclr    #m_tde,x:m_sr,*
+        move    r6,a
+        jclr    #0,a1,command_refill_boundary
+        movep   x:(r6)+,x:m_tx
+        jclr    #m_tde,x:m_sr,*
+command_refill_boundary:
+        move    x:ssi_refill_buffer,r6
+        move    x:ssi_active_buffer,a
+        move    #>1,x0
+        eor     x0,a
+        move    a1,x:ssi_active_buffer
+        nop
         move    x:(r6)+,a
         movep   a1,x:m_tx
-        move    #>1,a
-        move    a1,x:ssi_output_slot
-        move    x:ssi_buffer_remaining,a
-        move    #>1,x0
-        sub     x0,a
-        move    a1,x:ssi_buffer_remaining
+        movep   #$5a00,x:m_crb
         move    x:ssi_frame_count,a
-        move    #>1,x0
+        move    #>DSP_MIX_FRAME_COUNT,x0
         add     x0,a
         move    a1,x:ssi_frame_count
-        jmp     ssi_stream_loop
-
-ssi_stream_live:
-        move    x:ssi_output_slot,a
-        tst     a
-        jeq     ssi_stream_live_left
-
-        move    x:ym_last_right,a
-        rep     #8
-        asl     a
-        movep   a1,x:m_tx
-        clr     a
-        move    a1,x:ssi_output_slot
-        jmp     ssi_stream_loop
-
-ssi_stream_live_left:
-        jsr     ssi_render_frame
-        move    x:ym_last_left,a
-        rep     #8
-        asl     a
-        movep   a1,x:m_tx
-        move    #>1,a
-        move    a1,x:ssi_output_slot
-        move    x:ssi_frame_count,a
-        move    #>1,x0
-        add     x0,a
-        move    a1,x:ssi_frame_count
+        move    #>DSP_REPLY_OK,a
+        jsr     send_reply
         jmp     ssi_stream_loop
 
 command_stop_audio:
         movep   #0,x:m_crb
+        move    #>-1,m6
         clr     a
-        move    a1,x:ssi_live_mode
-        move    a1,x:ssi_output_slot
         movep   a1,x:m_tx
         jsr     ym_rebuild_phase_cache
         move    #>DSP_REPLY_OK,a
@@ -2854,13 +2842,15 @@ ym_clock_timers_done:
         ym_lfo_code
 
 ; Uninitialized external X RAM does not consume TOS's converted .LOD budget.
-; One stereo block spans the exact 1007-frame denominator of the native-to-
-; codec rate ratio and is replayed only by the bounded SSI transport probe.
-        org     x:$c00
-ssi_buffer_left:
-        ds      1007
-ssi_buffer_right:
-        ds      1007
+; Each aligned buffer holds one interleaved 1007-frame stereo period. Modulo
+; addressing loops the active block while the other is rendered and swapped.
+        org     x:$1000
+ssi_buffer_a:
+        ds      2014
+
+        org     x:$1800
+ssi_buffer_b:
+        ds      2014
 
         include 'ymtables.inc'          ; DOS assembler requires an 8.3 name
 

@@ -167,7 +167,7 @@ smoke: check
 		--trace-file build/hatari-smoke.trace \
 		--trace gemdos,dsp_host_interface,xbios \
 		$(RELEASE_DIR)/f030mxdrv.tos
-	@rg -q "Transfer 0x4d5809" build/hatari-smoke.trace
+	@rg -q "Transfer 0x4d580a" build/hatari-smoke.trace
 	@rg -q "GEMDOS 0x42 Fseek\\(0, [0-9]+, 2\\)" build/hatari-smoke.trace
 	@rg -q "GEMDOS 0x42 Fseek\\(0, [0-9]+, 0\\)" build/hatari-smoke.trace
 	@rg -q "Transfer 0x000080" build/hatari-smoke.trace
@@ -211,14 +211,16 @@ smoke: check
 	@rg -q "Direct Transfer 0x02284a" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x0e0540" build/hatari-smoke.trace
 	@rg -q "Transfer 0x000a00" build/hatari-smoke.trace
+	@rg -q "Direct Transfer 0x130000" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x0e0a00" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x0e0a40" build/hatari-smoke.trace
-	@rg -q "Direct Transfer 0x100000" build/hatari-smoke.trace
-	@rg -q "Direct Transfer 0x01b00b" build/hatari-smoke.trace
+	@rg -q "Transfer 0x000f00" build/hatari-smoke.trace
+	@rg -q "Transfer 0x000bcd" build/hatari-smoke.trace
+	@rg -q "Direct Transfer 0x01db10" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x0c0000" build/hatari-smoke.trace
 	@rg -q "XBIOS 0x89 Dsptristate\\(0x0, 0x0\\)" build/hatari-smoke.trace
 	@rg -q "XBIOS 0x81 Unlocksnd" build/hatari-smoke.trace
-	@echo "Hatari MXDRV MDX/PDX + DSP YM2151 mixed-audio smoke test: OK"
+	@echo "Hatari MXDRV MDX/PDX + DSP YM2151 interrupt-buffered smoke test: OK"
 
 run: all
 	@if ! command -v hatari >/dev/null 2>&1; then \
