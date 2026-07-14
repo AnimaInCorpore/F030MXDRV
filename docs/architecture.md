@@ -98,8 +98,13 @@ protocol version in the ping reply whenever either side changes incompatibly.
    nominal one-second direct probe, about 11.5% of codec cadence. More operator
    specialization and cycle measurement are still required before this mode is
    underrun-free on hardware and can replace the pre-rendered transport proof.
-6. **PCM/PDX:** add the X68000 ADPCM path and mixer, then compatibility tests
-   for real MDX/PDX material.
+6. **PCM/PDX (in progress):** standard raw PDX banks now have checked lookup
+   for all 96 offset/length entries and a streaming single-voice MSM6258 decoder.
+   A generated oracle checks low-nibble-first input, predictor and step updates,
+   10-bit clamping, 16-bit output scaling, sample exhaustion, empty entries, and
+   malformed bank ranges under Hatari. MDX PCM commands, playback-rate
+   conversion, pan/volume, voice allocation, FM/PCM mixing, and compatibility
+   tests with real MDX/PDX pairs remain.
 
 ## Validation strategy
 

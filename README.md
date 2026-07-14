@@ -10,7 +10,10 @@ division of work is:
 The current milestone is executable on TOS and under Hatari. The 68030 side now
 has the original 32-entry MXDRV call-table shape, owned MDX/PDX buffers, core
 transport state, an `OPMBuf`-compatible mirror, and a DSP-backed replacement for
-MXDRV's `WriteOPM`. The DSP clocks stereo YM2151 samples at the native 62.5 kHz
+MXDRV's `WriteOPM`. Standard raw PDX banks now have validated 96-entry sample
+lookup and a streaming single-voice decoder that matches the X68000 MSM6258
+predictor, step, clamping, and nibble order. The DSP clocks stereo YM2151 samples
+at the native 62.5 kHz
 rate with phase accumulation, ADSR envelopes, logarithmic sine/power lookup,
 operator feedback, all eight algorithms, panning, and YM3012 output rounding.
 The DSP also clocks all four LFO waveforms, AM/PM depth and sensitivity,
@@ -38,9 +41,11 @@ produced 5,679 fresh frames in a nominal one-second interval, versus about
 49,170 required by the codec.
 
 This is not a complete music driver yet. MDX command replay and timer service,
-PDX mixing and continuous underrun-free synthesis remain. The buffered SSI mode
-still supplies the full-rate transport proof, while the live mode proves the
-direct scheduling and synthesis control flow despite underrunning. Protocol v8
+PDX rate conversion/polyphonic mixing, and continuous underrun-free synthesis
+remain. PDX samples can be located and decoded but are not yet triggered by MDX
+tracks or mixed into Falcon output. The buffered SSI mode still supplies the
+full-rate transport proof, while the live mode proves the direct scheduling and
+synthesis control flow despite underrunning. Protocol v8
 provides a refillable 32-entry ring FIFO of exact register events on a rolling
 16-bit native sample clock; FIFO and clock-query transactions work while SSI is
 active, and the clock persists across buffered and live sessions.
@@ -76,9 +81,11 @@ and a timer-driven CSM key sample:
 make smoke
 ```
 
-The smoke test also verifies sound locking, DSP-to-DAC matrix setup, buffered
-and live audio start/stop, rolling-clock FIFO writes during live synthesis, SSI
-frame-count floors, tristating, and sound unlock under Hatari.
+The smoke test also verifies standard PDX lookup bounds, empty and malformed
+entries, and exact MSM6258 samples from a generated oracle. It then verifies
+sound locking, DSP-to-DAC matrix setup, buffered and live audio start/stop,
+rolling-clock FIFO writes during live synthesis, SSI frame-count floors,
+tristating, and sound unlock under Hatari.
 
 The outputs are:
 
@@ -97,14 +104,17 @@ Hatari is installed. It is a test harness at this stage, not yet an MDX player.
 - `src/m68k/main.s`: Falcon loader and smoke test.
 - `src/m68k/mxdrv_core.s`: resident-independent 32-call MXDRV API foundation.
 - `src/m68k/mxdrv_port.s`: replacement seam for MXDRV's original `WriteOPM`.
+- `src/m68k/pdx.s`: validated standard PDX lookup and MSM6258 stream decoder.
 - `src/m68k/dsp_link.s`: packed 24-bit host/DSP exchange.
 - `src/dsp/ym2151.asm`: DSP protocol and command-clocked YM2151 sample kernel.
 - `tools/ym2151_oracle.cpp`: native executable built against vendored ymfm.
 - `tools/generate_ym2151_tables.py`: mechanical ymfm-to-DSP table generator.
+- `tools/pdx_adpcm_oracle.cpp`: MAME-compatible MSM6258 reference vectors.
 - `tests/traces/attack_all_carriers.trace`: timestamped oracle input trace.
 - `tests/traces/noise_channel7.trace`: fastest-rate channel-7 noise trace.
 - `tests/traces/timer_csm.trace`: two-sample Timer A/CSM oracle trace.
 - `docs/ym2151-ground-truth.md`: facts extracted from the vendored MAME core.
+- `docs/pdx-ground-truth.md`: PDX table and X68000 ADPCM decoding facts.
 - `docs/dsp56001-notes.md`: constraints taken from the local Motorola manual.
 - `docs/architecture.md`: ownership, protocol, and staged port plan.
 

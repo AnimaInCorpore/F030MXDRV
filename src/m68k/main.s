@@ -1,6 +1,7 @@
         include "xbios.i"
         include "protocol.i"
         include "ym2151_reference.i"
+        include "pdx_adpcm_reference.i"
 
         global  start
 
@@ -43,6 +44,83 @@ start:
         moveq   #0,d0                  ; MXDRV call $00: reset
         bsr     mxdrv_call
         cmp.l   #DSP_REPLY_OK,d0
+        bne     protocol_failed
+
+        ; Load a standard 96-entry PDX bank through MXDRV call $03, validate
+        ; its table, then decode one entry against the vendored MSM6258 oracle.
+        moveq   #3,d0
+        move.l  #pdx_test_bank_end-pdx_test_bank,d1
+        lea     pdx_test_bank(pc),a1
+        bsr     mxdrv_call
+        tst.l   d0
+        bne     protocol_failed
+
+        moveq   #0,d0
+        bsr     mxdrv_pdx_lookup
+        cmpi.l  #8,d0
+        bne     protocol_failed
+        cmpi.b  #$70,(a0)
+        bne     protocol_failed
+        cmpi.b  #$ef,7(a0)
+        bne     protocol_failed
+
+        moveq   #1,d0                  ; empty entry
+        bsr     mxdrv_pdx_lookup
+        tst.l   d0
+        bne     protocol_failed
+        move.l  a0,d0
+        bne     protocol_failed
+
+        moveq   #2,d0                  ; nonempty data overlaps the table
+        bsr     mxdrv_pdx_lookup
+        cmpi.l  #-1,d0
+        bne     protocol_failed
+
+        moveq   #3,d0                  ; range extends beyond the copied bank
+        bsr     mxdrv_pdx_lookup
+        cmpi.l  #-1,d0
+        bne     protocol_failed
+
+        moveq   #96,d0                 ; sample number is outside 0-95
+        bsr     mxdrv_pdx_lookup
+        cmpi.l  #-1,d0
+        bne     protocol_failed
+
+        moveq   #0,d0
+        bsr     mxdrv_pdx_start
+        tst.l   d0
+        bne     protocol_failed
+        lea     pdx_adpcm_references(pc),a3
+        moveq   #PDX_REF_ADPCM_COUNT-1,d6
+.decode_pdx_sample:
+        bsr     mxdrv_pdx_decode
+        cmpi.l  #1,d1
+        bne     protocol_failed
+        cmp.l   (a3)+,d0
+        bne     protocol_failed
+        dbra    d6,.decode_pdx_sample
+
+        bsr     mxdrv_pdx_decode        ; exactly two samples per encoded byte
+        tst.l   d1
+        bne     protocol_failed
+        tst.l   d0
+        bne     protocol_failed
+
+        moveq   #3,d0                  ; an undersized bank has no valid table
+        move.l  #767,d1
+        lea     pdx_test_bank(pc),a1
+        bsr     mxdrv_call
+        tst.l   d0
+        bne     protocol_failed
+        moveq   #0,d0
+        bsr     mxdrv_pdx_lookup
+        cmpi.l  #-1,d0
+        bne     protocol_failed
+
+        ; Unique completion marker for the PDX lookup/decode integration gate.
+        move.l  #DSP_CMD_PING+$ad0c,d0
+        bsr     dsp_exchange
+        cmp.l   #DSP_REPLY_HELLO,d0
         bne     protocol_failed
 
         moveq   #$1b,d1                ; exercise the MXDRV WriteOPM seam
@@ -654,7 +732,7 @@ banner:
         dc.b    '68030 MXDRV host + DSP56001 YM2151',13,10,13,10,0
 
 ready_text:
-        dc.b    'MXDRV API + DSP YM2151 oracle samples: OK',13,10
+        dc.b    'MXDRV PDX ADPCM + DSP YM2151 oracle samples: OK',13,10
         dc.b    'Falcon DSP SSI/crossbar burst: OK',13,10,0
 
 audio_text:
@@ -706,6 +784,28 @@ csm_trace:
         dc.b    $60,$00,$80,$ff,$a0,$00,$c0,$00,$e0,$0f
         dc.b    $10,$ff,$11,$02,$14,$81
         even
+
+; Standard PDX table: 96 big-endian offset/length pairs. Entry 0 is valid,
+; entry 1 is empty, and entries 2/3 deliberately exercise validation errors.
+pdx_test_bank:
+        dc.l    768,8
+        dc.l    0,0
+        dc.l    764,4
+        dc.l    774,8
+        dcb.b   736,$00
+        dc.b    $70,$f1,$27,$8e,$45,$ab,$cd,$ef
+pdx_test_bank_end:
+        even
+
+pdx_adpcm_references:
+        dc.l    PDX_REF_ADPCM_00,PDX_REF_ADPCM_01
+        dc.l    PDX_REF_ADPCM_02,PDX_REF_ADPCM_03
+        dc.l    PDX_REF_ADPCM_04,PDX_REF_ADPCM_05
+        dc.l    PDX_REF_ADPCM_06,PDX_REF_ADPCM_07
+        dc.l    PDX_REF_ADPCM_08,PDX_REF_ADPCM_09
+        dc.l    PDX_REF_ADPCM_10,PDX_REF_ADPCM_11
+        dc.l    PDX_REF_ADPCM_12,PDX_REF_ADPCM_13
+        dc.l    PDX_REF_ADPCM_14,PDX_REF_ADPCM_15
 
 algorithm_references:
         dc.l    YM_REF_ALGORITHM_0_LEFT,YM_REF_ALGORITHM_0_RIGHT

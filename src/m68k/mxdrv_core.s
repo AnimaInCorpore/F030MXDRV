@@ -1,4 +1,6 @@
         global  mxdrv_call
+        global  mxdrv_pdx_buffer
+        global  mxdrv_pdx_size
 
 MXDRV_MDX_CAPACITY      equ     65536
 MXDRV_PDX_CAPACITY      equ     319488

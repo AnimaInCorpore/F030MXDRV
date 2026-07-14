@@ -17,16 +17,19 @@ REFERENCE_BUILD := build/reference
 RELEASE_DIR := release
 
 YM2151_ORACLE := $(NATIVE_BUILD)/ym2151_oracle
+PDX_ADPCM_ORACLE := $(NATIVE_BUILD)/pdx_adpcm_oracle
 YM2151_TABLES := $(GENERATED_BUILD)/ym2151_tables.inc
 YM2151_HOST_TABLES := $(GENERATED_BUILD)/ym2151_host_tables.i
 YM2151_REFERENCE := $(GENERATED_BUILD)/ym2151_reference.i
+PDX_ADPCM_REFERENCE := $(GENERATED_BUILD)/pdx_adpcm_reference.i
 YM2151_VECTORS := $(REFERENCE_BUILD)/attack_all_carriers.tsv
 
 M68K_SOURCES := \
 	src/m68k/main.s \
 	src/m68k/dsp_link.s \
 	src/m68k/mxdrv_core.s \
-	src/m68k/mxdrv_port.s
+	src/m68k/mxdrv_port.s \
+	src/m68k/pdx.s
 M68K_OBJECTS := $(patsubst src/m68k/%.s,$(M68K_BUILD)/%.o,$(M68K_SOURCES))
 
 DOSBOX ?= $(shell command -v dosbox-staging 2>/dev/null || command -v dosbox 2>/dev/null)
@@ -40,7 +43,8 @@ host: $(RELEASE_DIR)/f030mxdrv.tos
 
 dsp: $(RELEASE_DIR)/ym2151.lod
 
-reference: $(YM2151_REFERENCE) $(YM2151_TABLES) $(YM2151_HOST_TABLES) $(YM2151_VECTORS)
+reference: $(YM2151_REFERENCE) $(PDX_ADPCM_REFERENCE) $(YM2151_TABLES) \
+		$(YM2151_HOST_TABLES) $(YM2151_VECTORS)
 
 tools: $(VASM) $(VLINK)
 
@@ -67,11 +71,20 @@ $(YM2151_ORACLE): tools/ym2151_oracle.cpp $(YMFM_SOURCE)/ymfm_opm.cpp \
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -std=c++17 -O2 -I$(YMFM_SOURCE) \
 		tools/ym2151_oracle.cpp $(YMFM_SOURCE)/ymfm_opm.cpp -o $@
 
+$(PDX_ADPCM_ORACLE): tools/pdx_adpcm_oracle.cpp \
+		third_party/mame/src/devices/sound/okim6258.cpp
+	@mkdir -p $(NATIVE_BUILD)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -std=c++17 -O2 $< -o $@
+
 $(YM2151_REFERENCE): $(YM2151_ORACLE) tests/traces/attack_all_carriers.trace \
 		tests/traces/noise_channel7.trace tests/traces/timer_csm.trace
 	@mkdir -p $(GENERATED_BUILD)
 	$(YM2151_ORACLE) --emit-m68k tests/traces/attack_all_carriers.trace \
 		tests/traces/noise_channel7.trace tests/traces/timer_csm.trace > $@
+
+$(PDX_ADPCM_REFERENCE): $(PDX_ADPCM_ORACLE)
+	@mkdir -p $(GENERATED_BUILD)
+	$(PDX_ADPCM_ORACLE) --emit-m68k > $@
 
 $(YM2151_TABLES): tools/generate_ym2151_tables.py $(YMFM_SOURCE)/ymfm_fm.ipp
 	@mkdir -p $(GENERATED_BUILD)
@@ -86,7 +99,7 @@ $(YM2151_VECTORS): $(YM2151_ORACLE) tests/traces/attack_all_carriers.trace
 	$(YM2151_ORACLE) --vectors tests/traces/attack_all_carriers.trace 256 > $@
 
 $(M68K_BUILD)/%.o: src/m68k/%.s src/m68k/xbios.i src/m68k/protocol.i \
-		$(YM2151_REFERENCE) $(YM2151_HOST_TABLES) $(VASM)
+		$(YM2151_REFERENCE) $(PDX_ADPCM_REFERENCE) $(YM2151_HOST_TABLES) $(VASM)
 	@mkdir -p $(M68K_BUILD)
 	$(VASM) $< -quiet -Felf -m68030 -Isrc/m68k -I$(GENERATED_BUILD) \
 		-o $@ -L $(M68K_BUILD)/$*.lst
@@ -151,6 +164,7 @@ smoke: check
 	@rg -q "Transfer 0x000080" build/hatari-smoke.trace
 	@rg -q "Transfer 0x01fc00" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x021b00" build/hatari-smoke.trace
+	@rg -q "Direct Transfer 0x01ad0c" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x050000" build/hatari-smoke.trace
 	@phase=$$($(YM2151_ORACLE) --phase-hex); \
 		rg -q "Transfer $$phase" build/hatari-smoke.trace
@@ -186,7 +200,7 @@ smoke: check
 	@rg -q "Direct Transfer 0x0c0000" build/hatari-smoke.trace
 	@rg -q "XBIOS 0x89 Dsptristate\\(0x0, 0x0\\)" build/hatari-smoke.trace
 	@rg -q "XBIOS 0x81 Unlocksnd" build/hatari-smoke.trace
-	@echo "Hatari MXDRV/DSP ymfm sample-oracle smoke test: OK"
+	@echo "Hatari MXDRV/DSP YM2151 + PDX ADPCM oracle smoke test: OK"
 
 run: all
 	@if ! command -v hatari >/dev/null 2>&1; then \
