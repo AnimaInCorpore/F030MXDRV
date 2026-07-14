@@ -19,6 +19,7 @@ MDX_TRACK_NOTE_LENGTH   equ     12
 MDX_TRACK_BANK          equ     13
 MDX_TRACK_VOICE         equ     14
 MDX_TRACK_VOICE_DIRTY   equ     18
+MDX_TRACK_CARRIERS      equ     19
 MDX_TRACK_BYTES         equ     20
 MDX_TRACK_COUNT         equ     16
 MDX_TRACK_TABLE_BYTES   equ     2+MDX_TRACK_COUNT*2
@@ -386,22 +387,72 @@ mdx_command_volume:
         bcc     mdx_track_invalid
         moveq   #0,d0
         move.b  (a4)+,d0
+        cmpi.w  #8,d7
+        bcc     mdx_command_pcm_volume
+        btst    #7,d0                  ; negative values encode raw attenuation
+        bne     mdx_command_store_fm_volume
+        cmpi.b  #15,d0
+        bhi     mdx_track_invalid
+mdx_command_store_fm_volume:
+        move.b  d0,MDX_TRACK_VOLUME(a6)
+        bsr     mdx_apply_fm_volume
+        tst.l   d0
+        bne     mdx_track_invalid
+        bra     mdx_command_more
+mdx_command_pcm_volume:
         cmpi.b  #15,d0
         bhi     mdx_track_invalid
         move.b  d0,MDX_TRACK_VOLUME(a6)
-        bra     mdx_command_more
+        bra     mdx_command_apply_volume
 
 mdx_command_volume_down:
-        tst.b   MDX_TRACK_VOLUME(a6)
+        moveq   #0,d0
+        move.b  MDX_TRACK_VOLUME(a6),d0
+        cmpi.w  #8,d7
+        bcc     mdx_command_volume_down_normal
+        btst    #7,d0
+        beq     mdx_command_volume_down_normal
+        cmpi.b  #$ff,d0
+        beq     mdx_command_more
+        addq.b  #1,MDX_TRACK_VOLUME(a6)
+        bra     mdx_command_apply_volume
+mdx_command_volume_down_normal:
+        tst.b   d0
         beq     mdx_command_more
         subq.b  #1,MDX_TRACK_VOLUME(a6)
+mdx_command_apply_volume:
+        cmpi.w  #8,d7
+        bcc     mdx_command_apply_pcm_volume
+        bsr     mdx_apply_fm_volume
+        tst.l   d0
+        bne     mdx_track_invalid
+        bra     mdx_command_more
+mdx_command_apply_pcm_volume:
+        move.w  d7,d0
+        subi.w  #8,d0
+        moveq   #0,d1
+        move.b  MDX_TRACK_VOLUME(a6),d1
+        bsr     mxdrv_pdx_voice_set_volume
+        tst.l   d0
+        bne     mdx_track_invalid
         bra     mdx_command_more
 
 mdx_command_volume_up:
-        cmpi.b  #15,MDX_TRACK_VOLUME(a6)
+        moveq   #0,d0
+        move.b  MDX_TRACK_VOLUME(a6),d0
+        cmpi.w  #8,d7
+        bcc     mdx_command_volume_up_normal
+        btst    #7,d0
+        beq     mdx_command_volume_up_normal
+        cmpi.b  #$80,d0
+        beq     mdx_command_more
+        subq.b  #1,MDX_TRACK_VOLUME(a6)
+        bra     mdx_command_apply_volume
+mdx_command_volume_up_normal:
+        cmpi.b  #15,d0
         bcc     mdx_command_more
         addq.b  #1,MDX_TRACK_VOLUME(a6)
-        bra     mdx_command_more
+        bra     mdx_command_apply_volume
 
 mdx_command_note_length:
         cmpa.l  a3,a4
@@ -548,6 +599,11 @@ mdx_load_fm_voice:
 
         moveq   #0,d2
         move.b  (a1)+,d2
+        moveq   #0,d0
+        move.b  d2,d0
+        andi.w  #7,d0
+        lea     mdx_carrier_slot(pc),a0
+        move.b  (a0,d0.w),MDX_TRACK_CARRIERS(a6)
         andi.b  #$3f,d2
         moveq   #0,d0
         move.b  MDX_TRACK_PAN(a6),d0
@@ -582,10 +638,16 @@ mdx_load_fm_voice:
 
         moveq   #$60,d1
         add.b   d7,d1
+        moveq   #0,d4
+        move.b  MDX_TRACK_CARRIERS(a6),d4
         moveq   #3,d3
 .write_tl:
         moveq   #0,d2
         move.b  (a1)+,d2
+        lsr.b   #1,d4
+        bcc     .write_tl_value
+        moveq   #$7f,d2               ; carriers are restored with volume below
+.write_tl_value:
         bsr     mxdrv_write_ym2151
         tst.l   d0
         bne     .error
@@ -606,11 +668,62 @@ mdx_load_fm_voice:
         dbra    d3,.write_envelope
 
         clr.b   MDX_TRACK_VOICE_DIRTY(a6)
+        bsr     mdx_apply_fm_volume
+        tst.l   d0
+        bne     .error
 .success:
         moveq   #0,d0
         rts
 .error:
         moveq   #-1,d0
+        rts
+
+; Rewrite only the algorithm's carrier TL registers. Normal MDX volumes 0-15
+; use MXDRV's attenuation table; values $80-$ff directly encode attenuation
+; 0-127. Base TL plus attenuation saturates at the YM2151's $7f limit.
+mdx_apply_fm_volume:
+        movem.l d1-d5/a0-a1,-(sp)
+        tst.b   MDX_TRACK_VOICE_DIRTY(a6)
+        bne     mdx_apply_fm_volume_success
+        movea.l MDX_TRACK_VOICE(a6),a0
+        move.l  a0,d0
+        beq     mdx_apply_fm_volume_success
+
+        moveq   #0,d5
+        move.b  MDX_TRACK_VOLUME(a6),d5
+        bclr    #7,d5
+        bne     mdx_apply_fm_volume_ready
+        lea     mdx_volume_table(pc),a1
+        move.b  (a1,d5.w),d5
+mdx_apply_fm_volume_ready:
+        lea     6(a0),a0               ; four base TL bytes in the voice record
+        moveq   #0,d3
+        move.b  MDX_TRACK_CARRIERS(a6),d3
+        moveq   #$60,d1
+        add.b   d7,d1
+        moveq   #3,d4
+mdx_apply_fm_volume_loop:
+        moveq   #0,d2
+        move.b  (a0)+,d2
+        lsr.b   #1,d3
+        bcc     mdx_apply_fm_volume_next
+        add.b   d5,d2
+        bpl     mdx_apply_fm_volume_write
+        moveq   #$7f,d2
+mdx_apply_fm_volume_write:
+        bsr     mxdrv_write_ym2151
+        tst.l   d0
+        bne     mdx_apply_fm_volume_error
+mdx_apply_fm_volume_next:
+        addq.b  #8,d1
+        dbra    d4,mdx_apply_fm_volume_loop
+mdx_apply_fm_volume_success:
+        moveq   #0,d0
+        bra     mdx_apply_fm_volume_return
+mdx_apply_fm_volume_error:
+        moveq   #-1,d0
+mdx_apply_fm_volume_return:
+        movem.l (sp)+,d1-d5/a0-a1
         rts
 
 ; YM2151 KC code for MDX semitones 0..95, copied from MXDRV's OPMNoteTable.
@@ -621,6 +734,12 @@ mdx_opm_note_table:
         dc.b    $40,$41,$42,$44,$45,$46,$48,$49,$4a,$4c,$4d,$4e,$50,$51,$52,$54
         dc.b    $55,$56,$58,$59,$5a,$5c,$5d,$5e,$60,$61,$62,$64,$65,$66,$68,$69
         dc.b    $6a,$6c,$6d,$6e,$70,$71,$72,$74,$75,$76,$78,$79,$7a,$7c,$7d,$7e
+
+mdx_carrier_slot:
+        dc.b    $08,$08,$08,$08,$0c,$0e,$0e,$0f
+
+mdx_volume_table:
+        dc.b    $2a,$28,$25,$22,$20,$1d,$1a,$18,$15,$12,$10,$0d,$0a,$08,$05,$02
         even
 
         bss

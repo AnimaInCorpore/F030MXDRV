@@ -4,6 +4,8 @@
         global  mxdrv_pdx_reset
         global  mxdrv_pdx_voice_start
         global  mxdrv_pdx_voice_stop
+        global  mxdrv_pdx_voice_set_volume
+        global  mxdrv_pdx_voice_volume
         global  mxdrv_pdx_set_pan
         global  mxdrv_pdx_active_mask
         global  mxdrv_pdx_mix_frame
@@ -275,6 +277,35 @@ mxdrv_pdx_voice_stop:
         clr.b   PDX_VOICE_ACTIVE(a0)
         clr.w   PDX_VOICE_CURRENT(a0)
         moveq   #0,d0
+        rts
+
+; Update/query one voice's PCM8 gain without restarting its ADPCM decoder.
+; set in: d0.w=voice 0-7, d1.w=volume 0-15; out: d0.l=0/-1
+mxdrv_pdx_voice_set_volume:
+        moveq   #0,d2
+        move.w  d0,d2
+        cmpi.w  #PDX_VOICE_COUNT,d2
+        bcc     pdx_voice_error
+        cmpi.w  #15,d1
+        bhi     pdx_voice_error
+        mulu.w  #PDX_VOICE_BYTES,d2
+        lea     pdx_voices,a0
+        adda.l  d2,a0
+        move.b  d1,PDX_VOICE_VOLUME(a0)
+        moveq   #0,d0
+        rts
+
+; in: d0.w=voice 0-7; out: d0.l=volume 0-15, or -1
+mxdrv_pdx_voice_volume:
+        moveq   #0,d1
+        move.w  d0,d1
+        cmpi.w  #PDX_VOICE_COUNT,d1
+        bcc     pdx_voice_error
+        mulu.w  #PDX_VOICE_BYTES,d1
+        lea     pdx_voices,a0
+        adda.l  d1,a0
+        moveq   #0,d0
+        move.b  PDX_VOICE_VOLUME(a0),d0
         rts
 
 ; PCM8's hardware pan is common to all channels.

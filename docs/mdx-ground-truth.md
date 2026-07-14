@@ -43,8 +43,8 @@ The PCM defaults recovered from channel initialization are rate code 4
 | `e1 rr dd` | raw OPM write | sends the exact register/data pair to the DSP |
 | `e2 vv` | voice | finds and loads a 26-byte FM voice record, or selects a PCM bank |
 | `e3 pp` | pan | updates FM register `$20+channel`, or the PCM start parameters |
-| `e4 vv` | volume | sets PCM volume 0-15 |
-| `e5` / `e6` | volume down/up | clamps the PCM volume in the 0-15 range |
+| `e4 vv` | volume | sets indexed FM/PCM volume; FM also accepts raw `$80`-`$ff` attenuation |
+| `e5` / `e6` | volume down/up | steps indexed or raw volume with the original endpoint clamps |
 | `e7 ll` | note length | updates the key-gate scale |
 | `e8` | legato | consumed; full legato state is not implemented yet |
 | `e9 cc ww` | repeat start | copies count `cc` into mutable work byte `ww` |
@@ -56,7 +56,15 @@ The PCM defaults recovered from channel initialization are rate code 4
 An FM E2 record is one ID byte followed by algorithm/feedback, PMS/AMS, four
 DT1/MUL bytes, four TL bytes, and sixteen envelope/DT2 bytes. `LoadVoice` maps
 those bytes to registers `$20`, `$38`, `$40`-`$58`, `$60`-`$78`, and
-`$80`-`$f8` for the selected channel. This port preserves that mapping.
+`$80`-`$f8` for the selected channel. This port preserves that mapping. Its
+carrier mask is the original `$08,$08,$08,$08,$0c,$0e,$0e,$0f` table for
+algorithms 0-7. Voice loading initially silences only carriers, retains each
+modulator's base TL, then rewrites carrier TL as base plus MXDRV's indexed
+attenuation table. FM volume bytes `$80`-`$ff` instead encode attenuation
+0-127 directly. Both forms saturate at YM TL `$7f`; E5/E6 preserve the
+different byte directions and endpoint behavior of indexed versus raw volume.
+PCM E4/E5/E6 changes update an already-running decoder voice without resetting
+its ADPCM or rate-conversion state.
 
 E9-EA-EB control flow preserves MXDRV's unusual in-stream mutable counter. EA
 uses a signed displacement relative to the byte after its operands; the work
@@ -66,7 +74,7 @@ to inspect the same counter. Both the counter and every control target are
 checked against the owned MDX copy before use.
 
 Detune, portamento, synchronization, modulation, OPM LFO, fade, PCM8-enable,
-full legato and FM carrier-volume rewriting remain to be ported. Encountering
+and full legato remain to be ported. Encountering
 one of those commands currently retires only the affected track and sets the
 parser error byte.
 
@@ -79,8 +87,8 @@ counter. Stopped, paused, or nested calls do not advance it.
 `mxdrv_mdx_timer_period` returns `(256 - tempo) * 16` native 62.5 kHz samples.
 YM2151 Timer B advances every 1024 input clocks, which is 16 samples at the
 emulated chip's 4 MHz / 64 sample cadence. Thus the initial `$c8` tempo is 896
-samples per tick and the integration fixture's `$a4` is 1472. A Falcon hardware
-Public play now claims MFP Timer A only when its control, interrupt-enable, and
+samples per tick and the integration fixture's `$a4` is 1472. Public play now
+claims MFP Timer A only when its control, interrupt-enable, and
 interrupt-mask state all show that it is unused. Timer A runs at 1024 Hz using
 the 2.4576 MHz MFP clock, divisor 200, and data value 12. Its level-6 handler
 adds exactly 4,000,000 units to a 16.16 native-sample phase accumulator per
@@ -102,7 +110,11 @@ and starts it through call `$04`. Its FM track selects a standard voice,
 executes E1/E0, starts note 0, and keys it off one tick later. PCM track 8
 starts PDX entry 0 for two ticks. The test checks the OPM mirror, MDX active
 mask, PDX active mask, stopped playback flags, and exact Timer-B periods. A
-second FM track takes a two-pass E9/EA loop, executes EB escape on its final
+carrier-volume fixture checks algorithm-0 modulator TL preservation, normal
+indexed attenuation, raw `$80` stepping through E5/E6, and `$ff` saturation.
+The PDX gate also changes and queries an active voice's volume without
+restarting it. A second FM track takes a two-pass E9/EA loop, executes EB escape
+on its final
 pass, and proves the mutable work byte transitions from 2 to 1. A malformed EA
 fixture verifies that an out-of-buffer target is rejected before memory is
 touched. A long-rest fixture then waits three VBLs, observes automatically
