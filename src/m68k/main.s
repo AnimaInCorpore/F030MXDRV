@@ -1351,32 +1351,45 @@ audio_protocol_failed:
 
 protocol_failed:
         Cconws  protocol_error_text
-        Cconin
         bra     clean_exit
 
 load_failed:
         Cconws  load_error_text
-        Cconin
         bra     clean_exit
 
 sound_failed:
         Cconws  sound_error_text
-        Cconin
         bra     clean_exit
 
 clean_exit:
         bsr     mxdrv_mdx_clock_stop
         Dsp_Unlock
+        bsr     wait_for_exit_key
         Pterm0
 
 usage_failed:
         Cconws  usage_text
+        bsr     wait_for_exit_key
         Pterm0
 
 reserve_failed:
         Cconws  reserve_error_text
-        Cconin
+        bsr     wait_for_exit_key
         Pterm0
+
+; Discard any launch/stop key still buffered by TOS, then require a fresh
+; keypress. This keeps the final TTP status visible on a real Falcon desktop.
+wait_for_exit_key:
+.drain:
+        Cconis
+        tst.l   d0
+        beq     .wait
+        Cconin
+        bra     .drain
+.wait:
+        Cconws  exit_prompt_text
+        Cconin
+        rts
 
 ; Clock d3 samples and return the final left sample.
 clock_samples:
@@ -1402,20 +1415,19 @@ usage_text:
         dc.b    'Usage: F030MXDRV.TTP song.mdx [bank.pdx]',13,10,0
 
 reserve_error_text:
-        dc.b    'Error: unable to reserve the Falcon DSP.',13,10
-        dc.b    'Press a key to exit.',13,10,0
+        dc.b    'Error: unable to reserve the Falcon DSP.',13,10,0
 
 load_error_text:
-        dc.b    'Error: unable to bootstrap the DSP program.',13,10
-        dc.b    'Press a key to exit.',13,10,0
+        dc.b    'Error: unable to bootstrap the DSP program.',13,10,0
 
 protocol_error_text:
-        dc.b    'Error: DSP protocol mismatch.',13,10
-        dc.b    'Press a key to exit.',13,10,0
+        dc.b    'Error: DSP protocol mismatch.',13,10,0
 
 sound_error_text:
-        dc.b    'Error: unable to lock the Falcon sound system.',13,10
-        dc.b    'Press a key to exit.',13,10,0
+        dc.b    'Error: unable to lock the Falcon sound system.',13,10,0
+
+exit_prompt_text:
+        dc.b    'Press any key to exit.',13,10,0
 
 attack_trace:
         dc.b    $20,$c7,$28,$4c,$30,$00

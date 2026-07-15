@@ -16,6 +16,10 @@ PLAYER_SOUND_DAC       equ     8
 PLAYER_SOUND_CLK25M    equ     0
 PLAYER_SOUND_CLK50K    equ     1
 PLAYER_SOUND_NO_SHAKE  equ     1
+PLAYER_SOUND_LTATTEN   equ     0
+PLAYER_SOUND_RTATTEN   equ     1
+PLAYER_SOUND_INQUIRE   equ     -1
+PLAYER_SOUND_FULL      equ     0
 
         text
 
@@ -277,6 +281,14 @@ player_files_loaded:
         cmpi.l  #1,d0
         bne     player_sound_error
         move.b  #1,player_sound_owned
+        ; Falcon CODEC attenuation survives across programs. Preserve it,
+        ; then explicitly unmute both DAC channels for this playback session.
+        Soundcmd #PLAYER_SOUND_LTATTEN,#PLAYER_SOUND_INQUIRE
+        move.w  d0,player_old_left_atten
+        Soundcmd #PLAYER_SOUND_RTATTEN,#PLAYER_SOUND_INQUIRE
+        move.w  d0,player_old_right_atten
+        Soundcmd #PLAYER_SOUND_LTATTEN,#PLAYER_SOUND_FULL
+        Soundcmd #PLAYER_SOUND_RTATTEN,#PLAYER_SOUND_FULL
         Setmode #PLAYER_SOUND_STEREO16
         Settracks #0,#0
         Dsptristate #1,#0
@@ -361,6 +373,8 @@ player_cleanup_sound:
         tst.b   player_sound_owned
         beq     player_cleanup_return
         Dsptristate #0,#0
+        Soundcmd #PLAYER_SOUND_LTATTEN,player_old_left_atten
+        Soundcmd #PLAYER_SOUND_RTATTEN,player_old_right_atten
         Unlocksnd
         clr.b   player_sound_owned
 player_cleanup_return:
@@ -422,6 +436,10 @@ player_sound_owned:
         ds.b    1
 player_audio_started:
         ds.b    1
+player_old_left_atten:
+        ds.w    1
+player_old_right_atten:
+        ds.w    1
         even
 
         end

@@ -82,6 +82,14 @@
         addq.l  #2,sp
         endm
 
+        macro   Soundcmd mode,data
+        move.w  \2,-(sp)
+        move.w  \1,-(sp)
+        move.w  #130,-(sp)
+        trap    #14
+        addq.l  #6,sp
+        endm
+
         macro   Setmode mode
         move.w  \1,-(sp)
         move.w  #132,-(sp)
