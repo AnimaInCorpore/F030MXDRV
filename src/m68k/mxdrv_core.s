@@ -182,25 +182,37 @@ mxdrv_api_continue:
         moveq   #0,d0
         rts
 
-; MDX/PDX headers store the first title/name displacement at byte 6.
+; A raw MDX starts with its title and terminates it with CR/LF/$1a. Calls
+; $08/$09 expose the two strings directly, as the original work area does.
 mxdrv_api_get_mdx_title:
         move.l  mxdrv_mdx_size,d2
-        cmpi.l  #8,d2
+        cmpi.l  #4,d2
         bcs     mxdrv_api_null
         lea     mxdrv_mdx_buffer,a0
-        bra     mxdrv_api_header_string
+        move.l  a0,d0
+        rts
 
 mxdrv_api_get_pdx_name:
-        move.l  mxdrv_pdx_size,d2
-        cmpi.l  #8,d2
+        move.l  mxdrv_mdx_size,d2
+        cmpi.l  #4,d2
         bcs     mxdrv_api_null
-        lea     mxdrv_pdx_buffer,a0
-mxdrv_api_header_string:
-        moveq   #0,d0
-        move.w  6(a0),d0
-        cmp.l   d2,d0
-        bcc     mxdrv_api_null
-        add.l   a0,d0
+        lea     mxdrv_mdx_buffer,a0
+        lea     (a0,d2.l),a1
+.scan_title:
+        lea     3(a0),a2
+        cmpa.l  a1,a2
+        bhi     mxdrv_api_null
+        cmpi.b  #$0d,(a0)
+        bne     .next_title_byte
+        cmpi.b  #$0a,1(a0)
+        bne     .next_title_byte
+        cmpi.b  #$1a,2(a0)
+        beq     .pdx_name
+.next_title_byte:
+        addq.l  #1,a0
+        bra     .scan_title
+.pdx_name:
+        move.l  a2,d0
         rts
 
 mxdrv_api_null:

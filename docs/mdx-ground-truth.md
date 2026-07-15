@@ -1,22 +1,25 @@
 # MDX execution ground truth
 
-The host executor is derived from the vendored MXDRV 2.06+17 source at
-`third_party/x68kd11s/sound/mxdrv/2.06+17_Rel.X5-S/mxdrv17.s`. The relevant
-reference routines are `StartPlay`, `InitChannel`, `CommandFuncs`,
-`SetPCMVolume`, and `LoadVoice`.
+The host executor is cross-checked against the vendored MXDRV 2.06+17 source
+at `third_party/x68kd11s/sound/mxdrv/2.06+17_Rel.X5-S/mxdrv17.s` and the raw
+file layout documented by mdxtools. The relevant MXDRV routines are
+`StartPlay`, `InitChannel`, `CommandFuncs`, `SetPCMVolume`, and `LoadVoice`.
 
 ## Sequence and track layout
 
-`StartPlay` reads the unsigned word at MDX byte 4 and adds it to the MDX base.
-The resulting sequence block begins with another unsigned relative word for
-the FM voice table. Sixteen following unsigned words are track pointers,
-relative to that same sequence block. Channels 0-7 are YM2151 FM tracks and
-channels 8-15 are PDX/PCM tracks in this port.
+The raw file begins with a Shift-JIS title terminated by `0d 0a 1a`, followed
+by a zero-terminated PDX filename. The next byte is the sequence base. It holds
+one unsigned relative word for the FM voice table followed by either 9 or 16
+unsigned relative track words. All offsets are relative to the sequence base.
+The first track offset encodes the table width: `(offset - 2) / 2` is 9 or 16.
+Channels 0-7 are YM2151 FM tracks; channel 8 is the legacy PDX track, and
+channels 8-15 map to eight PDX/PCM voices in a 16-track file.
 
-The port resolves all eighteen offsets against the owned MDX copy before
-playback. A track fetch or operand fetch at/past the copied end retires that
-track with `mxdrv_mdx_error` set. At most 64 consecutive commands may execute
-before a duration-producing byte; this bounds corrupt command-only streams.
+The port scans the variable header and resolves the voice and active track
+offsets against the owned MDX copy before playback. A track fetch or operand
+fetch at/past the copied end retires that track with `mxdrv_mdx_error` set. At
+most 64 consecutive commands may execute before a duration-producing byte;
+this bounds corrupt command-only streams.
 
 ## Durations and notes
 
@@ -39,21 +42,20 @@ The PCM defaults recovered from channel initialization are rate code 4
 
 | Byte | Reference command | Current behavior |
 | --- | --- | --- |
-| `e0 dd` | tempo | mirrors tempo and writes YM register `$12` |
-| `e1 rr dd` | raw OPM write | sends the exact register/data pair to the DSP |
-| `e2 vv` | voice | finds and loads a 26-byte FM voice record, or selects a PCM bank |
-| `e3 pp` | pan | updates FM register `$20+channel`, or the PCM start parameters |
-| `e4 vv` | volume | sets indexed FM/PCM volume; FM also accepts raw `$80`-`$ff` attenuation |
-| `e5` / `e6` | volume down/up | steps indexed or raw volume with the original endpoint clamps |
-| `e7 ll` | note length | updates the key-gate scale |
-| `e8` | legato | consumed; full legato state is not implemented yet |
-| `e9 cc ww` | repeat start | copies count `cc` into mutable work byte `ww` |
-| `ea oo oo` | repeat end | decrements target-minus-one and takes the signed branch while nonzero |
-| `eb oo oo` | repeat escape | follows a future EA displacement and skips it when the counter is one |
-| `ee ...` | performance end | retires the standalone track |
-| `f9`-`ff` | end | retires the track |
+| `ff dd` | tempo | mirrors tempo and writes YM register `$12` |
+| `fe rr dd` | raw OPM write | sends the exact register/data pair to the DSP |
+| `fd vv` | voice | finds and loads a 26-byte FM voice body, or selects a PCM bank |
+| `fc pp` | pan | updates FM register `$20+channel`, or the PCM start parameters |
+| `fb vv` | volume | sets indexed FM/PCM volume; FM also accepts raw `$80`-`$ff` attenuation |
+| `fa` / `f9` | volume down/up | steps indexed or raw volume with the original endpoint clamps |
+| `f8 ll` | note length | updates the key-gate scale |
+| `f7` | legato | consumed; full legato state is not implemented yet |
+| `f6 cc ww` | repeat start | copies count `cc` into mutable work byte `ww` |
+| `f5 oo oo` | repeat end | decrements target-minus-one and takes the signed branch while nonzero |
+| `f4 oo oo` | repeat escape | follows a future F5 displacement and skips it when the counter is one |
+| `f1 00` / `f1 oo oo` | performance end | retires the standalone track; loop targets are pending |
 
-An FM E2 record is one ID byte followed by algorithm/feedback, PMS/AMS, four
+An FM FD record is one ID byte followed by algorithm/feedback, PMS/AMS, four
 DT1/MUL bytes, four TL bytes, and sixteen envelope/DT2 bytes. `LoadVoice` maps
 those bytes to registers `$20`, `$38`, `$40`-`$58`, `$60`-`$78`, and
 `$80`-`$f8` for the selected channel. This port preserves that mapping. Its
@@ -61,15 +63,15 @@ carrier mask is the original `$08,$08,$08,$08,$0c,$0e,$0e,$0f` table for
 algorithms 0-7. Voice loading initially silences only carriers, retains each
 modulator's base TL, then rewrites carrier TL as base plus MXDRV's indexed
 attenuation table. FM volume bytes `$80`-`$ff` instead encode attenuation
-0-127 directly. Both forms saturate at YM TL `$7f`; E5/E6 preserve the
+0-127 directly. Both forms saturate at YM TL `$7f`; FA/F9 preserve the
 different byte directions and endpoint behavior of indexed versus raw volume.
-PCM E4/E5/E6 changes update an already-running decoder voice without resetting
+PCM FB/FA/F9 changes update an already-running decoder voice without resetting
 its ADPCM or rate-conversion state.
 
-E9-EA-EB control flow preserves MXDRV's unusual in-stream mutable counter. EA
+F6-F5-F4 control flow preserves MXDRV's unusual in-stream mutable counter. F5
 uses a signed displacement relative to the byte after its operands; the work
-byte is immediately before that target. EB uses an unsigned forward
-displacement to the future EA operands, then follows EA's signed displacement
+byte is immediately before that target. F4 uses an unsigned forward
+displacement to the future F5 operands, then follows F5's signed displacement
 to inspect the same counter. Both the counter and every control target are
 checked against the owned MDX copy before use.
 
@@ -105,17 +107,17 @@ is deliberately deferred out of interrupt context.
 
 ## Integration fixture
 
-The Hatari harness copies a structurally valid 16-track MDX through call `$02`
+The Hatari harness copies a standard raw 16-track MDX through call `$02`
 and starts it through call `$04`. Its FM track selects a standard voice,
-executes E1/E0, starts note 0, and keys it off one tick later. PCM track 8
+executes FE/FF, starts note 0, and keys it off one tick later. PCM track 8
 starts PDX entry 0 for two ticks. The test checks the OPM mirror, MDX active
 mask, PDX active mask, stopped playback flags, and exact Timer-B periods. A
 carrier-volume fixture checks algorithm-0 modulator TL preservation, normal
-indexed attenuation, raw `$80` stepping through E5/E6, and `$ff` saturation.
+indexed attenuation, raw `$80` stepping through FA/F9, and `$ff` saturation.
 The PDX gate also changes and queries an active voice's volume without
-restarting it. A second FM track takes a two-pass E9/EA loop, executes EB escape
+restarting it. A second FM track takes a two-pass F6/F5 loop, executes F4 escape
 on its final
-pass, and proves the mutable work byte transitions from 2 to 1. A malformed EA
+pass, and proves the mutable work byte transitions from 2 to 1. A malformed F5
 fixture verifies that an out-of-buffer target is rejected before memory is
 touched. A long-rest fixture then waits three VBLs, observes automatically
 accumulated Timer-A ticks, drains them in foreground, and verifies that stop

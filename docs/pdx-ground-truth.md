@@ -52,9 +52,11 @@ bounds against that vector.
 ## Current boundary
 
 `src/m68k/pdx.s` provides validated lookup plus the eight-voice host mixer. It
-can render one exact Falcon codec period, which protocol v18 uploads to the DSP,
-combines with a newly rendered FM period, and loops through SSI to the DAC. MDX
-tracks 8-15 now start and stop those voices, and the TTP player uploads each
-successive period through the inactive-buffer refill command. This is not yet
-real-time music playback: while the DSP spends about 177 ms rendering the next
-20.48 ms period, SSI repeats the previous completed FM/PCM block.
+renders 1024 Falcon codec frames for each protocol-v19 realtime transaction.
+The DSP expands the interleaved signed 16-bit host mix into planar 24-bit
+accumulators, adds 16 64-frame FM blocks, saturates to the inactive interleaved
+SSI buffer, and switches A/B buffers at a stereo boundary. MDX tracks 8-15
+start and stop the eight voices, and the TTP player uses this realtime start and
+refill path. The older 1007-frame exact FM/PCM stream remains as a conformance
+gate. Real MDX/PDX corpus comparison and Falcon hardware underrun/contention
+measurements are still required before calling playback complete.

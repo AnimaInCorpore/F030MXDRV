@@ -81,33 +81,79 @@ mxdrv_mdx_timer_service:
         clr.b   mxdrv_mdx_timer_busy
         rts
 
-; Initialize the 16 MDX tracks using MXDRV's sequence-block layout:
-;   mdx+4 -> sequence block
-;   sequence+0 -> voice table, relative to sequence
-;   sequence+2..32 -> sixteen track pointers, relative to sequence
-; Every resolved byte must remain inside the copied MDX buffer.
+; Initialize a raw MDX file. Its variable header is a Shift-JIS title ending
+; in CR/LF/$1a, a zero-terminated PDX name, then the sequence base. Sequence
+; offsets are relative to that base: one voice-table word followed by either
+; nine legacy track words or sixteen PCM8 track words. The first track offset
+; encodes which form is present: (offset-2)/2 is the track count.
+; Every scan and resolved byte must remain inside the copied MDX buffer.
 ; out: d0.l=0 on success, -1 for a malformed/truncated MDX image
 mxdrv_mdx_start:
         bsr     mxdrv_mdx_reset
         move.l  mxdrv_mdx_size,d2
-        cmpi.l  #8,d2
+        cmpi.l  #9,d2
         bcs     mdx_start_error
 
         lea     mxdrv_mdx_buffer,a0
         lea     (a0,d2.l),a1
         move.l  a1,mxdrv_mdx_end
 
-        moveq   #0,d0
-        move.w  4(a0),d0
-        cmp.l   d2,d0
+        ; Locate the exact title terminator rather than accepting an embedded
+        ; $1a byte in the Shift-JIS title.
+        movea.l a0,a2
+mdx_start_title_scan:
+        lea     3(a2),a3
+        cmpa.l  a1,a3
+        bhi     mdx_start_error
+        cmpi.b  #$0d,(a2)
+        bne     mdx_start_title_next
+        cmpi.b  #$0a,1(a2)
+        bne     mdx_start_title_next
+        cmpi.b  #$1a,2(a2)
+        beq     mdx_start_title_done
+mdx_start_title_next:
+        addq.l  #1,a2
+        bra     mdx_start_title_scan
+mdx_start_title_done:
+        movea.l a3,a2                  ; byte after CR/LF/$1a
+
+        ; Skip the optional PDX name, including its terminating zero. The
+        ; following relative-offset words may legally begin at an odd address
+        ; on the Falcon's 68030.
+mdx_start_pdx_scan:
+        cmpa.l  a1,a2
         bcc     mdx_start_error
-        lea     (a0,d0.l),a2
-        lea     MDX_TRACK_TABLE_BYTES(a2),a3
+        tst.b   (a2)+
+        bne     mdx_start_pdx_scan
+
+        lea     4(a2),a3               ; voice plus first track offset
+        cmpa.l  a1,a3
+        bhi     mdx_start_error
+
+        moveq   #0,d5
+        move.w  2(a2),d5
+        cmpi.w  #2,d5
+        bls     mdx_start_error
+        subq.w  #2,d5
+        btst    #0,d5
+        bne     mdx_start_error
+        lsr.w   #1,d5
+        cmpi.w  #9,d5
+        beq     mdx_start_track_count_ready
+        cmpi.w  #MDX_TRACK_COUNT,d5
+        bne     mdx_start_error
+mdx_start_track_count_ready:
+        move.w  d5,d6
+        add.w   d6,d6
+        addq.w  #2,d6                  ; complete sequence-table byte count
+        lea     (a2,d6.w),a3
         cmpa.l  a1,a3
         bhi     mdx_start_error
 
         moveq   #0,d0
         move.w  (a2),d0
+        cmp.w   d6,d0
+        bcs     mdx_start_error
         lea     (a2,d0.l),a3
         cmpa.l  a1,a3
         bcc     mdx_start_error
@@ -115,10 +161,13 @@ mxdrv_mdx_start:
 
         lea     2(a2),a4
         lea     mxdrv_mdx_tracks,a6
-        moveq   #MDX_TRACK_COUNT-1,d7
+        moveq   #0,d7
+        moveq   #0,d4
 .init_track:
         moveq   #0,d0
         move.w  (a4)+,d0
+        cmp.w   d6,d0
+        bcs     mdx_start_error
         lea     (a2,d0.l),a3
         cmpa.l  a1,a3
         bcc     mdx_start_error
@@ -128,9 +177,12 @@ mxdrv_mdx_start:
         move.b  #8,MDX_TRACK_VOLUME(a6)
         move.b  #8,MDX_TRACK_NOTE_LENGTH(a6)
         lea     MDX_TRACK_BYTES(a6),a6
-        dbra    d7,.init_track
+        bset    d7,d4
+        addq.w  #1,d7
+        cmp.w   d5,d7
+        bcs     .init_track
 
-        move.w  #$ffff,mxdrv_mdx_active
+        move.w  d4,mxdrv_mdx_active
         moveq   #$12,d1
         moveq   #-$38,d2               ; MXDRV's initial tempo is $c8
         bsr     mxdrv_write_ym2151
@@ -146,8 +198,9 @@ mdx_start_error:
         rts
 
 ; Advance every active track by one MXDRV timer tick. This first executor
-; supports waits, FM/PCM notes, tempo and raw OPM writes, FM voice/PCM bank
-; selection, pan, PCM volume, note length, legato-as-a-no-op, and normal ends.
+; supports waits, FM/PCM notes, standard $ff-$f1 tempo/control commands,
+; FM voice/PCM bank selection, pan, PCM volume, note length,
+; legato-as-a-no-op, repeats, and normal ends.
 ; Commands whose operand shape is not implemented end only that track and set
 ; mxdrv_mdx_error, keeping malformed or newer streams bounded.
 ; out: d0.w=one bit per still-active track
@@ -189,34 +242,32 @@ mdx_parse_command:
         bcs     mdx_parse_rest
         cmpi.b  #$e0,d0
         bcs     mdx_parse_note
-        cmpi.b  #$e0,d0
+        cmpi.b  #$ff,d0
         beq     mdx_command_tempo
-        cmpi.b  #$e1,d0
+        cmpi.b  #$fe,d0
         beq     mdx_command_opm
-        cmpi.b  #$e2,d0
+        cmpi.b  #$fd,d0
         beq     mdx_command_voice
-        cmpi.b  #$e3,d0
+        cmpi.b  #$fc,d0
         beq     mdx_command_pan
-        cmpi.b  #$e4,d0
+        cmpi.b  #$fb,d0
         beq     mdx_command_volume
-        cmpi.b  #$e5,d0
+        cmpi.b  #$fa,d0
         beq     mdx_command_volume_down
-        cmpi.b  #$e6,d0
-        beq     mdx_command_volume_up
-        cmpi.b  #$e7,d0
-        beq     mdx_command_note_length
-        cmpi.b  #$e8,d0
-        beq     mdx_command_continue
-        cmpi.b  #$e9,d0
-        beq     mdx_command_repeat_start
-        cmpi.b  #$ea,d0
-        beq     mdx_command_repeat_end
-        cmpi.b  #$eb,d0
-        beq     mdx_command_repeat_escape
-        cmpi.b  #$ee,d0
-        beq     mdx_command_performance_end
         cmpi.b  #$f9,d0
-        bcc     mdx_track_end
+        beq     mdx_command_volume_up
+        cmpi.b  #$f8,d0
+        beq     mdx_command_note_length
+        cmpi.b  #$f7,d0
+        beq     mdx_command_continue
+        cmpi.b  #$f6,d0
+        beq     mdx_command_repeat_start
+        cmpi.b  #$f5,d0
+        beq     mdx_command_repeat_end
+        cmpi.b  #$f4,d0
+        beq     mdx_command_repeat_escape
+        cmpi.b  #$f1,d0
+        beq     mdx_command_performance_end
         bra     mdx_track_invalid
 
 mdx_parse_rest:
@@ -463,7 +514,7 @@ mdx_command_note_length:
 mdx_command_continue:
         bra     mdx_command_more
 
-; E9 count,work copies count into the following mutable work byte. MDX data is
+; F6 count,work copies count into the following mutable work byte. MDX data is
 ; owned by the driver specifically so MXDRV's in-stream repeat state is safe.
 mdx_command_repeat_start:
         lea     2(a4),a0
@@ -473,7 +524,7 @@ mdx_command_repeat_start:
         movea.l a0,a4
         bra     mdx_command_more
 
-; EA signed-back-offset decrements the work byte immediately before its target.
+; F5 signed-back-offset decrements the work byte immediately before its target.
 ; A nonzero count branches to the target; zero falls through after the offset.
 mdx_command_repeat_end:
         lea     2(a4),a0
@@ -495,8 +546,8 @@ mdx_command_repeat_end:
         movea.l a0,a4
         bra     mdx_command_more
 
-; EB unsigned-forward-offset points at a future EA's two displacement bytes.
-; On the final pass (work byte == 1), skip those bytes and continue after EA.
+; F4 unsigned-forward-offset points at a future F5's two displacement bytes.
+; On the final pass (work byte == 1), skip those bytes and continue after F5.
 mdx_command_repeat_escape:
         lea     2(a4),a0
         cmpa.l  a3,a0
@@ -526,7 +577,7 @@ mdx_command_repeat_escape:
         movea.l a0,a4
         bra     mdx_command_more
 
-; EE with a zero first operand is the normal performance end. Nonzero EE
+; F1 with a zero first operand is the normal performance end. Nonzero F1
 ; targets also retire this channel in MXDRV; playlist/fade bookkeeping around
 ; the relative target is outside this standalone-song executor.
 mdx_command_performance_end:
@@ -589,7 +640,7 @@ mdx_stop_voice:
 
 ; Load the selected 26-byte MXDRV FM voice record into this channel. The
 ; record is ID, algorithm/feedback, PMS/AMS, four DT1/MUL bytes, four TL bytes,
-; then sixteen envelope/DT2 bytes. E2 stores the pointer after the ID.
+; then sixteen envelope/DT2 bytes. FD stores the pointer after the ID.
 mdx_load_fm_voice:
         tst.b   MDX_TRACK_VOICE_DIRTY(a6)
         beq     .success

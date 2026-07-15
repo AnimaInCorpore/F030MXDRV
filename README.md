@@ -26,10 +26,10 @@ interrupt-fed DAC transport, all on stock Falcon hardware.
   flag.
 - **A real MXDRV, not a shim.** The original 32-entry call-table shape, owned
   MDX/PDX buffers, an `OPMBuf`-compatible mirror, a DSP-backed `WriteOPM`,
-  and a bounded MDX executor covering voice loading, tempo and raw OPM
-  writes, FM key-on/off, E9/EA repeats with the original mutable in-stream
-  counter layout, EB final-pass escapes, and PCM tracks 8–15 mapped to eight
-  PDX voices.
+  and a bounded standard-file MDX executor covering 9- and 16-track headers,
+  voice loading, tempo and raw OPM writes, FM key-on/off, F6/F5 repeats with
+  the original mutable in-stream counter layout, F4 final-pass escapes, and
+  PCM tracks 8–15 mapped to eight PDX voices.
 - **X68000-exact ADPCM.** Validated 96-entry PDX sample lookup and eight
   streaming decoder voices matching the MSM6258 predictor, step, clamping,
   and nibble order, with all five playback rates, 16 volume steps, hardware
@@ -175,11 +175,11 @@ entries, exact MSM6258 samples, a generated two-voice rate/gain/pan mixer
 vector, a complete host-rendered PCM period mixed by the DSP, sound locking,
 DSP-to-DAC matrix setup, interrupt-fed A/B buffer refills, rolling-clock FIFO
 writes during both refill directions, three seconds of safe block repetition,
-and clean teardown. It also copies a 16-track MDX fixture through the public
-API, covering FM voice loading, E0/E1 writes, note duration/key-off, a timed
-track-8 PDX trigger, two-pass E9/EA repetition, EB final-pass escape, Timer-B
-period changes, rejection of an out-of-range repeat target, and timer release
-on stop.
+and clean teardown. It also copies a standard 16-track MDX fixture through the
+public API, covering FM voice loading, FF/FE writes, note duration/key-off, a
+timed track-8 PDX trigger, two-pass F6/F5 repetition, F4 final-pass escape,
+Timer-B period changes, rejection of an out-of-range repeat target, and timer
+release on stop.
 
 The perceptual corpus covers pitch, non-codec-aligned key and register writes,
 ADSR state, AM/PM LFO and noise rates, feedback spectra, and all eight

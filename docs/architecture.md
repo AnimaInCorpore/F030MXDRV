@@ -207,18 +207,20 @@ protocol version in the ping reply whenever either side changes incompatibly.
 2. **Driver API and MDX executor (in progress):** preserve the 32-call table and
    Trap #4 register convention, own bounded MDX/PDX copies, expose OPM/PCM work
    buffers, and implement reset/play/stop/pause/fade/mask state. Playback now
-   validates the sequence, voice-table, and all 16 track offsets, then advances
-   bounded waits and notes one explicit tick at a time. E0/E1 tempo and raw OPM
-   writes, E2 FM voice loading/PCM bank selection, pan, PCM volume, note length,
-   E9/EA/EB repeat control flow, FM pitch/key-on/off, PCM triggers, and track
-   ends execute. Repeat targets and mutable work bytes are range checked. A
+   parses standard raw MDX title/PDX headers, accepts both 9- and 16-track
+   tables, validates the sequence, voice table, and every track offset, then
+   advances bounded waits and notes one explicit tick at a time. FF/FE tempo
+   and raw OPM writes, FD FM voice loading/PCM bank selection, pan, PCM volume,
+   note length, F6/F5/F4 repeat control flow, FM pitch/key-on/off, PCM triggers,
+   and track ends execute. Repeat targets and mutable work bytes are range
+   checked. A
    guarded timer-service seam exposes the exact Timer-B period in native sample
    units. Public play now claims an otherwise-idle MFP Timer A at 1024 Hz; its
    interrupt performs exact 16.16 phase accumulation into pending ticks, while
    a foreground pump performs all XBIOS/DSP work. Stop restores timer/vector
    ownership. The TTP player loads one MDX and optional PDX through GEMDOS and
    drains that pump after each VBL until the tracks end or a key is pressed.
-   Command-tail parsing has a Hatari-covered boundary self-test. E4/E5/E6 now
+   Command-tail parsing has a Hatari-covered boundary self-test. FB/FA/F9 now
    use the original algorithm carrier masks and normal/raw attenuation rules,
    with active PDX gain updated in place. Modulation remains.
 3. **Operator kernel (present):** KC/KF, DT1, DT2, octave, multiplier, phase

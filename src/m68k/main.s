@@ -235,7 +235,7 @@ run_conformance:
 
         ; Copy and start a bounded MDX image through calls $02/$04. Track 0
         ; executes raw OPM/tempo commands and an FM note; track 8 triggers PDX
-        ; entry 0. Track 1 proves E9/EA looping and EB final-pass escape.
+        ; entry 0. Track 1 proves F6/F5 looping and F4 final-pass escape.
         moveq   #2,d0
         move.l  #mdx_test_song_end-mdx_test_song,d1
         lea     mdx_test_song(pc),a1
@@ -243,7 +243,7 @@ run_conformance:
         tst.l   d0
         bne     protocol_failed
 
-        moveq   #8,d0                  ; title displacement is still ABI-visible
+        moveq   #8,d0                  ; raw MDX title is ABI-visible
         bsr     mxdrv_call
         move.l  d0,a0
         cmpi.b  #'M',(a0)
@@ -264,12 +264,12 @@ run_conformance:
         cmpi.l  #$0103,d0
         bne     protocol_failed
         bsr     mxdrv_mdx_timer_period
-        cmpi.l  #1472,d0               ; E0 $a4: ($100-$a4)*16
+        cmpi.l  #1472,d0               ; FF $a4: ($100-$a4)*16
         bne     protocol_failed
         lea     mxdrv_mdx_buffer,a0
         cmpi.b  #2,mdx_test_repeat_work-mdx_test_song(a0)
         bne     protocol_failed
-        moveq   #$10,d0                ; raw E1, E0, KF/KC and key-on landed
+        moveq   #$10,d0                ; raw FE, FF, KF/KC and key-on landed
         bsr     mxdrv_call
         move.l  d0,a0
         cmpi.b  #$5a,$1b(a0)
@@ -282,7 +282,7 @@ run_conformance:
         bne     protocol_failed
         cmpi.b  #$78,$08(a0)
         bne     protocol_failed
-        cmpi.b  #$c0,$20(a0)           ; E2 voice 1, pan 3, algorithm 0
+        cmpi.b  #$c0,$20(a0)           ; FD voice 1, pan 3, algorithm 0
         bne     protocol_failed
         cmpi.b  #$01,$40(a0)
         bne     protocol_failed
@@ -325,7 +325,7 @@ run_conformance:
         moveq   #$10,d0
         bsr     mxdrv_call
         move.l  d0,a0
-        cmpi.b  #$33,$1a(a0)           ; EB skipped EA on the last pass
+        cmpi.b  #$33,$1a(a0)           ; F4 skipped F5 on the last pass
         bne     protocol_failed
         moveq   #$12,d0                ; stopped: paused=$01, playing=$00
         bsr     mxdrv_call
@@ -342,7 +342,7 @@ run_conformance:
         bne     protocol_failed
 
         ; Normal and direct FM volume encodings rewrite only algorithm-0's C2
-        ; carrier. E5/E6 step raw attenuation in the opposite byte direction
+        ; carrier. FA/F9 step raw attenuation in the opposite byte direction
         ; from indexed volume, and $ff remains saturated at silence.
         moveq   #2,d0
         move.l  #mdx_volume_song_end-mdx_volume_song,d1
@@ -370,7 +370,7 @@ run_conformance:
         moveq   #$10,d0
         bsr     mxdrv_call
         move.l  d0,a0
-        cmpi.b  #5,$78(a0)             ; E5: $80 -> $81
+        cmpi.b  #5,$78(a0)             ; FA: $80 -> $81
         bne     protocol_failed
 
         bsr     mxdrv_mdx_timer_service
@@ -379,7 +379,7 @@ run_conformance:
         moveq   #$10,d0
         bsr     mxdrv_call
         move.l  d0,a0
-        cmpi.b  #4,$78(a0)             ; E6: $81 -> $80
+        cmpi.b  #4,$78(a0)             ; F9: $81 -> $80
         bne     protocol_failed
 
         bsr     mxdrv_mdx_timer_service
@@ -397,7 +397,7 @@ run_conformance:
         moveq   #$10,d0
         bsr     mxdrv_call
         move.l  d0,a0
-        cmpi.b  #$7f,$78(a0)           ; E5 clamps at direct $ff
+        cmpi.b  #$7f,$78(a0)           ; FA clamps at direct $ff
         bne     protocol_failed
         bsr     mxdrv_mdx_timer_service
         tst.l   d0
@@ -405,7 +405,7 @@ run_conformance:
         tst.b   mxdrv_mdx_error
         bne     protocol_failed
 
-        ; A syntactically valid MDX whose EA target leaves the copied image
+        ; A syntactically valid MDX whose F5 target leaves the copied image
         ; must retire safely instead of decrementing arbitrary host memory.
         moveq   #2,d0
         move.l  #mdx_bad_repeat_song_end-mdx_bad_repeat_song,d1
@@ -1355,15 +1355,10 @@ csm_trace:
         dc.b    $10,$ff,$11,$02,$14,$81
         even
 
-; Minimal structurally faithful MDX image. The sequence block contains the
-; voice-table displacement followed by all sixteen relative track pointers.
+; Minimal raw MDX image. A standard title/PDX header precedes a sequence block
+; containing the voice-table displacement and sixteen relative track pointers.
 mdx_test_song:
-        dc.w    0,$ffff
-        dc.w    mdx_test_sequence-mdx_test_song
-        dc.w    mdx_test_title-mdx_test_song
-mdx_test_title:
-        dc.b    'MDX executor smoke',0
-        even
+        dc.b    'MDX executor smoke',13,10,$1a,0
 mdx_test_sequence:
         dc.w    mdx_test_voice_table-mdx_test_sequence
         dc.w    mdx_test_fm_track-mdx_test_sequence
@@ -1371,6 +1366,37 @@ mdx_test_sequence:
         dcb.w   6,mdx_test_end_track-mdx_test_sequence
         dc.w    mdx_test_pcm_track-mdx_test_sequence
         dcb.w   7,mdx_test_end_track-mdx_test_sequence
+mdx_test_fm_track:
+        dc.b    $fd,$01                ; select the standard voice record
+        dc.b    $fb,$0f                ; loudest normal volume: +2 carrier TL
+        dc.b    $fe,$1b,$5a            ; raw OPM write
+        dc.b    $ff,$a4                ; tempo
+        dc.b    $80,$00                ; note 0 for one tick
+        dc.b    $f1,$00
+mdx_test_repeat_track:
+        dc.b    $f6,$02                ; two passes
+mdx_test_repeat_work:
+        dc.b    $00                    ; mutable in-stream counter
+mdx_test_repeat_body:
+        dc.b    $fe,$1a,$11
+        dc.b    $00                    ; one-tick rest
+        dc.b    $f4
+        dc.w    mdx_test_repeat_end_offset-mdx_test_repeat_escape_after
+mdx_test_repeat_escape_after:
+        dc.b    $fe,$1a,$22            ; only the non-final pass executes this
+        dc.b    $f5
+mdx_test_repeat_end_offset:
+        dc.w    mdx_test_repeat_body-mdx_test_repeat_after_end
+mdx_test_repeat_after_end:
+        dc.b    $fe,$1a,$33            ; final-pass escape resumes here
+        dc.b    $f1,$00
+mdx_test_pcm_track:
+        dc.b    $fc,$03                ; both outputs
+        dc.b    $fb,$08                ; unity PCM8 gain
+        dc.b    $80,$01                ; PDX entry 0 for two ticks
+        dc.b    $f1,$00
+mdx_test_end_track:
+        dc.b    $f1,$00
 mdx_test_voice_table:
         dc.b    1,$00,$00               ; ID, algorithm 0, PMS/AMS 0
         dc.b    $01,$01,$01,$01         ; DT1/MUL
@@ -1379,96 +1405,60 @@ mdx_test_voice_table:
         dc.b    $00,$00,$00,$00         ; AMS/D1R
         dc.b    $00,$00,$00,$00         ; DT2/D2R
         dc.b    $0f,$0f,$0f,$0f         ; D1L/RR
-mdx_test_fm_track:
-        dc.b    $e2,$01                ; select the standard voice record
-        dc.b    $e4,$0f                ; loudest normal volume: +2 carrier TL
-        dc.b    $e1,$1b,$5a            ; raw OPM write
-        dc.b    $e0,$a4                ; tempo
-        dc.b    $80,$00                ; note 0 for one tick
-        dc.b    $f9
-mdx_test_repeat_track:
-        dc.b    $e9,$02                ; two passes
-mdx_test_repeat_work:
-        dc.b    $00                    ; mutable in-stream counter
-mdx_test_repeat_body:
-        dc.b    $e1,$1a,$11
-        dc.b    $00                    ; one-tick rest
-        dc.b    $eb
-        dc.w    mdx_test_repeat_end_offset-mdx_test_repeat_escape_after
-mdx_test_repeat_escape_after:
-        dc.b    $e1,$1a,$22            ; only the non-final pass executes this
-        dc.b    $ea
-mdx_test_repeat_end_offset:
-        dc.w    mdx_test_repeat_body-mdx_test_repeat_after_end
-mdx_test_repeat_after_end:
-        dc.b    $e1,$1a,$33            ; final-pass escape resumes here
-        dc.b    $f9
-mdx_test_pcm_track:
-        dc.b    $e3,$03                ; both outputs
-        dc.b    $e4,$08                ; unity PCM8 gain
-        dc.b    $80,$01                ; PDX entry 0 for two ticks
-        dc.b    $f9
-mdx_test_end_track:
-        dc.b    $f9
 mdx_test_song_end:
         even
 
-; All structural offsets are valid, but track 0's EA branch target is not.
+; All structural offsets are valid, but track 0's F5 branch target is not.
 ; The executor must catch it before touching the implied counter byte.
 mdx_bad_repeat_song:
-        dc.w    0,$ffff
-        dc.w    mdx_bad_repeat_sequence-mdx_bad_repeat_song
-        dc.w    mdx_bad_repeat_title-mdx_bad_repeat_song
-mdx_bad_repeat_title:
-        dc.b    'Bad repeat',0
-        even
+        dc.b    'Bad repeat',13,10,$1a,0
 mdx_bad_repeat_sequence:
         dc.w    mdx_bad_repeat_voice-mdx_bad_repeat_sequence
         dc.w    mdx_bad_repeat_track-mdx_bad_repeat_sequence
         dcb.w   15,mdx_bad_repeat_end_track-mdx_bad_repeat_sequence
+mdx_bad_repeat_track:
+        dc.b    $f5,$80,$00
+mdx_bad_repeat_end_track:
+        dc.b    $f1,$00
 mdx_bad_repeat_voice:
         dc.b    0
-mdx_bad_repeat_track:
-        dc.b    $ea,$80,$00
-mdx_bad_repeat_end_track:
-        dc.b    $f9
 mdx_bad_repeat_song_end:
         even
 
 ; Long-rest song used to prove MFP accumulation plus foreground pumping.
 mdx_clock_song:
-        dc.w    0,$ffff
-        dc.w    mdx_clock_sequence-mdx_clock_song
-        dc.w    mdx_clock_title-mdx_clock_song
-mdx_clock_title:
-        dc.b    'Clock pump',0
-        even
+        dc.b    'Clock pump',13,10,$1a,0
 mdx_clock_sequence:
         dc.w    mdx_clock_voice-mdx_clock_sequence
         dc.w    mdx_clock_track-mdx_clock_sequence
         dcb.w   15,mdx_clock_end_track-mdx_clock_sequence
+mdx_clock_track:
+        dc.b    $7f,$f1,$00            ; remain active for 128 timer ticks
+mdx_clock_end_track:
+        dc.b    $f1,$00
 mdx_clock_voice:
         dc.b    0
-mdx_clock_track:
-        dc.b    $7f,$f9                ; remain active for 128 timer ticks
-mdx_clock_end_track:
-        dc.b    $f9
 mdx_clock_song_end:
         even
 
 ; Algorithm-0 carrier-volume fixture. Modulators use base TL 1/2/3 and C2
 ; uses base TL 4, making each direct-attenuation transition observable at $78.
 mdx_volume_song:
-        dc.w    0,$ffff
-        dc.w    mdx_volume_sequence-mdx_volume_song
-        dc.w    mdx_volume_title-mdx_volume_song
-mdx_volume_title:
-        dc.b    'FM volume',0
-        even
+        dc.b    'FM volume',13,10,$1a,0
 mdx_volume_sequence:
         dc.w    mdx_volume_voice-mdx_volume_sequence
         dc.w    mdx_volume_track-mdx_volume_sequence
         dcb.w   15,mdx_volume_end_track-mdx_volume_sequence
+mdx_volume_track:
+        dc.b    $fd,$01
+        dc.b    $fb,$80                ; direct +0 attenuation
+        dc.b    $80,$00                ; one-tick note
+        dc.b    $fa,$00                ; direct +1, then one-tick rest
+        dc.b    $f9,$00                ; direct -1, then one-tick rest
+        dc.b    $fb,$ff,$80,$00        ; saturating direct attenuation
+        dc.b    $fa,$00,$f1,$00        ; $ff clamp, rest, end
+mdx_volume_end_track:
+        dc.b    $f1,$00
 mdx_volume_voice:
         dc.b    1,$00,$00
         dc.b    $01,$01,$01,$01
@@ -1477,16 +1467,6 @@ mdx_volume_voice:
         dc.b    $00,$00,$00,$00
         dc.b    $00,$00,$00,$00
         dc.b    $0f,$0f,$0f,$0f
-mdx_volume_track:
-        dc.b    $e2,$01
-        dc.b    $e4,$80                ; direct +0 attenuation
-        dc.b    $80,$00                ; one-tick note
-        dc.b    $e5,$00                ; direct +1, then one-tick rest
-        dc.b    $e6,$00                ; direct -1, then one-tick rest
-        dc.b    $e4,$ff,$80,$00        ; saturating direct attenuation
-        dc.b    $e5,$00,$f9            ; $ff clamp, rest, end
-mdx_volume_end_track:
-        dc.b    $f9
 mdx_volume_song_end:
         even
 
