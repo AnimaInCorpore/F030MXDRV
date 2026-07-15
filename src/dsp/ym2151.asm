@@ -1453,6 +1453,10 @@ rt4_independent_add_x_emit_done:
 rt5_channel_control_fixture:
         dc      $000040,$0000c1,$0000c2,$000003
         dc      $000044,$000085,$000006,$000007
+; Unattenuated per-slot gain bases in logical order M1, C1, M2, C2, matching
+; the values seeded by the operator-gain initialization below.
+rt5_gain_base_fixture:
+        dc      $000010,$000060,$000040,$080000
 rt5_event_fixture:
         dc      $0220c1,$022182,$022203,$022344
         dc      $0224c5,$022506,$022647,$022740
@@ -1630,17 +1634,26 @@ rt5_initialize_mul_done:
         move    a1,x:(r1)+
 rt5_initialize_channel_controls_done:
 
-        ; Schedule one ordered write at every block boundary. The first eight
-        ; rewrite channel algorithm and pan while retaining one instance of
-        ; every topology; the remaining 24 cover every decoded register class:
-        ; total level, key code, key fraction, key on/off, all four envelope
-        ; rate groups, LFO rate/depth/waveform, and both timers.
+        ; Schedule one ordered write at each of the first 25 block boundaries,
+        ; then cluster the final eight at boundary 24 as one burst. The first
+        ; eight rewrite channel algorithm and pan while retaining one instance
+        ; of every topology; the remaining 24 cover every decoded register
+        ; class: total level, key code, key fraction, key on/off, all four
+        ; envelope rate groups, LFO rate/depth/waveform, and both timers. The
+        ; burst proves multi-event boundary drain, and blocks 25-31 prove the
+        ; empty-boundary fast path.
         clr     a
         move    #rt5_event_times,r0
         move    #>64,y0
+        move    #>1536,x0               ; boundary 24: burst timestamp clamp
         do      #32,rt5_initialize_events_done
         move    a1,x:(r0)+
         add     y0,a
+        cmp     x0,a
+        jle     rt5_event_time_clamped
+        move    x0,a
+rt5_event_time_clamped:
+        nop
 rt5_initialize_events_done:
         move    #rt5_event_fixture,r3
         move    #rt5_event_commands,r1
@@ -2009,9 +2022,12 @@ rt5_pm_sign_ready:
 rt5_operator_update_done:
         rts
 
-; Consume one due block-boundary event from the profile-local FIFO and update
+; Drain every due block-boundary event from the profile-local FIFO and update
 ; the real register image. Events are already ordered, so the read side pays
-; the same count/timestamp/decode structure as the rolling transport.
+; the same count/timestamp/decode structure as the rolling transport, and a
+; burst of writes sharing one timestamp — an MXDRV voice load is ~26 —
+; is consumed in a single boundary service whose transient cost amortizes
+; across the 1007-frame period.
 rt5_service_event:
         move    x:rt5_event_count,a
         tst     a
@@ -2107,20 +2123,15 @@ rt5_event_no_c1_bit:
 rt5_event_gain_index_ready:
         move    b1,n1
 
-        jclr    #1,b1,rt5_event_gain_m1_c1
-        jclr    #0,b1,rt5_event_gain_m2
-        move    #>$080000,a             ; C2 carrier
-        jmp     rt5_event_gain_base_ready
-rt5_event_gain_m2:
-        move    #>$000040,a
-        jmp     rt5_event_gain_base_ready
-rt5_event_gain_m1_c1:
-        jclr    #0,b1,rt5_event_gain_m1
-        move    #>$000060,a             ; C1
-        jmp     rt5_event_gain_base_ready
-rt5_event_gain_m1:
-        move    #>$000010,a
-rt5_event_gain_base_ready:
+        ; The slot's unattenuated base comes from a four-entry P table
+        ; indexed by the logical operator position (channel-relative bits).
+        move    #>3,x0
+        and     x0,b
+        move    #>rt5_gain_base_fixture,a
+        add     b,a
+        move    a1,r3
+        nop
+        movem   p:(r3),a
         ; TL bits 6:5 select 0, 1, 2, or 3 power-of-two attenuation
         ; steps. The profile fixture spans all four bands across 32 writes.
         jclr    #6,y1,rt5_event_gain_low_band
@@ -2454,6 +2465,7 @@ rt5_event_decode_done:
         move    x:rt5_event_count,a
         sub     x0,a
         move    a1,x:rt5_event_count
+        jmp     rt5_service_event       ; drain until the head is not yet due
 rt5_service_event_done:
         move    x:rt5_event_clock,a
         move    #>64,x0

@@ -40,7 +40,7 @@ Every transport unit is one DSP/host 24-bit word. The upper byte is an opcode.
 | `14 00 00` | run the 2048-frame block-oriented algorithm-0 channel spike | deterministic checksum `0f 26 66` |
 | `15 00 00` | run the 2048-frame block-oriented algorithm-7 carrier spike | deterministic checksum `89 eb 00` |
 | `16 00 aa` | run the 2048-frame mixed-topology spike for algorithm `aa = 1..6` | per-algorithm deterministic checksum |
-| `17 00 00` | run the live-SSI eight-channel decoded ALG/PAN/AM/PM/TL spike | deterministic checksum `4c 0b ce` |
+| `17 00 00` | run the live-SSI eight-channel decoded ALG/PAN/AM/PM/TL spike | deterministic checksum `79 59 b3` |
 | anything else | unsupported command | `ff ff ff` |
 
 The synchronous acknowledgement intentionally provides back-pressure and keeps
@@ -133,7 +133,10 @@ in X and re-expanded after the measurement.
 The measured window also advances the complete decoded control state: a
 drift-free 1280:1007 native clock, a decoded-rate LFO, both decoded timers
 under their control bits, a maximum-length one-step-per-frame noise LFSR, and
-a profile-local 32-entry FIFO with one event at every block boundary. One
+a profile-local 32-entry FIFO whose boundary service drains every due event:
+one write at each of the first 25 block boundaries, then an eight-event
+burst — the shape of a real MXDRV voice load — at boundary 24, leaving seven
+empty boundaries on the fast path. One
 three-instruction, 32-iteration support loop advances every decoded
 per-operator envelope level by its decoded signed step while rebuilding every
 PM-adjusted per-operator phase increment from its decoded base. Pitch state
@@ -159,16 +162,16 @@ output — and the command checksum — are bit-identical to the cleared-ring
 ordering. Algorithms 6/7 route their already-summed
 carrier rings through a separate decoded-pan path. The command explicitly
 clears a latched SSI underrun before restoring the external Y map and exact
-phase cache. Its checksum is `79 1b f5`.
+phase cache. Its checksum is `79 59 b3`.
 
-Hatari measures 324.54 cycles per codec frame against the 326.27-cycle
-budget, leaving 1.73 cycles (0.53%). Dynamic topology/pan routing, planar
+Hatari measures 324.87 cycles per codec frame against the 326.27-cycle
+budget, leaving 1.40 cycles (0.43%). Dynamic topology/pan routing, planar
 PDX accumulation, final saturation, live SSI, and the full decoded register
 control path therefore fit the budget together, establishing the control
 feasibility that the previous 322.55-cycle floor left open. The write-first
 common-ring lever recovered 1.55 cycles per frame over the earlier 326.09
-measurement; the remaining margin is reserved for per-frame FIFO event
-consumption and envelope curvature.
+measurement, and the multi-event boundary drain with its burst fixture costs
+0.33 of them back; the remaining margin is reserved for envelope curvature.
 Noise-frequency decode and per-frame envelope curvature stay outside this
 gate.
 
@@ -326,11 +329,12 @@ feed later operator state.
    block-held AM/PM in every operator, and decoded application of every
    remaining write class — total level, KC/KF pitch rebuilds from the exact
    phase-step table, key on/off, all four envelope-rate groups, LFO
-   rate/depth/waveform, and both timers — at 324.54 cycles/frame, inside the
-   budget with 0.53% remaining. The write-first common-ring pass has been
-   spent, recovering 1.55 cycles per frame with bit-identical output; the
-   freed margin is reserved for per-frame FIFO event consumption and
-   envelope curvature. Noise-frequency decode and per-frame envelope
+   rate/depth/waveform, and both timers — at 324.87 cycles/frame, inside the
+   budget with 0.43% remaining. The write-first common-ring pass has been
+   spent, recovering 1.55 cycles per frame with bit-identical output, and
+   boundary service now drains every due event, absorbing an eight-event
+   burst inside the budget; the freed margin is reserved for envelope
+   curvature. Noise-frequency decode and per-frame envelope
    curvature remain outside the gate.
 2. **Reference gate complete:** the build now validates exact codec-rate
    vectors for pitch, key/write timing, envelopes, LFO/noise rates, feedback

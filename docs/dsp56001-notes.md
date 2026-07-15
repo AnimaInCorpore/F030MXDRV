@@ -299,7 +299,9 @@ Falcon's 8,192-word X/Y reservations. The right stream temporarily overlays
 external-Y table storage, so the packed table is backed up in X and expanded
 again before the exact renderer resumes.
 
-Each 64-frame block services one ordered write from a profile-local FIFO,
+Each 64-frame block drains every due ordered write from a profile-local
+FIFO — the fixture schedules one write at each of the first 25 boundaries and
+an eight-event burst at boundary 24, the shape of a real MXDRV voice load —
 advances the drift-free 1280:1007 native clock, a decoded-rate LFO, both
 decoded timers, and a maximum-length one-step-per-frame noise LFSR, then runs
 one three-instruction, 32-iteration loop that advances every decoded
@@ -327,21 +329,22 @@ fill — so no noise-table words occupy the bounded P-memory image. Cleanup
 disables SSI, reads SSISR and writes TX to clear a latched underrun,
 restores the external Y map, and rebuilds the exact phase cache, including
 the internal-Y frequency-cache words the decoded step/increment arrays
-overlay. The deterministic reply is `$791bf5`.
+overlay. The deterministic reply is `$7959b3`.
 
-Hatari measures 664,666 instruction cycles for 2,048 frames, or 324.54 cycles
-per frame against the 326.27-cycle budget. The 41.43 ms modeled block fits
-its 41.65 ms period with 1.73 cycles/frame (0.53%) remaining. Every decoded
+Hatari measures 665,327 instruction cycles for 2,048 frames, or 324.87 cycles
+per frame against the 326.27-cycle budget. The 41.47 ms modeled block fits
+its 41.65 ms period with 1.40 cycles/frame (0.43%) remaining. Every decoded
 register class the real transport must apply now executes inside the budget
 beside live SSI, planar PDX mixing, and saturation, establishing full
 control feasibility for the fixture workload. The write-first common-ring
 pass has been spent: the block's first both-panned carrier stores instead of
 accumulating, the rare unwritten ring is cleared once at emission, and both
 write variants keep full-accumulator limiter moves so the checksum gate
-proves the output bit-identical. Recovering the lever cost P-memory pressure:
-the key-event decode became a four-iteration mask-shift loop, the fixed
-timer-register reads use absolute addressing, and the program now ends two
-words below the P:$1400 table boundary. Noise-frequency decode plus
+proves the output bit-identical. Recovering the lever and the boundary drain
+cost P-memory pressure: the key-event decode became a four-iteration
+mask-shift loop, the fixed timer-register reads use absolute addressing, the
+total-level gain bases moved into a four-entry P table, and the program now
+ends one word below the P:$1400 table boundary. Noise-frequency decode plus
 per-frame-accurate envelope curvature remain outside this gate.
 
 ## Embedded second-stage program loader
@@ -354,11 +357,11 @@ final YM program deliberately begins at `P:$0080`, leaving
 through `Dsp_BlkUnpacked`.
 
 The generated stream starts with magic `$4d584c`, followed by a section count
-and address/count/data records. The current program ends two words below the
+and address/count/data records. The current program ends one word below the
 P:$1400 table boundary; the decoded-control gate fits only because its fixture
 data moved into P `dc` tables, the noise jump tables are derived at runtime,
-and the write-first mix-ring change repaid its new loops with the key-event
-and timer-decode word reclaims. After installing them, the loader replies
+and the write-first mix-ring and boundary-drain changes repaid their new code
+with the key-event, timer-decode, and gain-base word reclaims. After installing them, the loader replies
 `$4c4f41` and jumps through the replaced reset vector at `P:$0000`. The build
 generator rejects a bootstrap above the 512-word XBIOS limit, any overlap with
 the reserved loader gap or `P:$1400` table boundary, non-P sections, and
