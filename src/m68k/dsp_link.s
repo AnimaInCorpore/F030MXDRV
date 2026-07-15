@@ -5,8 +5,11 @@
         global  dsp_queue_write
         global  dsp_start_mixed_audio
         global  dsp_refill_mixed_audio
+        global  dsp_start_realtime_audio
+        global  dsp_refill_realtime_audio
 
 DSP_MIX_TRANSFER_WORDS equ   1+DSP_MIX_FRAME_COUNT*2
+DSP_RT_MIX_TRANSFER_WORDS equ 1+DSP_RT_MIX_FRAME_COUNT*2
 
         text
 
@@ -51,23 +54,36 @@ dsp_queue_write:
 ; out: d0.l = DSP reply
 dsp_start_mixed_audio:
         move.l  #DSP_CMD_START_MIXED,d0
-        bra     dsp_send_mixed_audio
+        move.w  #DSP_MIX_FRAME_COUNT-1,d4
+        bra     dsp_render_mixed_audio
 
 ; Refill the inactive DSP buffer while SSI continues replaying the current
 ; complete block. The DSP swaps only after rendering finishes.
 dsp_refill_mixed_audio:
         move.l  #DSP_CMD_REFILL_MIXED,d0
+        move.w  #DSP_MIX_FRAME_COUNT-1,d4
+        bra     dsp_render_mixed_audio
 
-dsp_send_mixed_audio:
+; Start/refill the codec-rate 64-frame-block renderer. Its 1024-frame period
+; is exactly sixteen synthesis blocks and uses the same interleaved host PCM
+; input shape as the exact/conformance transport.
+dsp_start_realtime_audio:
+        move.l  #DSP_CMD_START_RT_MIXED,d0
+        move.w  #DSP_RT_MIX_FRAME_COUNT-1,d4
+        bra     dsp_render_mixed_audio
+
+dsp_refill_realtime_audio:
+        move.l  #DSP_CMD_REFILL_RT_MIXED,d0
+        move.w  #DSP_RT_MIX_FRAME_COUNT-1,d4
+
+dsp_render_mixed_audio:
         move.l  d0,dsp_mixed_words
         lea     dsp_mixed_words+4,a3
-        lea     dsp_mixed_words_end,a4
 dsp_render_mixed_loop:
         bsr     mxdrv_pdx_mix_frame
         move.l  d0,(a3)+
         move.l  d1,(a3)+
-        cmpa.l  a4,a3
-        bcs     dsp_render_mixed_loop
+        dbra    d4,dsp_render_mixed_loop
 
         ; TOS's Dsp_BlkUnpacked handshakes only its first word: exchange the
         ; bare command for the DSP's parked-receiver token, then release the
@@ -77,7 +93,16 @@ dsp_render_mixed_loop:
         cmp.l   #DSP_REPLY_BLOCK_READY,d0
         bne     dsp_send_mixed_done
         clr.l   dsp_mixed_reply
+        move.l  dsp_mixed_words,d0
+        cmpi.l  #DSP_CMD_START_RT_MIXED,d0
+        beq     dsp_send_realtime_block
+        cmpi.l  #DSP_CMD_REFILL_RT_MIXED,d0
+        beq     dsp_send_realtime_block
         Dsp_BlkUnpacked dsp_mixed_words+4,#DSP_MIX_TRANSFER_WORDS-1,dsp_mixed_reply,#1
+        bra     dsp_send_mixed_reply
+dsp_send_realtime_block:
+        Dsp_BlkUnpacked dsp_mixed_words+4,#DSP_RT_MIX_TRANSFER_WORDS-1,dsp_mixed_reply,#1
+dsp_send_mixed_reply:
         move.l  dsp_mixed_reply,d0
 dsp_send_mixed_done:
         rts
@@ -93,7 +118,7 @@ dsp_queue_words:
 dsp_queue_reply:
         ds.l    1
 dsp_mixed_words:
-        ds.l    DSP_MIX_TRANSFER_WORDS
+        ds.l    DSP_RT_MIX_TRANSFER_WORDS
 dsp_mixed_words_end:
 dsp_mixed_reply:
         ds.l    1

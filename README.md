@@ -48,11 +48,11 @@ interrupt-fed DAC transport, all on stock Falcon hardware.
 This is not a finished music driver yet — and the numbers below are exactly
 why the project publishes its own profiler.
 
-- The command-line player feeds FM and PDX through the interrupt-buffered
-  path with uninterrupted DAC transport, but **not accurate wall-clock
-  playback**: the sample-exact FM kernel currently needs about 959 ms of
-  modeled DSP time to render each 20.48 ms block, so a completed block
-  repeats while the next one renders.
+- The command-line player now feeds FM and PDX through the codec-rate
+  real-time kernel in sixteen 64-frame blocks per 1024-frame A/B buffer.
+  SSI keeps the last complete buffer looping during a refill; Hatari gates
+  both refill directions, a nonzero first-buffer checksum, and drift-free
+  native-clock checkpoints at 1301, 2603, and 3904 samples.
 - The exact kernel measures **12,024.34 instruction cycles per native
   62.5 kHz sample** against the Falcon's **256.68-cycle** budget — a 46.85x
   real-time miss (down from 50.10x before the current optimization pass).
@@ -83,8 +83,8 @@ why the project publishes its own profiler.
   and retaining exact noise boundary state first reduced that gate to 313.35
   cycles per frame. It now routes a both/left/right/mute channel pattern into
   host-prepared planar PDX blocks and uses the DSP56001 limiter for the final
-  interleaved SSI output. The integrated gate now decodes and applies **every
-  register class the transport must service**: `$20-$27` algorithm/pan,
+  interleaved SSI output. The integrated gate now decodes and applies the
+  **complete profiled control set**: `$20-$27` algorithm/pan,
   four-band total level, KC/KF pitch rebuilds from the exact phase-step
   table with octave shift and per-operator multipliers, key on/off, all four
   envelope-rate groups, LFO rate/depth/waveform, and both timers — plus
@@ -101,23 +101,28 @@ why the project publishes its own profiler.
   every due FIFO write, and the fixture covers a seven-event burst, empty
   boundaries, an eight-operator key-on transient that decays and retires,
   a sustained decay tail, and a late release. Over the 128-block profile
-  the gate measures **319.97 cycles per frame** against the
+  the gate measures **320.24 cycles per frame** against the
   **326.27-cycle** budget — full decoded control plus envelope curvature
-  fit with **6.30 cycles (1.9%)** to spare, and the prototype scores the
+  fit with **6.03 cycles (1.85%)** to spare, and the prototype scores the
   same block recurrence at MAE 2.99/1023, correlation 0.977, and 61-frame
   transition lag against the exact ADSR reference, inside every comparator
-  boundary. Noise-frequency decode stays outside the gate. The
-  exact-to-perceptual reference gate is present; capturing a complete
-  integrated candidate remains required before playback integration.
-- MDX synchronization/modulation and real-time mixed-block production
-  remain. The exact boundary between implemented and pending work is kept in
+  boundary. Protocol v19 promotes this state into the production player: it
+  imports the current register/key image, consumes the real rolling FIFO,
+  applies direct live writes (including multiplier changes), mixes planar
+  PDX, renders the inactive 1024-frame buffer, and restores the exact tables
+  on stop. DT1/DT2 pitch offsets, noise-frequency/output substitution,
+  sub-block event splitting, and a complete integrated perceptual capture
+  remain.
+- MDX synchronization/modulation, remaining command behavior, real-hardware
+  contention measurement, and the compatibility corpus remain. The exact
+  boundary between implemented and pending work is kept in
   [the architecture notes](docs/architecture.md).
 
 ## How it fits together
 
 - The 68030 executable embeds everything the DSP needs: packed immutable
   ymfm tables, plus the complete sparse DSP program behind a 111-word
-  `Dsp_ExecBoot` first stage that receives 4,995 initialized P-memory words
+  `Dsp_ExecBoot` first stage that receives 6,584 initialized P-memory words
   through the host port — removing the 8 KiB converted-LOD ceiling.
 - The DSP kernel caches all 32 unmodulated phase increments across register
   writes in internal Y RAM and advances them with parallel X/Y fetches.
@@ -126,13 +131,13 @@ why the project publishes its own profiler.
   Terminal release envelopes and fully silent channels bypass work that
   cannot affect chip state or output; hot scalar state lives in
   short-addressable internal X RAM.
-- Protocol v18 gives the DSP two interleaved stereo buffers in external
-  X RAM. The 68030 uploads one 1007-frame PDX period into the inactive
-  buffer; the DSP renders the matching FM period in place with signed 16-bit
-  saturation, switches buffers at a stereo boundary, and leaves the last
-  complete block repeating if a refill misses a codec period. A refillable
-  32-entry ring FIFO carries exact register events with native-sample
-  timestamps while SSI runs.
+- Protocol v19 retains the exact 1007-frame conformance transport and adds a
+  1024-frame production transport aligned to sixteen 64-frame synthesis
+  blocks. The 68030 uploads interleaved PDX, the DSP expands it to planar
+  accumulators, renders FM into the inactive interleaved SSI buffer, switches
+  at a stereo boundary, and leaves the last complete block repeating if a
+  refill misses a codec period. A refillable 32-entry ring FIFO carries
+  ordered register events with native-sample timestamps while SSI runs.
 - A guarded timer-service entry reports exact YM Timer-B periods in native
   sample units; public play connects it to an otherwise-idle MFP Timer A
   whose 1024 Hz ISR only accumulates ticks, with a foreground pump doing the
@@ -230,10 +235,10 @@ F030MXDRV.TTP song.mdx [bank.pdx]
 
 The MDX is limited to 65,536 bytes and the optional raw PDX bank to 319,488
 bytes. Filenames are whitespace-delimited TOS paths. Press any key during
-playback to stop. This is an integration player rather than a finished audio
-path: SSI transport remains continuous, but the exact full-load FM renderer
-is about 46.85 times slower than the codec consumes it. `make run` starts the
-no-argument conformance mode in Hatari.
+playback to stop. The player uses the codec-rate real-time FM/PDX path; the
+sample-exact renderer remains available to the no-argument conformance mode
+and is still 46.85 times slower than real time. `make run` starts that
+conformance mode in Hatari.
 
 ## Source map
 
@@ -241,7 +246,7 @@ no-argument conformance mode in Hatari.
 - `src/m68k/player.s`: TTP argument parser, GEMDOS loader, and player loop.
 - `src/m68k/mxdrv_core.s`: resident-independent 32-call MXDRV API foundation.
 - `src/m68k/mxdrv_port.s`: replacement seam for MXDRV's original `WriteOPM`.
-- `src/m68k/mdx.s`: bounded 16-track MDX initialization and tick executor.
+- `src/m68k/mdx.s`: bounded 9/16-track MDX initialization and tick executor.
 - `src/m68k/mdx_clock.s`: MFP Timer-A accumulation and foreground tick pump.
 - `src/m68k/pdx.s`: validated PDX lookup, eight MSM6258 voices, and codec mixer.
 - `src/m68k/dsp_link.s`: packed 24-bit host/DSP exchange.

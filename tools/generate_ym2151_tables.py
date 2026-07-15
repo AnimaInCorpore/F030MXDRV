@@ -136,7 +136,7 @@ def main() -> int:
         ("opm_algorithm_ops", algorithm_ops),
         ("opm_dt2_delta", dt2_delta),
     ]
-    # Leave P:$0000-$10ff available to the command kernel, then place the
+    # Leave P:$0000-$13ff available to the command kernel, then place the
     # expanded exact tables and their packed upload source contiguously. The
     # codec-rate kernels use the DSP56001's factory Y sine ROM, so no separate
     # waveform is uploaded.

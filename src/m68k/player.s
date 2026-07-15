@@ -293,7 +293,7 @@ player_files_loaded:
         tst.w   d0
         beq     player_finished
 
-        bsr     dsp_start_mixed_audio
+        bsr     dsp_start_realtime_audio
         cmp.l   #DSP_REPLY_OK,d0
         bne     player_dsp_error
         move.b  #1,player_audio_started
@@ -306,7 +306,8 @@ player_files_loaded:
         Cconws  player_pdx_warning
 
 player_loop:
-        Vsync
+        ; The blocking realtime refill is the playback cadence. Waiting for a
+        ; VBL here would add 16.7 ms to every 20.8 ms audio period.
         bsr     mxdrv_mdx_clock_pump
         tst.w   d0
         beq     player_finished
@@ -317,7 +318,7 @@ player_loop:
         bra     player_stopped
 
 player_refill:
-        bsr     dsp_refill_mixed_audio
+        bsr     dsp_refill_realtime_audio
         cmp.l   #DSP_REPLY_OK,d0
         bne     player_dsp_error
         bra     player_loop
@@ -375,7 +376,7 @@ player_playing_text:
         dc.b    'Playing ',0
 player_playing_suffix:
         dc.b    13,10,'Press any key to stop.',13,10
-        dc.b    'Buffered SSI repeats the last complete block while refilling.',13,10,0
+        dc.b    'Realtime FM/PDX SSI repeats the last complete block while refilling.',13,10,0
 player_pdx_warning:
         dc.b    'PDX voices are mixed into each DSP refill block.',13,10,0
 player_finished_text:

@@ -12,13 +12,13 @@ routine receives the register in `d1.b` and data in `d2.b`, mirrors the byte in
 `OPMBuf`, then writes the X68000 OPM ports. `src/m68k/mxdrv_port.s` preserves
 those input conventions and replaces the hardware write with one DSP word.
 
-## Host/DSP protocol v18
+## Host/DSP protocol v19
 
 Every transport unit is one DSP/host 24-bit word. The upper byte is an opcode.
 
 | Word | Meaning | Reply |
 | --- | --- | --- |
-| `01 00 00` | ping/protocol query | `4d 58 12` (`MX`, version 18) |
+| `01 00 00` | ping/protocol query | `4d 58 13` (`MX`, version 19) |
 | `02 rr dd` | write YM2151 register `rr = dd`, including during SSI playback | `00 00 00` |
 | `03 00 00` | reset YM2151 state | `00 00 00` |
 | `04 00 00` | clock one native 62.5 kHz sample | signed left sample |
@@ -35,27 +35,30 @@ Every transport unit is one DSP/host 24-bit word. The upper byte is an opcode.
 | `0f 00 00` | query the rolling 16-bit native-sample clock | unsigned 16-bit time |
 | `10 00 00` | run the 2048-frame codec-rate four-operator feasibility kernel | deterministic checksum `6c 67 9b` |
 | `11 00 00`, then 2014 words after `52 44 59` | upload 1007 interleaved stereo PCM frames, mix with a new FM period, and start interrupt-fed SSI | ready token, then `00 00 00` before transmit starts |
-| `12 00 00` | query the first nonzero mixed stereo probe | signed left+right sample sum |
+| `12 00 00` | query the mixed-output probe | exact stream: first nonzero signed stereo sum; realtime stream: first-buffer checksum |
 | `13 00 00`, then 2014 words after `52 44 59` | upload PCM to the inactive buffer, render FM in place, and switch at a stereo boundary | ready token, then `00 00 00` after the switch |
 | `14 00 00` | run the 2048-frame block-oriented algorithm-0 channel spike | deterministic checksum `0f 26 66` |
 | `15 00 00` | run the 2048-frame block-oriented algorithm-7 carrier spike | deterministic checksum `89 eb 00` |
 | `16 00 aa` | run the 2048-frame mixed-topology spike for algorithm `aa = 1..6` | per-algorithm deterministic checksum |
 | `17 00 00` | run the 128-block live-SSI decoded-control and envelope engine | deterministic checksum `ab 5f 30` |
+| `18 00 00`, then 2048 words after `52 44 59` | upload 1024 interleaved stereo PCM frames, render the realtime FM buffer, and start interrupt-fed SSI | ready token, then `00 00 00` before transmit starts |
+| `19 00 00`, then 2048 words after `52 44 59` | upload PCM to the inactive realtime buffer, render 16 64-frame FM blocks, and switch at a stereo boundary | ready token, then `00 00 00` after the switch |
 | anything else | unsupported command | `ff ff ff` |
 
 The synchronous acknowledgement intentionally provides back-pressure and keeps
 conformance replay deterministic. The emulated YM2151 busy flag remains set
 until command `04` advances the 64 input clocks represented by one native
 sample. Command `04` is a testable sample clock, not the eventual real-time
-audio path. Command `0e` establishes the event transport needed by the future
-SSI-driven synthesis loop: up to 32 writes are accepted in nondecreasing
+audio path. Command `0e` supplies the event transport used by both SSI-driven
+synthesis loops: up to 32 writes are accepted in nondecreasing
 modular order and applied before the exact native sample. The storage is a ring
 FIFO, so the host can refill slots after earlier entries are consumed. The
 16-bit clock wraps naturally; entries must be no more than 32,767 samples
 ahead. Command `0f` exposes the current scheduling position to the host.
 
-Commands `0a`, `11`, and `13` are the exceptions to the single-word transaction
-shape. Command `0a` consumes exactly 329 following host words before replying.
+Commands `0a`, `11`, `13`, `18`, and `19` are the exceptions to the single-word
+transaction shape. Command `0a` consumes exactly 329 following host words
+before replying.
 Command `11` consumes 1007 interleaved signed left/right frame pairs, renders
 the matching FM period, saturates PCM+FM to signed 16-bit, and starts SSI on
 buffer A. While SSI's fast transmit interrupt repeats that complete block,
@@ -65,15 +68,33 @@ at external `X:$1000`, buffer B at `X:$1800`; each uses modulo addressing over
 2014 interleaved words. Command `12` returns the sum of the first nonzero mixed
 left/right pair as a conformance probe retained after the stream stops.
 
+Commands `18` and `19` are the production realtime counterparts. Each receives
+1024 interleaved signed 16-bit PCM frames, expands them into planar 24-bit
+accumulators, and renders 16 operator-major 64-frame blocks into a 2048-word
+SSI buffer. The start command imports the exact register and key image into the
+persistent realtime state, backs up the packed lookup tables before its planar
+right stream overlays external Y, derives the noise jump tables, and maps the
+DSP56001 sine ROM. The refill command prepares the inactive A/B buffer while
+SSI repeats the active complete buffer, then switches at a stereo boundary.
+Stop restores the packed tables, exact caches, external-Y mapping, and linear
+address modifiers. Command `12` returns the deterministic checksum of the
+first realtime buffer; the Hatari attack-trace fixture expects `fe 2f b0`.
+
 Active buffered audio accepts synchronous command `02` writes, `0e`
-transactions, `0f` queries, `13` refills, and command `0c`. A direct write
-refreshes the phase cache for the next render; queued writes are consumed as a
-refill advances fresh native samples. The rolling clock is not reset by start
-or refill, so every completed block adds exactly 1280 native samples to one
-continuous event timeline; only chip reset returns it to zero. Command `0d`
-counts prepared frames, not the number replayed by SSI. This distinction keeps
-the result deterministic when the same completed block repeats during a slow
-refill.
+transactions, `0f` queries, the refill matching its current mode (`13` or
+`19`), and command `0c`. In exact mode a direct write refreshes the exact phase
+cache and queued writes are consumed at their precise native sample while a
+refill renders 1280 native samples. In realtime mode direct writes are mirrored
+into the exact register image and decoded into the persistent block state;
+queued writes are drained at 64-frame boundaries before the next block. The
+realtime path therefore preserves FIFO order and rolling clock rate but
+currently quantizes event output latency to at most one 64-frame block. Its
+drift-free 1280:1007 DDA advances 1024-frame refills by 1301 or 1302 native
+samples; the smoke sequence observes clocks 1301, 2603, and 3904. The rolling
+clock is not reset by start or refill; only chip reset returns it to zero.
+Command `0d` counts prepared frames, not the number replayed by SSI, and reads
+3072 after the start plus two realtime refills. This distinction keeps the
+result deterministic when SSI repeats a completed block during a slow refill.
 
 Command `10` is a conformance and cycle-measurement spike, not an audio command.
 It owns `r0-r5`, `m0-m5`, and `n0-n3` while SSI is stopped, restores linear
@@ -147,7 +168,7 @@ is operator-major, so the algorithm bodies preload each stage's increment
 through the channel's feedback pointer while the channel-control read rides
 the parallel Y-bank pointer; the DSP56001 only pairs same-numbered index and
 address registers, which fixed this layout. The 32 fixture events cover
-every decoded register class: `$20-$27` algorithm/pan, four-band total
+the profiled decoded control set: `$20-$27` algorithm/pan, four-band total
 level, KC/KF pitch rebuilds from the exact expanded phase-step table with
 octave shift and doubled per-operator multipliers, key edges that restart
 real attacks with zeroed phases or move operators to release, all four
@@ -169,9 +190,9 @@ carrier rings through a separate decoded-pan path. The command explicitly
 clears a latched SSI underrun before restoring the external Y map and exact
 phase cache. Its checksum is `ab 5f 30`.
 
-Hatari measures 319.97 cycles per codec frame over the 8,192-frame,
-128-block profile against the 326.27-cycle budget, leaving 6.30 cycles
-(1.9%). Dynamic topology/pan routing, planar PDX accumulation, final
+Hatari measures 320.24 cycles per codec frame over the 8,192-frame,
+128-block profile against the 326.27-cycle budget, leaving 6.03 cycles
+(1.85%). Dynamic topology/pan routing, planar PDX accumulation, final
 saturation, live SSI, the full decoded register control path, and decoded
 envelope curvature therefore fit the budget together. Envelope-active
 operators advance once per block by a composed full-block affine step from
@@ -219,7 +240,8 @@ protocol version in the ping reply whenever either side changes incompatibly.
    interrupt performs exact 16.16 phase accumulation into pending ticks, while
    a foreground pump performs all XBIOS/DSP work. Stop restores timer/vector
    ownership. The TTP player loads one MDX and optional PDX through GEMDOS and
-   drains that pump after each VBL until the tracks end or a key is pressed.
+   drains that pump between blocking realtime refills until the tracks end or a
+   key is pressed; it does not add a VBL wait to the 20.8 ms audio cadence.
    Command-tail parsing has a Hatari-covered boundary self-test. FB/FA/F9 now
    use the original algorithm carrier masks and normal/raw attenuation rules,
    with active PDX gain updated in place. Modulation remains.
@@ -233,29 +255,33 @@ protocol version in the ping reply whenever either side changes incompatibly.
    10.3-float round-trip behavior, all LFO waveforms, AM/PM modulation,
    channel-7 noise, Timer A/B load/reload/reset/status behavior, CSM keying,
    and the write-busy status bit are implemented.
-5. **Falcon audio (in progress):** the DSP converts 1280 native 62.5 kHz
-   samples into 1007 frames at the Falcon's 25.175 MHz / 4 / 128 codec rate.
-   Protocol v18 feeds 16-bit, two-word SSI network frames from a fast transmit
+5. **Falcon audio (in progress):** the exact DSP path converts 1280 native
+   62.5 kHz samples into 1007 frames at the Falcon's 25.175 MHz / 4 / 128 codec
+   rate. Protocol v19 also provides the production 1024-frame realtime path.
+   Both feed 16-bit, two-word SSI network frames from a fast transmit
    interrupt using two aligned external-X buffers. The normal interrupt mutates
    only its dedicated `r6/m6` pair; a separate long exception path reads SSISR
    and writes TX to clear a transmit underrun. The 68030 can fill the inactive
    buffer while the previous complete period continues to loop, and the DSP
    disables the transmit interrupt briefly to switch at a stereo boundary.
-   The Hatari gate exercises A-to-B and B-to-A refills, queued writes at exact
-   boundaries, clock progression from 1280 through 3840 native samples, a
-   three-second no-refill interval, and clean stop/tristate/unlock.
+   The Hatari gate retains exact A-to-B/B-to-A coverage and now also exercises
+   realtime A-to-B and B-to-A refills, real FIFO writes, direct live writes,
+   clock progression through 1301, 2603, and 3904 native samples, a 3072-frame
+   prepared count, deterministic first-buffer output, and clean table/cache
+   restoration at stop.
 
    A reproducible Hatari DSP-cycle gate now supersedes the earlier VBL-derived
    throughput estimate. With four operators active on all eight channels and
    the cached no-PM path selected, rendering one 1280-sample period consumes
    15,391,151 instruction cycles, or 12,024.34 per native sample. The Falcon
    budget is 256.68 cycles per sample, so the exact scalar kernel misses real
-   time by 46.85x before steady SSI and host-port overhead. Protocol v18 makes
-   that miss safe by repeating the last complete block, but it does not make
-   playback temporally accurate. The exact kernel is retained as the
-   conformance reference; the real-time output contract now requires an
-   explicit accuracy/rate/workload compromise rather than another scalar
-   optimization pass. An embedded second-stage P-memory loader now removes the
+   time by 46.85x before steady SSI and host-port overhead. That exact kernel is
+   retained as the conformance reference. The production block kernel renders
+   eight channels, mixed PDX, decoded controls, block envelopes, and live SSI
+   at 320.24 cycles per codec frame against a 326.27-cycle budget. Its relaxed
+   boundary is block-rate envelope/control evolution and 64-frame event
+   quantization; DT1/DT2 pitch offsets and noise-frequency/output substitution
+   are not yet integrated. An embedded second-stage P-memory loader removes the
    former 8 KiB converted-LOD ceiling: a 111-word `Dsp_ExecBoot` program at
    `P:$0040` receives all sparse P sections, acknowledges completion, and enters
    the final program at its replaced reset vector.
@@ -266,16 +292,16 @@ protocol version in the ping reply whenever either side changes incompatibly.
    pan, voice start/stop and active masks, and signed 16-bit saturation. A
    generated oracle checks low-nibble-first decoding, predictor and step state,
    sample exhaustion, malformed bank ranges, and deterministic two-voice mixer
-   frames under Hatari. A protocol-v18 integration gate renders one 1007-frame
-   PCM period on the host, uploads it, checks the DSP-mixed stereo sum, and sends
-   the block through the Falcon SSI path. MDX PCM notes now bind tracks 8-15 to
-   PDX voices 0-7 with encoded durations and default rate/gain/pan. Continuous
-   mixed-block scheduling and compatibility tests with real MDX/PDX pairs
-   remain. The TTP player accepts and validates a PDX file and includes its
-   decoded PCM in every inactive-buffer refill. Transport is continuous because
-   the previous block repeats, but fresh PDX time advances only when the next
-   block is prepared; real-time cadence therefore remains tied to the DSP FM
-   optimization work above.
+   frames under Hatari. The protocol-v19 player renders 1024 PDX frames on the
+   host, uploads them to the DSP's planar accumulators, combines them with the
+   realtime FM kernel, and double-buffers the result through Falcon SSI. The
+   1007-frame exact integration gate remains as a conformance check. MDX PCM
+   notes bind tracks 8-15 to PDX voices 0-7 with encoded durations and default
+   rate/gain/pan. Compatibility tests with real MDX/PDX pairs remain. The TTP
+   player accepts and validates a PDX file and includes its decoded PCM in every
+   realtime inactive-buffer refill. Transport is continuous because the
+   previous block repeats if a refill is late; fresh PDX time advances only when
+   the next block is prepared.
 
 ## Validation strategy
 
@@ -340,6 +366,11 @@ codec-rate engine must update feedback and modulation on every produced sample;
 holding selected native outputs is not a valid shortcut because those outputs
 feed later operator state.
 
+Protocol v19 does not yet satisfy the sub-frame write-latency clause: the
+production kernel services ordered events only at 64-frame boundaries. It also
+does not yet apply DT1/DT2 pitch offsets or channel-7 noise substitution. These
+are implementation gaps against the contract, not relaxed acceptance criteria.
+
 ## Remaining roadmap
 
 1. **Full decoded control and envelope feasibility measured:** commands
@@ -356,8 +387,8 @@ feed later operator state.
    rate/depth/waveform, and both timers — and decoded envelope curvature:
    per-rate full-block affine steps with exponential attacks, block-boundary
    ADSR transitions, activity-proportional retirement, and
-   attenuation-gated gain rebuilds, at 319.97 cycles/frame, inside the
-   budget with 1.9% remaining. The Python prototype scores the same
+   attenuation-gated gain rebuilds, at 320.24 cycles/frame, inside the
+   budget with 1.85% remaining. The Python prototype scores the same
    quantized block recurrence at mean attenuation error 2.99/1023,
    correlation 0.977, and 61-frame transition lag against the exact ADSR
    reference, inside every comparator boundary. Noise-frequency decode
@@ -366,13 +397,19 @@ feed later operator state.
    vectors for pitch, key/write timing, envelopes, LFO/noise rates, feedback
    spectra, and all eight algorithms, gates an independent native perceptual
    projection, and provides the same comparator for future DSP captures.
-3. Integrate the selected real-time kernel with the rolling write FIFO and
-   double-buffered PCM mixer while retaining the current exact protocol path,
-   then feed its state/output capture through the comparison gate.
-4. Measure cycle count, SSI underruns, buffer switches, and host/DSP contention
+3. **Production transport integrated:** protocol commands `18`/`19` import the
+   live register/key image, consume the real rolling FIFO, decode direct writes,
+   expand 1024 host PDX frames into planar accumulators, render 16 realtime
+   blocks into inactive A/B SSI buffers, and restore the exact path on stop.
+   The Hatari smoke gate checks FIFO and direct-write service, three buffers,
+   clocks 1301/2603/3904, 3072 prepared frames, and checksum `fe2fb0`.
+4. Split blocks at due write timestamps to meet the sub-frame latency contract,
+   integrate DT1/DT2 pitch offsets and decoded noise frequency/output, and feed
+   the production kernel's state/output capture through the comparison gate.
+5. Measure cycle count, SSI underruns, buffer switches, and host/DSP contention
    on a real Falcon before declaring the audio transport complete.
-5. Finish MDX software modulation, synchronization, legato, remaining command
+6. Finish MDX software modulation, synchronization, legato, remaining command
    behavior, and continuous mixed FM/PDX scheduling.
-6. Run a compatibility corpus of real MDX/PDX pairs and complete the public
+7. Run a compatibility corpus of real MDX/PDX pairs and complete the public
    MXDRV call-table behavior, error handling, packaging, and hardware soak
    tests.

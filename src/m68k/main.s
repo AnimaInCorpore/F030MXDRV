@@ -1241,6 +1241,103 @@ run_conformance:
         cmp.l   #DSP_REPLY_HELLO,d0
         bne     audio_protocol_failed
 
+        ; Promote the command-$17 block engine into its production-shaped
+        ; 1024-frame A/B transport. Reset establishes native time zero, then
+        ; the same sustained voice and rolling FIFO exercise both halves while
+        ; SSI remains live. Sixteen 64-frame blocks advance each refill by
+        ; 1301 or 1302 native samples under the exact 1280:1007 DDA.
+        bsr     mxdrv_reset
+        tst.l   d0
+        bne     audio_protocol_failed
+        lea     attack_trace(pc),a3
+        moveq   #27,d3
+.write_realtime_trace:
+        moveq   #0,d1
+        moveq   #0,d2
+        move.b  (a3)+,d1
+        move.b  (a3)+,d2
+        bsr     mxdrv_write_ym2151
+        tst.l   d0
+        bne     audio_protocol_failed
+        dbra    d3,.write_realtime_trace
+
+        moveq   #0,d0
+        moveq   #$28,d1
+        moveq   #$4b,d2
+        bsr     dsp_queue_write
+        tst.l   d0
+        bne     audio_protocol_failed
+        moveq   #64,d0
+        moveq   #$28,d1
+        moveq   #$4c,d2
+        bsr     dsp_queue_write
+        tst.l   d0
+        bne     audio_protocol_failed
+
+        bsr     dsp_start_realtime_audio
+        cmp.l   #DSP_REPLY_OK,d0
+        bne     audio_protocol_failed
+        move.l  #DSP_CMD_QUERY_TIME,d0
+        bsr     dsp_exchange
+        cmpi.l  #1301,d0
+        bne     audio_protocol_failed
+
+        moveq   #$7f,d1                ; direct live TL write
+        moveq   #$08,d2
+        bsr     mxdrv_write_ym2151
+        cmp.l   #DSP_REPLY_OK,d0
+        bne     audio_protocol_failed
+        moveq   #$40,d1                ; live operator multiplier rebuild
+        moveq   #$02,d2
+        bsr     mxdrv_write_ym2151
+        cmp.l   #DSP_REPLY_OK,d0
+        bne     audio_protocol_failed
+        move.l  #1301,d0
+        moveq   #$28,d1
+        moveq   #$4a,d2
+        bsr     dsp_queue_write
+        tst.l   d0
+        bne     audio_protocol_failed
+        move.l  #1365,d0
+        moveq   #$28,d1
+        moveq   #$4c,d2
+        bsr     dsp_queue_write
+        tst.l   d0
+        bne     audio_protocol_failed
+
+        bsr     dsp_refill_realtime_audio
+        cmp.l   #DSP_REPLY_OK,d0
+        bne     audio_protocol_failed
+        move.l  #DSP_CMD_QUERY_TIME,d0
+        bsr     dsp_exchange
+        cmpi.l  #2603,d0
+        bne     audio_protocol_failed
+
+        bsr     dsp_refill_realtime_audio
+        cmp.l   #DSP_REPLY_OK,d0
+        bne     audio_protocol_failed
+        move.l  #DSP_CMD_QUERY_TIME,d0
+        bsr     dsp_exchange
+        cmpi.l  #3904,d0
+        bne     audio_protocol_failed
+
+        move.l  #DSP_CMD_STOP_AUDIO,d0
+        bsr     dsp_exchange
+        cmp.l   #DSP_REPLY_OK,d0
+        bne     audio_protocol_failed
+        move.l  #DSP_CMD_QUERY_AUDIO,d0
+        bsr     dsp_exchange
+        cmpi.l  #DSP_RT_MIX_FRAME_COUNT*3,d0
+        bne     audio_protocol_failed
+        move.l  #DSP_CMD_QUERY_MIX,d0
+        bsr     dsp_exchange
+        cmpi.l  #DSP_RT_MIX_CHECKSUM,d0
+        bne     audio_protocol_failed
+        move.l  #DSP_CMD_PING+$dc19,d0
+        bsr     dsp_exchange
+        cmp.l   #DSP_REPLY_HELLO,d0
+        bne     audio_protocol_failed
+
         Dsptristate #0,#0
         Unlocksnd
 

@@ -221,7 +221,7 @@ $(DSP_STAGE2_IMAGE): tools/generate_dsp_stage2.py $(DSP_BUILD)/.assembled
 		--bootstrap $(DSP_BUILD)/YMBOOT.LOD \
 		--program $(DSP_BUILD)/YM2151.LOD \
 		--program-limit 0x1400 \
-		--island 0x2000 0x2400 > $@
+		--island 0x2000 0x2700 > $@
 
 check: all reference
 	@test -s $(RELEASE_DIR)/f030mxdrv.tos
@@ -267,7 +267,8 @@ smoke: check
 	@rg -q "XBIOS 0x6E Dsp_ExecBoot" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x4d584c" build/hatari-smoke.trace
 	@rg -q "Transfer 0x4c4f41" build/hatari-smoke.trace
-	@rg -q "Transfer 0x4d5812" build/hatari-smoke.trace
+	@rg -q "Transfer 0x4d5813" build/hatari-smoke.trace
+	@rg -q "Transfer 0x01dc19" build/hatari-smoke.trace
 	@rg -q "Transfer 0x524459" build/hatari-smoke.trace
 	@rg -q "GEMDOS 0x42 Fseek\\(0, [0-9]+, 2\\)" build/hatari-smoke.trace
 	@rg -q "GEMDOS 0x42 Fseek\\(0, [0-9]+, 0\\)" build/hatari-smoke.trace

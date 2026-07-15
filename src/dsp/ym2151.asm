@@ -460,9 +460,9 @@ rt5_pan_right_stream:
 ; Envelope-active bookkeeping lives in the physically free window above the
 ; 8,192-word external X/Y reservations. External P aliases external Y word
 ; for word on the Falcon (and external X aliases P at +$4000), so phys
-; $2000-$23ff carries the envelope code island while these uninitialized
-; arrays own phys $2400 (Y) and $6400 (X); the stage-two island check keeps
-; the code below Y:$2400. Both base addresses are 64-aligned so (r5+n5)
+; $2000-$26ff carries the cold-code island while these uninitialized arrays
+; own phys $2700 (Y) and $6400 (X); the stage-two island check keeps program
+; code below Y:$2700. Both base addresses are 64-aligned so (r5+n5)
 ; state reads stay inside one modulo block under the render's m5=63.
         org     x:$2400
 rt5_env_state:
@@ -488,7 +488,14 @@ rt5_env_key_phase:
 rt5_env_target:
         ds      32                      ; cached 10.13 sustain-level target
 
-        org     y:$2400
+; Persistent production-stream bookkeeping. This sits beyond the envelope
+; arrays in external X and is touched only at block/refill boundaries.
+rt5_runtime_mode:
+        ds      1
+rt5_runtime_output:
+        ds      1
+
+        org     y:$2700
 rt5_env_b:
         ds      32                      ; signed 10.13 full-block addend
 
@@ -809,6 +816,10 @@ command_loop:
         move    #>DSP_CMD_PROFILE_RT5,x0
         cmp     x0,a
         jeq     command_profile_realtime5
+
+        move    #>DSP_CMD_START_RT_MIXED,x0
+        cmp     x0,a
+        jeq     command_start_realtime_mixed
 
         move    #>DSP_CMD_START_MIXED,x0
         cmp     x0,a
@@ -2220,6 +2231,140 @@ rt5_checksum_state_done:
         jsr     send_reply
         jmp     command_loop
 
+; Start the production-shaped codec-rate path. Host PCM remains signed
+; 16-bit on the wire and is expanded into planar 0.23 accumulators; sixteen
+; 64-frame synthesis blocks fill one complete 1024-frame SSI buffer.
+command_start_realtime_mixed:
+        movep   #0,x:m_crb
+        movep   #$4100,x:m_cra
+        clr     a
+        move    a1,x:ssi_frame_count
+        move    a1,x:ssi_mix_probe_left
+        move    a1,x:ssi_mix_probe_sum
+        move    a1,x:ssi_active_buffer
+        jsr     rt5_initialize_runtime
+        move    #>1,a
+        move    a1,x:rt5_runtime_mode
+
+        move    #rt5_pan_left_stream,r1
+        move    #rt5_pan_right_stream,r7
+        jsr     rt5_receive_runtime_pcm
+        move    #>rt5_pan_left_stream,a
+        move    a1,x:rt5_pan_left_base
+        move    #>rt5_pan_right_stream,a
+        move    a1,x:rt5_pan_right_base
+        move    #>ssi_buffer_a,a
+        move    a1,x:rt5_runtime_output
+        jsr     rt5_enter_runtime_map
+        do      #DSP_RT_MIX_BLOCK_COUNT,rt5_start_blocks_done
+        jsr     rt5_render_runtime_block
+        nop
+rt5_start_blocks_done:
+
+        ; Retain a deterministic first-buffer checksum for the existing mix
+        ; query after stop; this proves the production path rendered FM data,
+        ; rather than only exercising its transport and clock state.
+        move    #ssi_buffer_a,r1
+        clr     a
+        do      #DSP_RT_MIX_FRAME_COUNT,rt5_start_checksum_done
+        move    x:(r1)+,x0
+        add     x0,a
+        move    x:(r1)+,x0
+        add     x0,a
+rt5_start_checksum_done:
+        move    a1,x:ssi_mix_probe_sum
+
+        move    #ssi_buffer_a,r6
+        move    #>2047,m6
+        nop
+        move    x:(r6)+,a
+        movep   a1,x:m_tx
+        move    #>DSP_RT_MIX_FRAME_COUNT,a
+        move    a1,x:ssi_frame_count
+        move    #>DSP_REPLY_OK,a
+        jsr     send_reply
+        movep   #$5a00,x:m_crb
+        jmp     ssi_stream_loop
+
+; The READY token parks the DSP in this tight receive loop before TOS releases
+; its blind block transfer. Expanding each signed PCM word by eight bits puts
+; it in the same 0.23 accumulator domain as the codec-rate FM carriers.
+rt5_receive_runtime_pcm:
+        move    #>DSP_REPLY_BLOCK_READY,a
+        jsr     send_reply
+        do      #DSP_RT_MIX_FRAME_COUNT,rt5_receive_runtime_done
+        jclr    #0,x:m_hsr,*
+        movep   x:m_hrx,a
+        rep     #8
+        asl     a
+        move    a1,x:(r1)+
+        jclr    #0,x:m_hsr,*
+        movep   x:m_hrx,a
+        rep     #8
+        asl     a
+        move    a1,y:(r7)+
+rt5_receive_runtime_done:
+        rts
+
+rt5_enter_runtime_map:
+        ori     #$04,omr
+        nop
+        move    #>255,m0
+        move    #>-1,m1
+        move    #>-1,m2
+        move    #>63,m3
+        move    #>-1,m4
+        move    #>63,m5
+        move    #>-1,m7
+        move    #>rt5_channel_control-@cvs(x,rt5_feedback_0),n4
+        rts
+
+; Render one production block from the current planar PCM pointers into the
+; walking inactive SSI output pointer. This is the command-17 hot topology
+; path with only its profile stream wrapping removed.
+rt5_render_runtime_block:
+        jsr     rt5_update_support_block
+        clr     a
+        move    a1,y:rt5_mix_written
+        move    #>$100,r0
+        move    #rt5_feedback_1,r2
+        move    #rt5_feedback_0,r4
+        move    #rt5_phase,r7
+        move    #>-1,m7
+        move    #>$ff,y1
+        move    #>-1,m5
+        do      #8,rt5_runtime_channels_done
+        jsr     rt5_render_channel
+rt5_runtime_channels_done:
+
+        move    #rt5_mix_ring,r4
+        move    x:rt5_pan_left_base,r1
+        move    x:rt5_pan_right_base,r7
+        move    x:rt5_runtime_output,r5
+        move    #>-1,m5
+        move    y:rt5_mix_written,a
+        tst     a
+        jne     rt5_runtime_ring_ready
+        clr     a
+        do      #DSP_RT2_BLOCK_FRAMES,rt5_runtime_ring_cleared
+        move    a1,y:(r4)+
+rt5_runtime_ring_cleared:
+        move    #rt5_mix_ring,r4
+rt5_runtime_ring_ready:
+        do      #DSP_RT2_BLOCK_FRAMES,rt5_runtime_stereo_done
+        move    x:(r1)+,x0 y:(r4)+,a
+        move    a,b
+        add     x0,a y:(r7)+,x0
+        move    a,x:(r5)+
+        add     x0,b
+        move    b,x:(r5)+
+rt5_runtime_stereo_done:
+        move    r1,x:rt5_pan_left_base
+        move    r7,x:rt5_pan_right_base
+        move    r5,x:rt5_runtime_output
+        move    #>63,m5
+        rts
+
 ; Update one 64-frame block of global control state. Every due FIFO event is
 ; decoded first so its state lands in this block. Native-time, LFO, and timer
 ; state advance with the exact 1280:1007 block DDA instead of repeating its
@@ -2295,6 +2440,19 @@ rt5_timer_a_done:
 rt5_timer_b_store:
         move    a1,x:rt5_timer_b_counter
 rt5_timer_b_done:
+
+        ; Production mode publishes the same drift-free native clock used by
+        ; the transport FIFO. The profiling command leaves its independent
+        ; deterministic clock untouched.
+        move    x:rt5_runtime_mode,a
+        tst     a
+        jeq     rt5_runtime_clock_done
+        move    x:ssi_native_sample_count,a
+        add     y0,a
+        move    #>$00ffff,x0
+        and     x0,a1
+        move    a1,x:ssi_native_sample_count
+rt5_runtime_clock_done:
 
         ; Apply the exact 64-step transform for the x^17+x^14+1 right-shifting
         ; Galois LFSR. Linearity splits the old state into 6/6/5-bit slice
@@ -2379,6 +2537,9 @@ rt5_operator_update_done:
 ; is consumed in a single boundary service whose transient cost amortizes
 ; across the 1007-frame period.
 rt5_service_event:
+        move    x:rt5_runtime_mode,a
+        tst     a
+        jne     rt5_service_transport_event
         move    x:rt5_event_count,a
         tst     a
         jeq     rt5_service_event_done
@@ -2406,9 +2567,13 @@ rt5_service_event:
         nop
         move    b1,x:(r0+n0)
 
-        ; Dispatch on the register class. Every decoded class lands in its
-        ; own handler; registers outside the decoded map fall through without
-        ; touching block state.
+        jsr     rt5_decode_register
+        jmp     rt5_event_decode_done
+
+; Decode n0/a = register and y1 = data after the caller has updated the real
+; register image. Keeping this as a subroutine lets the production stream use
+; the identical state transition for direct and rolling-FIFO writes.
+rt5_decode_register:
         move    n0,a
         move    #>$60,x0
         cmp     x0,a
@@ -2427,7 +2592,10 @@ rt5_event_below_60:
         move    #>$38,x0
         cmp     x0,a
         jlt     rt5_event_decode_kf
-        jmp     rt5_event_decode_done   ; $38-$5f DT/MUL state stays fixture
+        move    #>$40,x0
+        cmp     x0,a
+        jlt     rt5_decode_register_done
+        jmp     rt5_event_decode_mul
 rt5_event_below_28:
         move    #>$20,x0
         cmp     x0,a
@@ -2441,7 +2609,8 @@ rt5_event_below_28:
         move    #>$08,x0
         cmp     x0,a
         jeq     rt5_env_key_event
-        jmp     rt5_event_decode_done
+rt5_decode_register_done:
+        rts
 
 rt5_event_decode_done:
 
@@ -2461,6 +2630,63 @@ rt5_service_event_done:
         add     x0,a
         move    a1,x:rt5_event_clock
         rts
+
+; Production read side for the existing rolling 32-entry queue. Writes due at
+; the current native boundary are mirrored into the exact register image and
+; decoded into the persistent codec-rate state before this 64-frame block.
+rt5_service_transport_event:
+        move    x:ym_queue_count,a
+        tst     a
+        jeq     rt5_service_transport_done
+        move    x:ym_queue_read_index,n0
+        move    n0,n1
+        move    #ym_write_queue_times,r0
+        move    #ym_write_queue_commands,r1
+        nop
+        move    x:(r0+n0),a
+        move    x:ssi_native_sample_count,x0
+        sub     x0,a
+        move    #>$00ffff,y0
+        and     y0,a1
+        tst     a
+        jeq     rt5_service_transport_due
+        jclr    #15,a1,rt5_service_transport_done
+rt5_service_transport_due:
+        move    x:(r1+n1),x1
+        jsr     rt5_apply_packed_write
+        move    x:ym_queue_read_index,a
+        move    #>1,x0
+        add     x0,a
+        move    #>31,y0
+        and     y0,a1
+        move    a1,x:ym_queue_read_index
+        move    x:ym_queue_count,a
+        sub     x0,a
+        move    a1,x:ym_queue_count
+        jmp     rt5_service_transport_event
+rt5_service_transport_done:
+        rts
+
+; Apply one packed command-02 word to both the retained exact register mirror
+; and the codec-rate decoder. Reloading x1 protects the packed payload across
+; timer/key helpers used by ym_write_packed.
+rt5_apply_packed_write:
+        move    x1,x:last_command
+        jsr     ym_write_packed
+        move    x:last_command,x1
+        move    x1,a
+        move    #>$00ff00,y0
+        and     y0,a1
+        rep     #8
+        lsr     a
+        move    a1,n0
+        move    x1,a
+        move    #>$0000ff,y0
+        and     y0,a1
+        move    a1,y1
+        move    #ym_regdata,r0
+        move    n0,a
+        jmp     rt5_decode_register
 
 ; Render one channel with the topology selected by its decoded $20-$27 state.
 ; The control read rides the parallel Y-bank feedback pointer through
@@ -3088,6 +3314,10 @@ ssi_stream_loop:
         cmp     x0,a
         jeq     command_refill_mixed
 
+        move    #>DSP_CMD_REFILL_RT_MIXED,x0
+        cmp     x0,a
+        jeq     command_refill_realtime_mixed
+
         move    #>DSP_CMD_WRITE_REG,x0
         cmp     x0,a
         jeq     ssi_stream_write
@@ -3112,8 +3342,15 @@ ssi_stream_queue_write:
         jmp     ssi_stream_data
 
 ssi_stream_write:
+        move    x:rt5_runtime_mode,a
+        tst     a
+        jne     ssi_stream_write_realtime
         jsr     ym_write_packed
         jsr     ym_refresh_phase_cache
+        jmp     ssi_stream_write_reply
+ssi_stream_write_realtime:
+        jsr     rt5_apply_packed_write
+ssi_stream_write_reply:
         move    #>DSP_REPLY_OK,a
         jsr     send_reply
         jmp     ssi_stream_data
@@ -3130,6 +3367,9 @@ ssi_stream_data:
 ; the new block in place, then switch at a stereo boundary. If rendering misses
 ; one or more codec periods, the old block remains untouched and audible.
 command_refill_mixed:
+        move    x:rt5_runtime_mode,a
+        tst     a
+        jne     ssi_stream_command_error
         move    x:ssi_active_buffer,a
         tst     a
         jne     command_refill_buffer_a
@@ -3198,12 +3438,85 @@ command_refill_boundary:
         jsr     send_reply
         jmp     ssi_stream_loop
 
+; Refill the inactive production buffer from the matching half of the planar
+; PCM workspace, render sixteen whole blocks while SSI loops the old buffer,
+; then switch only after completing the current stereo pair.
+command_refill_realtime_mixed:
+        move    x:rt5_runtime_mode,a
+        tst     a
+        jeq     ssi_stream_command_error
+        move    x:ssi_active_buffer,a
+        tst     a
+        jne     command_rt_refill_buffer_a
+        move    #rt5_pan_left_stream+DSP_RT_MIX_FRAME_COUNT,r1
+        move    #rt5_pan_right_stream+DSP_RT_MIX_FRAME_COUNT,r7
+        move    #>ssi_buffer_b,a
+        jmp     command_rt_refill_receive
+command_rt_refill_buffer_a:
+        move    #rt5_pan_left_stream,r1
+        move    #rt5_pan_right_stream,r7
+        move    #>ssi_buffer_a,a
+command_rt_refill_receive:
+        move    a1,x:ssi_refill_buffer
+        move    r1,x:rt5_pan_left_base
+        move    r7,x:rt5_pan_right_base
+        jsr     rt5_receive_runtime_pcm
+        move    x:ssi_refill_buffer,a
+        move    a1,x:rt5_runtime_output
+        do      #DSP_RT_MIX_BLOCK_COUNT,command_rt_refill_render_done
+        jsr     rt5_render_runtime_block
+        nop
+command_rt_refill_render_done:
+
+        movep   #$1a00,x:m_crb
+        jclr    #m_tde,x:m_sr,*
+        move    r6,a
+        jclr    #0,a1,command_rt_refill_boundary
+        movep   x:(r6)+,x:m_tx
+        jclr    #m_tde,x:m_sr,*
+command_rt_refill_boundary:
+        move    x:ssi_refill_buffer,r6
+        move    x:ssi_active_buffer,a
+        move    #>1,x0
+        eor     x0,a
+        move    a1,x:ssi_active_buffer
+        nop
+        move    x:(r6)+,a
+        movep   a1,x:m_tx
+        movep   #$5a00,x:m_crb
+        move    x:ssi_frame_count,a
+        move    #>DSP_RT_MIX_FRAME_COUNT,x0
+        add     x0,a
+        move    a1,x:ssi_frame_count
+        move    #>DSP_REPLY_OK,a
+        jsr     send_reply
+        jmp     ssi_stream_loop
+
 command_stop_audio:
         movep   #0,x:m_crb
         move    #>-1,m6
         clr     a
         movep   a1,x:m_tx
+        move    x:rt5_runtime_mode,a
+        tst     a
+        jeq     command_stop_exact
+
+        ; Restore the packed upload source hidden by the planar right PCM
+        ; buffers, regenerate the exact tables, and release all RT overlays.
+        move    #rt5_packed_table_backup,r1
+        move    #opm_uploaded_tables,r4
+        do      #YM_TABLE_WORDS,command_stop_rt_restore_done
+        move    x:(r1)+,a
+        move    a1,y:(r4)+
+command_stop_rt_restore_done:
+        jsr     ym_expand_tables
+        clr     a
+        move    a1,x:rt5_runtime_mode
+        jsr     rt2_restore_common
+        jmp     command_stop_reply
+command_stop_exact:
         jsr     ym_rebuild_phase_cache
+command_stop_reply:
         move    #>DSP_REPLY_OK,a
         jsr     send_reply
         jmp     command_loop
@@ -3390,8 +3703,10 @@ ym_apply_queued_done:
 ; Reset behavior follows ymfm::opm_registers::reset(): clear all register
 ; bytes, then enable both output channels for channels 0-7 (registers 20-27).
 ym_reset:
-        move    #ym_regdata,r0
         clr     a
+        move    a1,x:rt5_runtime_mode
+        move    a1,x:rt5_runtime_output
+        move    #ym_regdata,r0
         do      #256,ym_reset_clear
         move    a1,x:(r0)+
 ym_reset_clear:
@@ -5336,14 +5651,12 @@ ym_clock_channel_loop:
         move    x:ym_last_right,a
         jsr     ym_roundtrip_fp
         move    a1,x:ym_last_right
-        jsr     ym_clock_timers
-        clr     a                       ; one sample is the 64-clock busy time
-        move    a1,x:ym_busy
-        rts
+        jmp     ym_clock_timers
 
 ; Clock the two OPM timers after the generated sample. Thus a period of N is
 ; visible in status after N clock commands, while CSM is consumed by the key
 ; preparation at the beginning of sample N.
+        org     p:$26d0
 ym_clock_timers:
         move    x:ym_timer_b_phase,a
         move    #>1,x0
@@ -5382,8 +5695,13 @@ ym_clock_timer_b:
 ym_clock_timer_b_reload:
         jsr     ym_reload_timer_b
 ym_clock_timers_done:
+        clr     a                       ; one sample is the 64-clock busy time
+        move    a1,x:ym_busy
         rts
 
+        ; Keep the cold exact global-clock helpers out of the bounded low-P
+        ; region now shared with the production codec-rate control path.
+        org     p:$2520
         ym_lfo_code
 
 ; -----------------------------------------------------------------------------
@@ -5391,8 +5709,8 @@ ym_clock_timers_done:
 ; -----------------------------------------------------------------------------
 ; External P aliases external Y word for word on the Falcon, so this island
 ; occupies the physically free window between the external-Y reservation
-; (which ends at Y:$1f7f) and the envelope arrays at Y:$2400. The stage-two
-; generator admits P sections inside [$2000,$2400) and nothing else maps the
+; (which ends at Y:$1f7f) and the envelope addends at Y:$2700. The stage-two
+; generator admits P sections inside [$2000,$2700) and nothing else maps the
 ; phys page. Everything here runs at block boundaries or event decode time,
 ; so its cost is proportional to envelope activity and amortizes across the
 ; 1007-frame period exactly like FIFO event bursts.
@@ -5404,6 +5722,247 @@ ym_clock_timers_done:
 ; Cold rt5 fixtures and event-decode bodies live in the island so the
 ; internal-P envelope pass and the sub-$1400 program keep their room;
 ; every path here is event-amortized.
+
+; Initialize persistent codec-rate state from the exact register mirror at
+; the handoff boundary. Playback enters here before its first rendered sample,
+; so pending ym_key_live bits recreate key edges into freshly released
+; envelopes while phase and feedback begin at reset.
+rt5_initialize_runtime:
+        clr     b
+        move    #rt5_phase,r4
+        do      #32,rt5_runtime_clear_phase_done
+        move    b10,l:(r4)+
+rt5_runtime_clear_phase_done:
+        clr     a
+        move    #rt5_feedback_1,r2
+        move    #rt5_feedback_0,r4
+        do      #8,rt5_runtime_clear_feedback_done
+        move    a1,x:(r2)+
+        move    a1,y:(r4)+
+rt5_runtime_clear_feedback_done:
+
+        move    #rt5_envelope_level,r1
+        move    #>$7fe000,a             ; released attenuation 1023 in 10.13
+        do      #32,rt5_runtime_levels_done
+        move    a1,x:(r1)+
+rt5_runtime_levels_done:
+
+        clr     a
+        move    x:ssi_resample_phase,a
+        move    a1,x:rt5_native_phase
+        clr     a
+        move    a1,x:rt5_lfo_phase
+        move    a1,x:rt5_event_clock
+        move    a1,x:rt5_event_read
+        move    a1,x:rt5_event_count
+        move    a1,x:rt5_checksum
+        move    a1,x:rt5_block_control
+        move    a1,x:rt5_lfo_step_block
+        move    a1,x:rt5_lfo_step_tick
+        move    a1,x:rt5_pm_scale
+        move    a1,x:rt5_lfo_amd
+        move    a1,x:rt5_lfo_waveform
+        move    a1,x:rt5_timer_status
+        move    #>1,a
+        move    a1,x:rt5_noise_lfsr
+        move    #>1024,a
+        move    a1,x:rt5_timer_counter
+        move    a1,x:rt5_timer_a_reload
+        move    #>4096,a
+        move    a1,x:rt5_timer_b_reload
+        move    a1,x:rt5_timer_b_counter
+        clr     a
+        move    a1,x:rt5_timer_control
+
+        move    #0,r4
+        move    #>$7fffff,a
+        do      #32,rt5_runtime_env_a_done
+        move    a1,y:(r4)+
+rt5_runtime_env_a_done:
+        clr     a
+        move    #rt5_env_b,r4
+        move    #rt5_tl_base,r1
+        move    #rt5_env_target,r2
+        do      #32,rt5_runtime_env_arrays_done
+        move    a1,y:(r4)+
+        move    a1,x:(r1)+
+        move    a1,x:(r2)+
+rt5_runtime_env_arrays_done:
+        move    a1,x:rt5_active_count
+        move    #rt5_env_state,r1
+        move    #>4,a                   ; released, inactive, unkeyed
+        do      #32,rt5_runtime_env_state_done
+        move    a1,x:(r1)+
+rt5_runtime_env_state_done:
+
+        ; Decode the four raw DT1/MUL rows into operator-major doubled
+        ; multipliers. DT1 remains a later compatibility refinement, but MUL
+        ; is live for every KC/KF rebuild from the first production block.
+        move    #ym_regdata+$40,r1
+        move    #rt5_operator_mul,r2
+        jsr     rt5_initialize_mul_row
+        move    #ym_regdata+$48,r1
+        move    #rt5_operator_mul+16,r2
+        jsr     rt5_initialize_mul_row
+        move    #ym_regdata+$50,r1
+        move    #rt5_operator_mul+8,r2
+        jsr     rt5_initialize_mul_row
+        move    #ym_regdata+$58,r1
+        move    #rt5_operator_mul+24,r2
+        jsr     rt5_initialize_mul_row
+        clr     a
+        move    a1,x:rt5_increment_base+32
+
+        move    #ym_regdata+$20,r1
+        move    #rt5_channel_control,r2
+        do      #8,rt5_runtime_controls_done
+        move    x:(r1)+,a
+        move    a1,x:(r2)+
+rt5_runtime_controls_done:
+
+        ; Rebuild all channel pitches through the same decoded KC path used by
+        ; rolling writes after the multiplier rows are ready.
+        move    #>$28,a
+        move    a1,x:rt5_runtime_output
+rt5_runtime_pitch_loop:
+        move    x:rt5_runtime_output,a
+        move    a1,n0
+        move    #ym_regdata,r0
+        nop
+        move    x:(r0+n0),y1
+        jsr     rt5_event_decode_kc
+        move    x:rt5_runtime_output,a
+        move    #>1,x0
+        add     x0,a
+        move    a1,x:rt5_runtime_output
+        move    #>$30,x0
+        cmp     x0,a
+        jlt     rt5_runtime_pitch_loop
+
+        ; Decode all total levels, which also builds the two initial AM gain
+        ; arrays from the released envelope levels.
+        move    #>$60,a
+        move    a1,x:rt5_runtime_output
+rt5_runtime_tl_loop:
+        move    x:rt5_runtime_output,a
+        move    a1,n0
+        move    #ym_regdata,r0
+        nop
+        move    x:(r0+n0),y1
+        jsr     rt5_env_tl_event
+        move    x:rt5_runtime_output,a
+        move    #>1,x0
+        add     x0,a
+        move    a1,x:rt5_runtime_output
+        move    #>$80,x0
+        cmp     x0,a
+        jlt     rt5_runtime_tl_loop
+
+        ; Import global LFO and timer controls. PM depth lives in ymfm's
+        ; internal $1a shadow, so synthesize its bank-selecting $19 write.
+        move    #ym_regdata,r0
+        move    #>$18,n0
+        move    x:ym_regdata+$18,y1
+        jsr     rt5_decode_register
+        move    #>$19,n0
+        move    x:ym_regdata+$19,y1
+        jsr     rt5_decode_register
+        move    x:ym_regdata+$1a,a
+        bset    #7,a1
+        move    a1,y1
+        move    #>$19,n0
+        jsr     rt5_decode_register
+        move    #>$1b,n0
+        move    x:ym_regdata+$1b,y1
+        jsr     rt5_decode_register
+        move    #>$10,n0
+        move    x:ym_regdata+$10,y1
+        jsr     rt5_decode_register
+        move    #>$11,n0
+        move    x:ym_regdata+$11,y1
+        jsr     rt5_decode_register
+        move    #>$12,n0
+        move    x:ym_regdata+$12,y1
+        jsr     rt5_decode_register
+        move    #>$14,n0
+        move    x:ym_regdata+$14,y1
+        jsr     rt5_decode_register
+
+        ; Recreate pending per-channel key masks from the exact live inputs.
+        clr     a
+        move    a1,x:rt5_runtime_output
+rt5_runtime_key_loop:
+        move    x:rt5_runtime_output,a
+        rep     #2
+        asl     a
+        move    #>ym_key_live,x0
+        add     x0,a
+        move    a1,r1
+        clr     b
+        move    x:(r1)+,a
+        tst     a
+        jeq     rt5_runtime_key_c1
+        bset    #3,b1
+rt5_runtime_key_c1:
+        move    x:(r1)+,a
+        tst     a
+        jeq     rt5_runtime_key_m2
+        bset    #4,b1
+rt5_runtime_key_m2:
+        move    x:(r1)+,a
+        tst     a
+        jeq     rt5_runtime_key_c2
+        bset    #5,b1
+rt5_runtime_key_c2:
+        move    x:(r1)+,a
+        tst     a
+        jeq     rt5_runtime_key_ready
+        bset    #6,b1
+rt5_runtime_key_ready:
+        move    x:rt5_runtime_output,a
+        move    a1,x0
+        add     x0,b
+        move    b1,y1
+        move    #>$08,n0
+        move    n0,a
+        jsr     rt5_env_key_event
+        move    x:rt5_runtime_output,a
+        move    #>1,x0
+        add     x0,a
+        move    a1,x:rt5_runtime_output
+        move    #>8,x0
+        cmp     x0,a
+        jlt     rt5_runtime_key_loop
+
+        jsr     rt5_generate_noise_tables
+
+        ; The production right PCM planes overlay expanded exact tables just
+        ; like command $17. Preserve the packed source for stop-time restore.
+        move    #opm_uploaded_tables,r4
+        move    #rt5_packed_table_backup,r1
+        do      #YM_TABLE_WORDS,rt5_runtime_backup_tables_done
+        move    y:(r4)+,a
+        move    a1,x:(r1)+
+rt5_runtime_backup_tables_done:
+        clr     a
+        move    a1,x:rt5_runtime_output
+        rts
+
+rt5_initialize_mul_row:
+        do      #8,rt5_initialize_mul_row_done
+        move    x:(r1)+,a
+        move    #>$0f,x0
+        and     x0,a
+        jne     rt5_initialize_mul_nonzero
+        move    #>1,a
+        jmp     rt5_initialize_mul_store
+rt5_initialize_mul_nonzero:
+        asl     a
+rt5_initialize_mul_store:
+        move    a1,x:(r2)+
+rt5_initialize_mul_row_done:
+        rts
+
 ; Fixture data consumed once at command-17 setup: eight initial channel
 ; control words and 32 ordered block-boundary writes covering every decoded
 ; register class.
@@ -5431,7 +5990,47 @@ rt5_event_decode_channel_control:
         move    #rt5_channel_control,r0
         nop
         move    y1,x:(r0+n0)
-        jmp     rt5_event_decode_done
+        rts
+
+        ; DT1/MUL writes update the live multiplier in operator-major order,
+        ; then rebuild all four channel increments so a mid-song voice load
+        ; takes effect in the next production block. DT1 itself remains a
+        ; later pitch-accuracy refinement.
+rt5_event_decode_mul:
+        move    n0,b
+        move    #>7,x0
+        and     x0,b
+        move    b1,n1                   ; channel
+        move    n0,a
+        jclr    #4,a1,rt5_mul_no_c1
+        move    #>8,x0
+        add     x0,b
+rt5_mul_no_c1:
+        jclr    #3,a1,rt5_mul_index_ready
+        move    #>16,x0
+        add     x0,b
+rt5_mul_index_ready:
+        move    b1,n2
+        move    y1,a
+        move    #>$0f,x0
+        and     x0,a
+        jne     rt5_mul_nonzero
+        move    #>1,a
+        jmp     rt5_mul_store
+rt5_mul_nonzero:
+        asl     a
+rt5_mul_store:
+        move    #rt5_operator_mul,r2
+        nop
+        move    a1,x:(r2+n2)
+        move    n1,a
+        move    #>$28,x0
+        add     x0,a
+        move    a1,n0
+        move    #ym_regdata,r0
+        nop
+        move    x:(r0+n0),y1
+        jmp     rt5_event_decode_kc
 
         ; KC writes rebuild all four operator base increments for their
         ; channel from the exact expanded phase-step table, the stored KF
@@ -5532,7 +6131,7 @@ rt5_pitch_shift_done:
         or      x0,a                    ; bounded, non-silent DDA increment
         move    a1,x:(r3)+n3
 rt5_pitch_ops_done:
-        jmp     rt5_event_decode_done
+        rts
 
         ; LFO writes: $18 stores the decoded per-tick rate beside its
         ; precomputed 81-tick block product, $19 banks PM depth (bit 7 set)
@@ -5567,7 +6166,7 @@ rt5_lfo_rate_shifted:
         add     b,a
         add     x0,a                    ; rate * 81
         move    a1,x:rt5_lfo_step_block
-        jmp     rt5_event_decode_done
+        rts
 rt5_event_decode_lfo_depth:
         jclr    #7,y1,rt5_lfo_amd_write
         move    y1,a
@@ -5576,13 +6175,13 @@ rt5_event_decode_lfo_depth:
         rep     #16
         asl     a
         move    a1,x:rt5_pm_scale
-        jmp     rt5_event_decode_done
+        rts
 rt5_lfo_amd_write:
         move    y1,a
         move    #>$7f,x0
         and     x0,a
         move    a1,x:rt5_lfo_amd
-        jmp     rt5_event_decode_done
+        rts
 rt5_event_decode_lfo_waveform:
         move    #>$1b,x0
         cmp     x0,a
@@ -5591,7 +6190,7 @@ rt5_event_decode_lfo_waveform:
         move    #>3,x0
         and     x0,a
         move    a1,x:rt5_lfo_waveform
-        jmp     rt5_event_decode_done
+        rts
 
         ; Timer writes: $10/$11 rebuild the 10-bit Timer A reload from the
         ; register mirror, $12 scales the Timer B reload by 16, and $14
@@ -5613,7 +6212,7 @@ rt5_event_decode_timer:
         move    #>1024,a
         sub     x0,a
         move    a1,x:rt5_timer_a_reload
-        jmp     rt5_event_decode_done
+        rts
 rt5_event_decode_timer_b:
         move    y1,x0
         move    #>256,a
@@ -5621,7 +6220,7 @@ rt5_event_decode_timer_b:
         rep     #4
         asl     a
         move    a1,x:rt5_timer_b_reload
-        jmp     rt5_event_decode_done
+        rts
 rt5_event_decode_timer_control:
         move    #>$14,x0
         cmp     x0,a
@@ -5646,7 +6245,7 @@ rt5_timer_status_no_a:
         bclr    #1,a1
 rt5_timer_status_no_b:
         move    a1,x:rt5_timer_status
-        jmp     rt5_event_decode_done
+        rts
 
 
 ; Rebuild the live affine constants of rt5_env_current from its current ADSR
@@ -5887,7 +6486,7 @@ rt5_env_key_next:
         lsr     b
         move    b1,y1
 rt5_env_key_ops_done:
-        jmp     rt5_event_decode_done
+        rts
 
 ; Envelope rate classes $80-$ff: the register mirror is already updated, so
 ; translate the raw slot into the operator-major index and rebuild the live
@@ -5933,7 +6532,7 @@ rt5_env_rate_reload:
         jsr     rt5_env_reload_op
         jsr     rt5_env_activate_op
 rt5_env_rate_done:
-        jmp     rt5_event_decode_done
+        rts
 
 ; Total-level writes decode the true 7-bit TL into a 0.23 amplitude base and
 ; rebuild the operator's gain pair through its current envelope level.
@@ -5974,7 +6573,7 @@ rt5_env_tl_shifted:
         nop
         move    a1,x:(r1+n1)
         jsr     rt5_env_gain_op
-        jmp     rt5_event_decode_done
+        rts
 
         ; Generated program-memory noise jump tables and external-Y exact
         ; renderer reservations. No P code follows this include.
@@ -5985,10 +6584,10 @@ rt5_env_tl_shifted:
 ; addressing loops the active block while the other is rendered and swapped.
         org     x:$1000
 ssi_buffer_a:
-        ds      2014
+        ds      2048
 
         org     x:$1800
 ssi_buffer_b:
-        ds      2014
+        ds      2048
 
         end
