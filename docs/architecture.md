@@ -12,13 +12,13 @@ routine receives the register in `d1.b` and data in `d2.b`, mirrors the byte in
 `OPMBuf`, then writes the X68000 OPM ports. `src/m68k/mxdrv_port.s` preserves
 those input conventions and replaces the hardware write with one DSP word.
 
-## Host/DSP protocol v12
+## Host/DSP protocol v17
 
 Every transport unit is one DSP/host 24-bit word. The upper byte is an opcode.
 
 | Word | Meaning | Reply |
 | --- | --- | --- |
-| `01 00 00` | ping/protocol query | `4d 58 0c` (`MX`, version 12) |
+| `01 00 00` | ping/protocol query | `4d 58 11` (`MX`, version 17) |
 | `02 rr dd` | write YM2151 register `rr = dd`, including during SSI playback | `00 00 00` |
 | `03 00 00` | reset YM2151 state | `00 00 00` |
 | `04 00 00` | clock one native 62.5 kHz sample | signed left sample |
@@ -37,8 +37,10 @@ Every transport unit is one DSP/host 24-bit word. The upper byte is an opcode.
 | `11 00 00` + 2014 words | upload 1007 interleaved stereo PCM frames, mix with a new FM period, and start interrupt-fed SSI | `00 00 00` before transmit starts |
 | `12 00 00` | query the first nonzero mixed stereo probe | signed left+right sample sum |
 | `13 00 00` + 2014 words | upload PCM to the inactive buffer, render FM in place, and switch at a stereo boundary | `00 00 00` after the switch |
-| `14 00 00` | run the 2048-frame block-oriented algorithm-0 channel spike | deterministic checksum `27 d9 3b` |
+| `14 00 00` | run the 2048-frame block-oriented algorithm-0 channel spike | deterministic checksum `0f 26 66` |
 | `15 00 00` | run the 2048-frame block-oriented algorithm-7 carrier spike | deterministic checksum `89 eb 00` |
+| `16 00 aa` | run the 2048-frame mixed-topology spike for algorithm `aa = 1..6` | per-algorithm deterministic checksum |
+| `17 00 00` | run the live-SSI eight-channel decoded ALG/PAN/AM/PM/TL spike | deterministic checksum `4c 0b ce` |
 | anything else | unsupported command | `ff ff ff` |
 
 The synchronous acknowledgement intentionally provides back-pressure and keeps
@@ -100,6 +102,71 @@ masks and use `MAC` rather than a separate multiply/add pair; operator 4 emits
 the interleaved stereo result. Its independent checksum and profile gate the
 carrier-specialized stage shape without weakening the serial-path test.
 
+Command `16` completes the topology feasibility matrix for algorithms 1-6.
+Its low byte selects the algorithm, and six specialized outer loops compose a
+shared set of 64-frame operator stages. Algorithms 4 and 5 keep their reusable
+modulation ring in internal Y and their carrier accumulation in internal X;
+the phase `MAC` preloads the X accumulation before the indexed Y sine-ROM read,
+avoiding a competing Y-memory access.
+Operator-1 feedback is stored at its already-divided 1/8 depth, avoiding three
+hot-loop shifts while retaining non-zero downstream modulation. The replies
+for algorithms 1-6 are respectively `1e 36 26`, `50 e7 18`, `18 4e af`,
+`19 05 4b`, `ff c6 a7`, and `66 25 49`. The command owns `r0-r7`,
+`m2/m3/m5-m7`, and `n6`, reuses the audio buffers for output, and restores
+linear addressing, the external Y map, and exact-renderer caches before reply.
+
+Command `17` is the first integrated codec-rate all-topology mixed-output stress
+profile. It keeps the real SSI fast transmit interrupt active on buffer A,
+reserves `r6/m6` for that interrupt, and begins with algorithms 0-7 on eight
+channels in 64-frame blocks from 32 overlaid internal long phases. Decoded
+channel-control writes change algorithm and pan during the run. All four
+both/left/right/mute modes route audible carriers into an internal common ring
+or host-prepared planar PDX streams. The final pass adds the common group,
+interleaves left/right into buffer B, and moves full accumulators so the
+DSP56001 limiter supplies signed 24-bit saturation. The 2,048-frame planar
+fixture represents 32 successively refilled inactive blocks; its preparation
+is outside the measured DSP bracket, as it would be on the 68030. Every profile
+array stays within Falcon's 8,192-word X/Y reservations. The right stream
+temporarily overlays external-Y table storage, so the packed table is backed up
+in X and re-expanded after the measurement.
+
+The measured window also advances the complete decoded control state: a
+drift-free 1280:1007 native clock, a decoded-rate LFO, both decoded timers
+under their control bits, a maximum-length one-step-per-frame noise LFSR, and
+a profile-local 32-entry FIFO with one event at every block boundary. One
+three-instruction, 32-iteration support loop advances every decoded
+per-operator envelope level by its decoded signed step while rebuilding every
+PM-adjusted per-operator phase increment from its decoded base. Pitch state
+is operator-major, so the algorithm bodies preload each stage's increment
+through the channel's feedback pointer while the channel-control read rides
+the parallel Y-bank pointer; the DSP56001 only pairs same-numbered index and
+address registers, which fixed this layout. The 32 fixture events cover
+every decoded register class: `$20-$27` algorithm/pan, four-band total
+level, KC/KF pitch rebuilds from the exact expanded phase-step table with
+octave shift and doubled per-operator multipliers, key on/off envelope
+restarts and releases, all four envelope-rate groups translated through the
+raw M1/M2/C1/C2 slot map, LFO rate/depth/waveform, and Timer B plus timer
+control load/run/status behavior. The scaled `$19` depth turns the low
+eight control bits into this block's signed PM offset, bit 16 still selects
+full or 0.75 AM gain, and the exact 64-step noise transform runs through
+6/6/5-bit slice tables the command derives from the LFSR step function at
+setup, keeping every table word out of the bounded P image. Because decoded
+pan may leave no both-panned channel, the common ring is cleared
+independently before accumulation. Algorithms 6/7 route their already-summed
+carrier rings through a separate decoded-pan path. The command explicitly
+clears a latched SSI underrun before restoring the external Y map and exact
+phase cache. Its checksum is `79 1b f5`.
+
+Hatari measures 326.09 cycles per codec frame against the 326.27-cycle
+budget, leaving 0.18 cycles (0.055%). Dynamic topology/pan routing, planar
+PDX accumulation, final saturation, live SSI, and the full decoded register
+control path therefore fit the budget together, establishing the control
+feasibility that the previous 322.55-cycle floor left open. The margin is
+knife-edge by design and the identified recovery lever — a write-first
+common-ring pass replacing the per-block clear — remains unspent.
+Noise-frequency decode and per-frame envelope curvature stay outside this
+gate.
+
 The constants are duplicated in `src/m68k/protocol.i` and
 `src/dsp/protocol.inc` because the two assemblers do not share syntax. Keep the
 protocol version in the ping reply whenever either side changes incompatibly.
@@ -137,7 +204,7 @@ protocol version in the ping reply whenever either side changes incompatibly.
    and the write-busy status bit are implemented.
 5. **Falcon audio (in progress):** the DSP converts 1280 native 62.5 kHz
    samples into 1007 frames at the Falcon's 25.175 MHz / 4 / 128 codec rate.
-   Protocol v12 feeds 16-bit, two-word SSI network frames from a fast transmit
+   Protocol v17 feeds 16-bit, two-word SSI network frames from a fast transmit
    interrupt using two aligned external-X buffers. The normal interrupt mutates
    only its dedicated `r6/m6` pair; a separate long exception path reads SSISR
    and writes TX to clear a transmit underrun. The 68030 can fill the inactive
@@ -152,7 +219,7 @@ protocol version in the ping reply whenever either side changes incompatibly.
    the cached no-PM path selected, rendering one 1280-sample period consumes
    15,391,151 instruction cycles, or 12,024.34 per native sample. The Falcon
    budget is 256.68 cycles per sample, so the exact scalar kernel misses real
-   time by 46.85x before steady SSI and host-port overhead. Protocol v12 makes
+   time by 46.85x before steady SSI and host-port overhead. Protocol v17 makes
    that miss safe by repeating the last complete block, but it does not make
    playback temporally accurate. The exact kernel is retained as the
    conformance reference; the real-time output contract now requires an
@@ -168,7 +235,7 @@ protocol version in the ping reply whenever either side changes incompatibly.
    pan, voice start/stop and active masks, and signed 16-bit saturation. A
    generated oracle checks low-nibble-first decoding, predictor and step state,
    sample exhaustion, malformed bank ranges, and deterministic two-voice mixer
-   frames under Hatari. A protocol-v12 integration gate renders one 1007-frame
+   frames under Hatari. A protocol-v17 integration gate renders one 1007-frame
    PCM period on the host, uploads it, checks the DSP-mixed stereo sum, and sends
    the block through the Falcon SSI path. MDX PCM notes now bind tracks 8-15 to
    PDX voices 0-7 with encoded durations and default rate/gain/pan. Continuous
@@ -183,8 +250,9 @@ protocol version in the ping reply whenever either side changes incompatibly.
 
 Do not judge the DSP core only by ear. `tools/ym2151_oracle.cpp` now drives the
 vendored `third_party/mame/3rdparty/ymfm` YM2151 with timestamped register traces
-and emits per-sample state/output vectors. Falcon DSP captures of the same
-traces can be compared at these boundaries:
+and emits both per-native-sample conformance vectors and exact codec-cadence
+reference vectors. Falcon DSP captures of the same traces can be compared at
+these boundaries:
 
 - decoded channel/operator parameters after writes;
 - phase step and envelope attenuation per operator;
@@ -197,6 +265,21 @@ and pre-resampling native samples. The cycle gate shows that this kernel is not
 a viable real-time renderer on a stock Falcon. Any replacement audio kernel
 must state its relaxed boundary explicitly and retain the exact path for
 regression comparisons.
+
+The reference side of that comparison is now executable. `make check` creates
+15 codec-rate scenarios for pitch, write/key timing, ADSR, AM/PM LFO, noise,
+feedback levels 0/7, and all eight algorithms. Every row records the exact
+1280:1007 native boundary, ordered-write count/hash, stereo output, and
+operator/control state. `tools/compare_ym2151_realtime.py` validates that
+coverage and accepts future candidate captures using drift/timing, envelope,
+LFO/noise-rate, and spectral thresholds documented in
+`docs/perceptual-compatibility.md`. This completes the reference and policy
+half of the perceptual gate. A second native projection independently applies
+the 256-step sine phase, codec-rate feedback, algorithms, panning, noise, and
+YM3012 rounding while borrowing exact frame-boundary control state. It passes
+with topology spectral cosine of 0.7229-0.9999, log-spectrum RMSE of
+5.09-10.61 dB, and energy ratio of 0.967-1.028. The integrated DSP kernel still
+needs to emit its own candidate capture.
 
 ## Real-time compatibility contract
 
@@ -228,21 +311,28 @@ feed later operator state.
 
 ## Remaining roadmap
 
-1. Extend the measured carrier headroom across every algorithm stage shape.
-   Command `14` renders the fully serial algorithm-0 topology in 40.75 cycles
-   per channel/frame, projecting to 325.98 cycles for eight channels against
-   the 326.27-cycle budget: only 0.09% synthesis margin. Command `15` proves
-   the carrier-specialized algorithm-7 shape at 37.70 cycles per channel/frame,
-   or 301.61 projected cycles, by preloading its accumulation ring beside the
-   phase mask and replacing `MPY`+`ADD` with `MAC`. That leaves 24.66 cycles
-   (7.56%) for four-carrier channels. Both paths use the sine-ROM DDA and exact
-   profile-boundary correction. Add the mixed serial/parallel shapes for
-   algorithms 1-6, then measure envelope, LFO/noise, write-FIFO, SSI, and event
-   service in place; none of those costs is included yet.
-2. Add exact-to-perceptual comparison vectors for pitch, key/write timing,
-   envelopes, LFO/noise rates, feedback spectra, and all eight algorithms.
+1. **Full decoded control feasibility measured:** commands `14`-`16` cover
+   every isolated YM topology: algorithms 0-7 cost 37.75, 37.00, 37.98, 37.00,
+   38.00, 39.05, 35.98, and 37.70 cycles per channel/frame, and their linear
+   eight-channel projections fit the 326.27-cycle budget. Command `17` now
+   measures eight channels, one per algorithm, with internal phase/feedback
+   state, live SSI, stereo emission, drift-free LFO/noise/timer advancement,
+   dynamic algorithm/pan, planar PDX/FM accumulation, final saturation,
+   block-held AM/PM in every operator, and decoded application of every
+   remaining write class — total level, KC/KF pitch rebuilds from the exact
+   phase-step table, key on/off, all four envelope-rate groups, LFO
+   rate/depth/waveform, and both timers — at 326.09 cycles/frame, inside the
+   budget with 0.055% remaining. The identified write-first common-ring pass
+   can recover roughly two cycles per frame when integration needs margin.
+   Noise-frequency decode and per-frame envelope curvature remain outside
+   the gate.
+2. **Reference gate complete:** the build now validates exact codec-rate
+   vectors for pitch, key/write timing, envelopes, LFO/noise rates, feedback
+   spectra, and all eight algorithms, gates an independent native perceptual
+   projection, and provides the same comparator for future DSP captures.
 3. Integrate the selected real-time kernel with the rolling write FIFO and
-   double-buffered PCM mixer while retaining the current exact protocol path.
+   double-buffered PCM mixer while retaining the current exact protocol path,
+   then feed its state/output capture through the comparison gate.
 4. Measure cycle count, SSI underruns, buffer switches, and host/DSP contention
    on a real Falcon before declaring the audio transport complete.
 5. Finish MDX software modulation, synchronization, legato, remaining command

@@ -31,6 +31,14 @@ def emit_dsp_reservation(name: str, values: list[int]) -> None:
     print()
 
 
+def emit_dsp_table(name: str, values: list[int], width: int = 8) -> None:
+    print(f"{name}:")
+    for offset in range(0, len(values), width):
+        row = ",".join(f"${value:06x}" for value in values[offset : offset + width])
+        print(f"        dc      {row}")
+    print()
+
+
 def emit_m68k_table(values: list[int], width: int = 8) -> None:
     for offset in range(0, len(values), width):
         row = ",".join(str(value) for value in values[offset : offset + width])
@@ -128,11 +136,11 @@ def main() -> int:
         ("opm_algorithm_ops", algorithm_ops),
         ("opm_dt2_delta", dt2_delta),
     ]
-    # Leave P:$0000-$0c7f available to the command kernel, then place the
+    # Leave P:$0000-$10ff available to the command kernel, then place the
     # expanded exact tables and their packed upload source contiguously. The
     # codec-rate kernels use the DSP56001's factory Y sine ROM, so no separate
     # waveform is uploaded.
-    runtime_table_start = 0x0C80
+    runtime_table_start = 0x1400
     table_words = sum(len(values) for _, values in uploaded_tables)
 
     print("; Generated from third_party/mame/3rdparty/ymfm/src/ymfm_fm.ipp.")
@@ -149,6 +157,11 @@ def main() -> int:
         for _, values in uploaded_tables:
             emit_m68k_table(values)
     else:
+        # The real-time block kernel derives its 64-step noise-LFSR jump
+        # tables on the DSP itself at command setup, directly from the
+        # x^17+x^14+1 step function, so no noise table words occupy the
+        # bounded P-memory image.
+
         # Falcon external P memory aliases external X/Y RAM. Keep the runtime
         # lookup block above the complete command kernel and its clock helpers.
         print(f"        org     y:${runtime_table_start:x}")

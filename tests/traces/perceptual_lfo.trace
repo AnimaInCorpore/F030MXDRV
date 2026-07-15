@@ -1,0 +1,18 @@
+# native sample  register  data
+# A single sustained AM/PM carrier. Saw LFO, maximum depths, PMS 7 and AMS 3
+# make both the AM state and phase-increment modulation observable.
+0 18 a8
+0 19 7f
+0 19 ff
+0 1b 00
+0 38 73
+0 20 c7
+0 28 4c
+0 30 00
+0 58 01
+0 78 00
+0 98 1f
+0 b8 80
+0 d8 00
+0 f8 0f
+0 08 40

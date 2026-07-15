@@ -979,6 +979,58 @@ run_conformance:
         cmp.l   #DSP_REPLY_HELLO,d0
         bne     protocol_failed
 
+        ; Exercise algorithms 1-6 through their shared mixed-topology block
+        ; command. Each arming marker is unique so the Hatari profiler can
+        ; capture one topology without changing the Falcon test executable.
+        move.l  #DSP_CMD_PROFILE_RT4,d0 ; selector zero is outside 1-6
+        bsr     dsp_exchange
+        cmp.l   #DSP_REPLY_ERROR,d0
+        bne     protocol_failed
+        moveq   #1,d5
+        lea     rt4_algorithm_checksums(pc),a3
+.profile_mixed_algorithm:
+        move.l  #DSP_CMD_PING+$c500,d0
+        add.l   d5,d0
+        bsr     dsp_exchange
+        cmp.l   #DSP_REPLY_HELLO,d0
+        bne     protocol_failed
+        move.l  #DSP_CMD_PROFILE_RT4,d0
+        or.b    d5,d0
+        bsr     dsp_exchange
+        move.l  (a3)+,d1
+        cmp.l   d1,d0
+        bne     protocol_failed
+        addq.w  #1,d5
+        cmpi.w  #7,d5
+        bcs     .profile_mixed_algorithm
+        move.l  #DSP_CMD_PING+$c5de,d0
+        bsr     dsp_exchange
+        cmp.l   #DSP_REPLY_HELLO,d0
+        bne     protocol_failed
+
+        ; Run the live-SSI eight-channel fully decoded control gate. Its
+        ; measured window includes real transmit interrupts plus decoded
+        ; envelope/LFO/noise/timer/event block service, with hot phases,
+        ; feedback, and the carrier sum in overlaid internal memory while
+        ; SSI consumes the active external audio buffer. The fixture begins
+        ; with algorithms 0-7 on channels 0-7, then applies decoded
+        ; algorithm/pan changes, four-band TL rebuilds, KC/KF pitch rebuilds
+        ; from the exact phase-step table, key on/off, all four
+        ; envelope-rate groups, LFO rate/depth/waveform, and both timers,
+        ; beside block-held AM/PM, planar PDX input, and final limiting.
+        move.l  #DSP_CMD_PING+$c6c0,d0
+        bsr     dsp_exchange
+        cmp.l   #DSP_REPLY_HELLO,d0
+        bne     protocol_failed
+        move.l  #DSP_CMD_PROFILE_RT5,d0
+        bsr     dsp_exchange
+        cmpi.l  #DSP_RT5_PROFILE_CHECKSUM,d0
+        bne     protocol_failed
+        move.l  #DSP_CMD_PING+$c6de,d0
+        bsr     dsp_exchange
+        cmp.l   #DSP_REPLY_HELLO,d0
+        bne     protocol_failed
+
         ; Reload the valid bank after the malformed-bank checks, then prove
         ; that a host-rendered PDX period reaches the DSP-owned SSI path. Keep
         ; FM silent so the first nonzero stereo probe sums the exact second
@@ -1474,6 +1526,11 @@ algorithm_references:
         dc.l    YM_REF_ALGORITHM_5_LEFT,YM_REF_ALGORITHM_5_RIGHT
         dc.l    YM_REF_ALGORITHM_6_LEFT,YM_REF_ALGORITHM_6_RIGHT
         dc.l    YM_REF_ALGORITHM_7_LEFT,YM_REF_ALGORITHM_7_RIGHT
+
+rt4_algorithm_checksums:
+        dc.l    DSP_RT4_ALG1_CHECKSUM,DSP_RT4_ALG2_CHECKSUM
+        dc.l    DSP_RT4_ALG3_CHECKSUM,DSP_RT4_ALG4_CHECKSUM
+        dc.l    DSP_RT4_ALG5_CHECKSUM,DSP_RT4_ALG6_CHECKSUM
 
         bss
 

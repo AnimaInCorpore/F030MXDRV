@@ -39,8 +39,9 @@ interrupt-fed DAC transport, all on stock Falcon hardware.
   at 49.17 kHz into the Falcon DAC, double-buffered, with timestamped YM
   register events on a rolling native-sample clock that survives refills.
 - **Verified, measured, reproducible.** A native ymfm oracle, golden
-  tone/noise/CSM/vibrato traces, a Hatari integration smoke test, and four
-  deterministic DSP cycle profiles gate every change.
+  tone/noise/CSM/vibrato traces, a Hatari integration smoke test, and five
+  base profiles plus six algorithm-specific DSP cycle profiles gate every
+  change.
 
 ## Honest status
 
@@ -63,16 +64,42 @@ why the project publishes its own profiler.
   modulo rings and parallel X/Y moves. A second, block-oriented spike now
   renders a complete serial algorithm-0 channel — operator-1 feedback,
   per-frame modulation, block-held operator gains, and interleaved stereo —
-  in 40.75 cycles per codec frame. Its linear eight-channel synthesis
-  projection is 325.98 cycles against the 326.27-cycle frame budget: the
-  former 1.23x arithmetic gap is closed, but by only **0.09%** before envelope
-  evolution, register-event service, SSI, and LFO/noise costs. A new
+  in 37.75 cycles per codec frame after storing feedback at its already-scaled
+  depth. Its linear eight-channel synthesis projection is 301.98 cycles
+  against the 326.27-cycle frame budget, leaving **7.44%** before support
+  work. A new
   algorithm-7-shaped spike preloads carrier accumulation beside its phase
   masks and reaches 37.70 cycles per frame, projecting to 301.61 cycles and
-  **7.56%** synthesis headroom for four-carrier channels. A bounded
-  accumulator DDA feeds the DSP56001's on-chip 256-step sine ROM and preserves
-  exact profile-block-boundary phase. Comparison gating and the remaining
-  algorithm stage shapes are still required before integration.
+  **7.56%** synthesis headroom for four-carrier channels. The six remaining
+  mixed topologies now measure 35.98–39.05 cycles per channel/frame; their
+  worst case is algorithm 5 at 312.37 projected cycles, leaving **4.26%**.
+  A bounded accumulator DDA feeds the DSP56001's on-chip 256-step sine ROM and
+  preserves exact profile-block-boundary phase. All isolated topology
+  arithmetic now fits. The first integrated serial stress profile reserves
+  `r6` for live SSI, executes all eight channels from internal phase state,
+  advances block-held envelopes plus drift-free LFO/noise/timer state, services
+  32 queued writes, and emits stereo. Moving its hot phase/feedback state and
+  carrier sum on chip, batching exact block-boundary LFO/timer bookkeeping,
+  and retaining exact noise boundary state first reduced that gate to 313.35
+  cycles per frame. It now routes a both/left/right/mute channel pattern into
+  host-prepared planar PDX blocks and uses the DSP56001 limiter for the final
+  interleaved SSI output. The integrated gate now decodes and applies **every
+  register class the transport must service**: `$20-$27` algorithm/pan,
+  four-band total level, KC/KF pitch rebuilds from the exact phase-step
+  table with octave shift and per-operator multipliers, key on/off, all four
+  envelope-rate groups, LFO rate/depth/waveform, and both timers. A single
+  three-instruction support loop advances all 32 decoded envelope levels
+  while rebuilding all 32 PM-adjusted per-operator phase increments each
+  block, and the exact 64-step noise transform runs through slice tables the
+  DSP derives from the LFSR step function at setup, keeping the program
+  inside its P-memory ceiling. The gate executes every topology, changes
+  algorithm and pan during the live-SSI run, and measures **326.09 cycles
+  per frame** against the **326.27-cycle** budget — full decoded control
+  fits, with **0.18 cycles (0.055%)** to spare and a write-first mix-ring
+  pass identified as the next ~2-cycle recovery. Noise-frequency decode and
+  per-frame envelope curvature stay outside the gate. The
+  exact-to-perceptual reference gate is present; capturing a complete
+  integrated candidate remains required before playback integration.
 - MDX synchronization/modulation and real-time mixed-block production
   remain. The exact boundary between implemented and pending work is kept in
   [the architecture notes](docs/architecture.md).
@@ -81,7 +108,7 @@ why the project publishes its own profiler.
 
 - The 68030 executable embeds everything the DSP needs: packed immutable
   ymfm tables, plus the complete sparse DSP program behind a 111-word
-  `Dsp_ExecBoot` first stage that receives 3,044 initialized P-memory words
+  `Dsp_ExecBoot` first stage that receives 4,993 initialized P-memory words
   through the host port — removing the 8 KiB converted-LOD ceiling.
 - The DSP kernel caches all 32 unmodulated phase increments across register
   writes in internal Y RAM and advances them with parallel X/Y fetches.
@@ -90,7 +117,7 @@ why the project publishes its own profiler.
   Terminal release envelopes and fully silent channels bypass work that
   cannot affect chip state or output; hot scalar state lives in
   short-addressable internal X RAM.
-- Protocol v12 gives the DSP two interleaved stereo buffers in external
+- Protocol v17 gives the DSP two interleaved stereo buffers in external
   X RAM. The 68030 uploads one 1007-frame PDX period into the inactive
   buffer; the DSP renders the matching FM period in place with signed 16-bit
   saturation, switches buffers at a stereo boundary, and leaves the last
@@ -115,8 +142,9 @@ make check
 ```
 
 This also compiles a native MAME/ymfm oracle, mechanically generates
-compressed DSP lookup tables, and emits a 256-sample reference trace under
-`build/reference/`.
+compressed DSP lookup tables, emits the exact 256-sample conformance trace,
+validates a 15-scenario codec-rate perceptual corpus, and gates an independent
+256-step/codec-feedback projection against it under `build/reference/`.
 
 ## Verify
 
@@ -144,6 +172,21 @@ track-8 PDX trigger, two-pass E9/EA repetition, EB final-pass escape, Timer-B
 period changes, rejection of an out-of-range repeat target, and timer release
 on stop.
 
+The perceptual corpus covers pitch, non-codec-aligned key and register writes,
+ADSR state, AM/PM LFO and noise rates, feedback spectra, and all eight
+algorithms. Its native projection independently renders the proposed
+256-step, codec-rate-feedback compromise; across the topology suite it retains
+0.7229-0.9999 spectral cosine and 0.967-1.028x RMS energy with zero control
+drift. A future DSP capture can be checked against the same explicit rate,
+timing, envelope, and spectral limits with:
+
+```sh
+make compare-realtime REALTIME_CANDIDATE_DIR=path/to/capture
+```
+
+The vector schema and thresholds are documented in
+[`docs/perceptual-compatibility.md`](docs/perceptual-compatibility.md).
+
 Hatari can also capture the cycle profiles behind the status numbers above:
 
 ```sh
@@ -151,6 +194,8 @@ make profile-dsp      # exact eight-channel renderer -> build/dsp-profile/report
 make profile-dsp-rt   # codec-rate four-operator floor -> build/dsp-profile-rt/report.txt
 make profile-dsp-rt2  # algorithm-0 block spike -> build/dsp-profile-rt2/report.txt
 make profile-dsp-rt3  # algorithm-7 carrier spike -> build/dsp-profile-rt3/report.txt
+make profile-dsp-rt4  # algorithms 1-6 -> build/dsp-profile-rt4/algorithm-*/report.txt
+make profile-dsp-rt5  # live-SSI all-topology floor -> build/dsp-profile-rt5/report.txt
 ```
 
 ## Run
@@ -194,6 +239,8 @@ no-argument conformance mode in Hatari.
 - `src/dsp/stage2_loader.asm`: embedded sparse P-memory loader.
 - `src/dsp/ym2151.asm`: DSP protocol and command-clocked YM2151 sample kernel.
 - `tools/ym2151_oracle.cpp`: native executable built against vendored ymfm.
+- `tools/compare_ym2151_realtime.py`: codec-rate vector validator and
+  exact-to-perceptual comparator.
 - `tools/generate_ym2151_tables.py`: mechanical ymfm-to-DSP table generator.
 - `tools/pdx_adpcm_oracle.cpp`: MAME-compatible MSM6258 reference vectors.
 - `tools/profile_dsp.py`: deterministic Hatari DSP-cycle capture and report.
@@ -206,6 +253,7 @@ no-argument conformance mode in Hatari.
 - `docs/pdx-ground-truth.md`: PDX table and X68000 ADPCM decoding facts.
 - `docs/mdx-ground-truth.md`: MDX sequence, track, duration, and command facts.
 - `docs/dsp56001-notes.md`: constraints taken from the local Motorola manual.
+- `docs/perceptual-compatibility.md`: codec-vector schema and acceptance gates.
 - `docs/architecture.md`: ownership, protocol, and staged port plan.
 
 The references under `third_party/` remain unmodified.

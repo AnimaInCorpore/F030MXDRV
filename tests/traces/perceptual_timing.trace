@@ -1,0 +1,19 @@
+# native sample  register  data
+# Deliberately non-codec-aligned key, TL, pan, and re-key writes. The codec
+# vector records which output frame consumes every exact native timestamp.
+0 20 c7
+0 28 4c
+0 30 00
+0 58 01
+0 78 00
+0 98 1f
+0 b8 00
+0 d8 00
+0 f8 0f
+
+11 08 40
+173 78 30
+269 08 00
+333 78 00
+333 08 40
+509 20 47

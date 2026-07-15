@@ -1,5 +1,6 @@
 // Native YM2151 reference-vector generator using the vendored MAME/ymfm core.
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdio>
@@ -13,6 +14,7 @@
 #include <vector>
 
 #include "ymfm_opm.h"
+#include "ymfm_fm.ipp"
 
 namespace
 {
@@ -305,6 +307,201 @@ void emit_vectors(const std::string &trace_path, uint32_t samples)
         throw std::runtime_error("trace contains events beyond requested sample count");
 }
 
+uint32_t hash_event(uint32_t hash, const trace_event &event, uint8_t data)
+{
+    // FNV-1a over the exact native timestamp and adjusted register payload.
+    // A zero hash is reserved for codec frames that apply no writes.
+    for (uint32_t value : { event.sample, uint32_t(event.reg), uint32_t(data) })
+    {
+        for (uint32_t shift = 0; shift < 32; shift += 8)
+        {
+            hash ^= (value >> shift) & 0xff;
+            hash *= 16'777'619U;
+        }
+    }
+    return hash;
+}
+
+class perceptual_renderer
+{
+public:
+    void render(inspectable_ym2151 &chip, inspectable_ym2151::output_data &output)
+    {
+        static constexpr std::array<uint16_t, 8> kAlgorithmOps = {
+            0x035, 0x03a, 0x064, 0x071, 0x131, 0x313, 0x301, 0x380
+        };
+        auto &engine = chip.engine();
+        auto &regs = engine.regs();
+        output.clear();
+
+        for (uint32_t channel = 0; channel < 8; ++channel)
+        {
+            // The perceptual kernel advances feedback once per produced codec
+            // frame, not once per exact native sample.
+            m_feedback_0[channel] = m_feedback_1[channel];
+            m_feedback_1[channel] = m_feedback_in[channel];
+
+            const std::array<uint32_t, 4> raw = {
+                channel, channel + 16, channel + 8, channel + 24
+            };
+            const uint32_t am_offset = regs.lfo_am_offset(channel);
+            const uint32_t feedback = regs.ch_feedback(channel);
+            int32_t modulation = feedback == 0 ? 0
+                : (m_feedback_0[channel] + m_feedback_1[channel]) >> (10 - feedback);
+
+            std::array<int32_t, 8> operator_output{};
+            operator_output[1] = m_feedback_in[channel] = quantized_volume(
+                *engine.debug_operator(raw[0]), modulation, am_offset);
+
+            const uint16_t topology = kAlgorithmOps[regs.ch_algorithm(channel)];
+            modulation = operator_output[(topology >> 0) & 1] >> 1;
+            operator_output[2] = quantized_volume(
+                *engine.debug_operator(raw[1]), modulation, am_offset);
+            operator_output[5] = operator_output[1] + operator_output[2];
+
+            modulation = operator_output[(topology >> 1) & 7] >> 1;
+            operator_output[3] = quantized_volume(
+                *engine.debug_operator(raw[2]), modulation, am_offset);
+            operator_output[6] = operator_output[1] + operator_output[3];
+            operator_output[7] = operator_output[2] + operator_output[3];
+
+            int32_t result;
+            if (regs.noise_enable() && channel == 7)
+                result = engine.debug_operator(raw[3])->compute_noise_volume(am_offset);
+            else
+            {
+                modulation = operator_output[(topology >> 4) & 7] >> 1;
+                result = quantized_volume(
+                    *engine.debug_operator(raw[3]), modulation, am_offset);
+            }
+
+            if ((topology & 0x080) != 0)
+                result = std::clamp(result + operator_output[1], -32768, 32767);
+            if ((topology & 0x100) != 0)
+                result = std::clamp(result + operator_output[2], -32768, 32767);
+            if ((topology & 0x200) != 0)
+                result = std::clamp(result + operator_output[3], -32768, 32767);
+
+            if (regs.ch_output_0(channel))
+                output.data[0] += result;
+            if (regs.ch_output_1(channel))
+                output.data[1] += result;
+        }
+        output.roundtrip_fp();
+    }
+
+private:
+    static int32_t quantized_volume(ymfm::fm_operator<ymfm::opm_registers> &op,
+        int32_t modulation, uint32_t am_offset)
+    {
+        // ymfm addresses a 1024-step logical waveform. Clearing its low two
+        // phase bits projects that address onto the DSP56001's 256-step ROM.
+        const uint32_t phase = (op.phase() + modulation) & ~uint32_t(3);
+        return op.compute_volume(phase, am_offset);
+    }
+
+    std::array<int32_t, 8> m_feedback_0{};
+    std::array<int32_t, 8> m_feedback_1{};
+    std::array<int32_t, 8> m_feedback_in{};
+};
+
+void emit_codec_vectors(const std::string &trace_path, uint32_t frames,
+    int32_t algorithm_override, int32_t feedback_override, bool perceptual)
+{
+    if (algorithm_override < -1 || algorithm_override > 7)
+        throw std::runtime_error("algorithm override must be 0-7");
+    if (feedback_override < -1 || feedback_override > 7)
+        throw std::runtime_error("feedback override must be 0-7");
+
+    const auto events = load_trace(trace_path);
+    oracle_interface intf;
+    inspectable_ym2151 chip(intf);
+    chip.reset();
+
+    // Match the Falcon codec exactly: 25.175 MHz / 4 / 128. The rational
+    // native-to-codec schedule is represented by 1280/1007 and is the same
+    // zero-order policy used by ssi_render_frame in the exact DSP path.
+    constexpr uint32_t kCodecNumerator = 1280;
+    constexpr uint32_t kCodecDenominator = 1007;
+    constexpr double kCodecRate = 25'175'000.0 / 4.0 / 128.0;
+    std::cout << "# ymfm YM2151 "
+              << (perceptual ? "codec-rate perceptual projection" : "exact codec reference")
+              << "; native_rate="
+              << chip.sample_rate(kX68000Clock)
+              << "; codec_rate=" << std::fixed << std::setprecision(6) << kCodecRate
+              << "; ratio=" << kCodecNumerator << '/' << kCodecDenominator
+              << "; event_policy=before_exact_native_sample; trace=" << trace_path;
+    if (algorithm_override >= 0)
+        std::cout << "; algorithm=" << algorithm_override;
+    if (feedback_override >= 0)
+        std::cout << "; feedback=" << feedback_override;
+    std::cout << '\n';
+    std::cout << "frame\tnative_sample\tevent_count\tevent_hash\tleft\tright"
+              << "\tlfo_am\tnoise_state";
+    for (uint32_t op = 0; op < 4; ++op)
+        std::cout << "\top" << op << "_phase\top" << op << "_step\top" << op
+                  << "_env\top" << op << "_state";
+    std::cout << '\n';
+
+    size_t event_index = 0;
+    uint32_t native_sample = 0;
+    uint32_t resample_phase = 0;
+    inspectable_ym2151::output_data output{};
+    perceptual_renderer renderer;
+    for (uint32_t frame = 0; frame < frames; ++frame)
+    {
+        uint32_t event_count = 0;
+        uint32_t event_hash = 2'166'136'261U;
+        uint32_t last_native_sample = native_sample;
+        resample_phase += kCodecNumerator;
+        do
+        {
+            resample_phase -= kCodecDenominator;
+            while (event_index < events.size() && events[event_index].sample == native_sample)
+            {
+                const auto &event = events[event_index++];
+                uint8_t data = event.data;
+                if (event.reg == 0x20)
+                {
+                    if (algorithm_override >= 0)
+                        data = uint8_t((data & ~0x07) | algorithm_override);
+                    if (feedback_override >= 0)
+                        data = uint8_t((data & ~0x38) | (feedback_override << 3));
+                }
+                write_register(chip, event.reg, data);
+                event_hash = hash_event(event_hash, event, data);
+                ++event_count;
+            }
+
+            chip.generate(&output);
+            intf.advance(64);
+            last_native_sample = native_sample++;
+        }
+        while (resample_phase >= kCodecDenominator);
+
+        if (perceptual)
+            renderer.render(chip, output);
+
+        std::cout << std::dec << frame << '\t' << last_native_sample << '\t'
+                  << event_count << '\t' << (event_count == 0 ? 0 : event_hash)
+                  << '\t' << output.data[0] << '\t' << output.data[1]
+                  << '\t' << chip.engine().regs().lfo_am_offset(0)
+                  << '\t' << chip.engine().regs().noise_state();
+        for (uint32_t raw : kLogicalToRawOperator)
+        {
+            auto *op = chip.engine().debug_operator(raw);
+            std::cout << '\t' << op->phase()
+                      << '\t' << op->debug_cache().phase_step
+                      << '\t' << op->debug_eg_attenuation()
+                      << '\t' << static_cast<uint32_t>(op->debug_eg_state());
+        }
+        std::cout << '\n';
+    }
+
+    if (event_index != events.size())
+        throw std::runtime_error("trace contains events beyond requested codec frame count");
+}
+
 } // anonymous namespace
 
 int main(int argc, char **argv)
@@ -327,11 +524,35 @@ int main(int argc, char **argv)
             emit_vectors(argv[2], static_cast<uint32_t>(std::stoul(argv[3])));
             return 0;
         }
+        if (argc >= 4 && (std::string(argv[1]) == "--codec-vectors"
+            || std::string(argv[1]) == "--perceptual-vectors"))
+        {
+            const bool perceptual = std::string(argv[1]) == "--perceptual-vectors";
+            int32_t algorithm_override = -1;
+            int32_t feedback_override = -1;
+            for (int arg = 4; arg < argc; ++arg)
+            {
+                const std::string option = argv[arg];
+                if (option == "--algorithm" && arg + 1 < argc)
+                    algorithm_override = static_cast<int32_t>(std::stol(argv[++arg]));
+                else if (option == "--feedback" && arg + 1 < argc)
+                    feedback_override = static_cast<int32_t>(std::stol(argv[++arg]));
+                else
+                    throw std::runtime_error("invalid --codec-vectors option: " + option);
+            }
+            emit_codec_vectors(argv[2], static_cast<uint32_t>(std::stoul(argv[3])),
+                algorithm_override, feedback_override, perceptual);
+            return 0;
+        }
 
         std::cerr << "usage:\n"
                   << "  ym2151_oracle --emit-m68k ATTACK_TRACE NOISE_TRACE CSM_TRACE VIBRATO_TRACE\n"
                   << "  ym2151_oracle --phase-hex\n"
-                  << "  ym2151_oracle --vectors TRACE SAMPLES\n";
+                  << "  ym2151_oracle --vectors TRACE SAMPLES\n"
+                  << "  ym2151_oracle --codec-vectors TRACE FRAMES"
+                     " [--algorithm 0-7] [--feedback 0-7]\n"
+                  << "  ym2151_oracle --perceptual-vectors TRACE FRAMES"
+                     " [--algorithm 0-7] [--feedback 0-7]\n";
         return 2;
     }
     catch (const std::exception &error)

@@ -105,12 +105,21 @@ twice per native sample and substitutes its latched sign for channel 7 operator
 `tools/ym2151_oracle.cpp` subclasses the vendored `ymfm::ym2151` only to expose
 its existing debug operator state. It is linked directly with `ymfm_opm.cpp`;
 there is no independent host reimplementation of the chip math. The build uses
-it in two ways:
+it in four ways:
 
-- `--emit-m68k ATTACK_TRACE NOISE_TRACE CSM_TRACE` produces the expected
-  phase-step and stereo tone/noise/CSM checkpoint constants included by the
-  TOS smoke program;
+- `--emit-m68k ATTACK_TRACE NOISE_TRACE CSM_TRACE VIBRATO_TRACE` produces the
+  expected phase-step and stereo tone/noise/CSM/vibrato checkpoint constants
+  included by the TOS smoke program;
 - `--vectors TRACE SAMPLES` produces stereo output plus phase, phase step,
-  envelope attenuation, and envelope state for all four channel operators.
+  envelope attenuation, and envelope state for all four channel operators;
+  and
+- `--codec-vectors TRACE FRAMES [--algorithm N] [--feedback N]` emits exact
+  output and operator/control state at the Falcon codec cadence, including the
+  native-sample and ordered-write marker consumed by every frame; and
+- `--perceptual-vectors TRACE FRAMES [--algorithm N] [--feedback N]` retains
+  that exact boundary state but independently renders 256-step sine lookup,
+  codec-rate feedback/topology, panning, noise, and YM3012 output.
 
-This makes the MAME source both the documented and executable ground truth.
+`tools/compare_ym2151_realtime.py` validates the resulting perceptual corpus
+and compares future DSP captures on state/rate and spectral boundaries. This
+makes the MAME source both the documented and executable ground truth.

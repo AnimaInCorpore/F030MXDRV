@@ -23,6 +23,15 @@ it for an indirect memory access. The same scheduling discipline is used for
 the `Nn` offsets in `src/dsp/ym2151.asm`. Where there is no useful independent
 instruction, the core inserts a `NOP` before `x:(Rn+Nn)` or `y:(Rn+Nn)`.
 
+Indexed and post-update addressing only pair same-numbered registers:
+`(Rn+Nn)` and `(Rn)+Nn` exist, but `(R7+N5)` does not assemble. Address
+arithmetic also always applies the pointer's own `Mn` modifier, so an indexed
+access through a modulo pointer must keep base plus offset inside one modulo
+block. Both rules shaped the decoded-control state layout of protocol
+command `$17`: its per-operator arrays are operator-major so the channel's
+feedback pointer can index them, and its modulo-sensitive tables are placed
+so a stride-8 walk never leaves a 64-word block.
+
 ## Hardware loops
 
 The `DO` instruction description (manual pages A-63 through A-65) confirms that
@@ -106,7 +115,7 @@ channels, preloads the new block's first left word, and restores `$5a00`.
 Buffer pointers use `r6/r7`; the phase-cache loop owns `r4`, so sharing that
 register would displace the refill position during every YM sample.
 
-Protocol v12 implements the event shape with a rolling clock. A refillable
+Protocol v17 implements the event shape with a rolling clock. A refillable
 32-entry ring FIFO stores an absolute 16-bit native-sample time beside each
 packed register write. Entries must be in nondecreasing modular order and
 within the 32,767-sample future horizon; all writes due at a boundary are
@@ -183,11 +192,13 @@ M1(feedback)->C1->M2->C2 channel for 2048 codec frames in operator-major
 place. Feedback and modulation are applied on every frame; operator gains are
 held for each block and envelope evolution is deliberately outside this
 synthesis-only spike. The carrier writes interleaved stereo into the reused
-audio buffers, and the reply is that block's checksum (`$27d93b`), gated by
+audio buffers, and the reply is that block's checksum (`$0f2666`), gated by
 the smoke suite.
 
-The optimized loop splits feedback history across internal X/Y memory so it
-can fetch and update both words with the modulator ring, prefetches the next
+The optimized loop stores feedback history across internal X/Y memory at its
+already-divided 1/8 table-index depth, so both words load together and their
+sum feeds the phase without three hot-loop shifts. It fetches and updates both
+words with the modulator ring, prefetches the next
 ring word beside each modulated-stage `MPY`, transfers that word into `A` while
 storing the previous result, and overlaps the carrier's left output store with
 its right-pan shift. A `$ff` address mask keeps every indexed read inside the
@@ -198,12 +209,13 @@ block restores exact boundary phase while the intermediate error stays below
 0.012 ROM step. Command setup temporarily enables that ROM, then restores the
 external map and rebuilds the cache words overlaid by the 48-bit spike state.
 
-Hatari measures 83,451 instruction cycles for the block, or 40.75 cycles per
-channel/frame — a 1.04x surcharge over the 39.16-cycle four-carrier floor for
-feedback, serial modulation, masking, stereo stores, and block overhead. This
-is 32.2% below the first 60.10-cycle implementation. The linear eight-channel
-projection is 325.98 cycles against the 326.27-cycle codec-frame budget, a
-bare 0.09% synthesis margin. Envelope evolution, LFO/noise, queued-write,
+Hatari measures 77,307 instruction cycles for the block, or 37.75 cycles per
+channel/frame. This is 37.2% below the first 60.10-cycle implementation and
+1.41 cycles below the generic 39.16-cycle four-carrier floor because the block
+stages eliminate fractional-ring traffic from every operator. The linear
+eight-channel projection is 301.98 cycles against the 326.27-cycle codec-frame
+budget, leaving 24.29 cycles (7.44%) of synthesis margin. Envelope evolution,
+LFO/noise, queued-write,
 SSI, and event-service costs are still absent, so this closes the arithmetic
 spike gap rather than proving an integrated real-time renderer.
 
@@ -226,11 +238,107 @@ test vector inside signed full scale. The deterministic reply is `$89eb00`.
 
 Hatari measures 77,211 instruction cycles, or 37.70 cycles per channel/frame.
 The linear eight-channel projection is 301.61 cycles per codec frame, leaving
-24.66 cycles (7.56%) of synthesis headroom. This is 7.48% cheaper than the
-fully serial algorithm-0 shape and establishes useful carrier-specialization
-headroom, but still excludes envelope, LFO/noise, queued-write, SSI, and event
-service. Algorithms 1-6 need their own mixtures of the measured serial and
-carrier stage shapes before integration.
+24.66 cycles (7.56%) of synthesis headroom. This is 0.13% cheaper than the
+optimized fully serial algorithm-0 shape and establishes useful
+carrier-specialization headroom, but still excludes envelope, LFO/noise,
+queued-write, SSI, and event service.
+
+### Algorithms 1-6 mixed-topology spikes
+
+`make profile-dsp-rt4` captures protocol command `$16` once for each selector
+1-6 and writes the reports below
+`build/dsp-profile-rt4/algorithm-*/report.txt`. The six outer loops compose
+shared feedback, serial-modulator, independent-carrier, carrier-accumulation,
+and stereo-output stages while retaining separate listing symbols for Hatari's
+cycle brackets. Their deterministic replies are checked by the normal smoke
+test.
+
+Operator 1 stores its output at the already-divided 1/8 feedback depth. That
+keeps the same feedback strength as the three shifts in command `$14`, removes
+those shifts from every mixed-topology frame, and still gives later operators
+non-zero table-index modulation. Algorithms 1-3 use one internal-X ring for
+their fan-in paths. Algorithms 4 and 5 instead preserve reusable modulation in
+the internal-Y ring at `Y:$00c0-$00ff` and accumulate carriers in internal X.
+After the modulated phase selects a sine entry, the phase `MAC` preloads the X
+carrier accumulation before the indexed Y sine-ROM read, avoiding the Y/Y
+memory conflict in the first dual-branch implementation. Algorithm 6 reuses
+the direct X carrier-accumulation stage from command `$15` after its one serial
+branch.
+
+| Algorithm | Channel cycles/frame | Eight-channel projection | Synthesis headroom |
+| --- | ---: | ---: | ---: |
+| 1 | 37.00 | 295.99 | 9.28% |
+| 2 | 37.98 | 303.87 | 6.87% |
+| 3 | 37.00 | 295.99 | 9.28% |
+| 4 | 38.00 | 303.99 | 6.83% |
+| 5 | 39.05 | 312.37 | 4.26% |
+| 6 | 35.98 | 287.86 | 11.77% |
+
+All six mixed topologies fit their linear eight-channel synthesis projection.
+After algorithm 0's scaled-feedback optimization, algorithm 5 is the overall
+isolated worst case at 39.05 cycles and leaves 4.26%. These are still
+synthesis-only results: block-rate envelope work, LFO/noise, queued writes,
+SSI, saturation, and event service are not included.
+
+### Live-SSI eight-channel fully decoded control gate
+
+`make profile-dsp-rt5` brackets protocol command `$17` between
+`rt5_profile_loop_start` and `rt5_profile_loop_done` and writes
+`build/dsp-profile-rt5/report.txt`. It is the first profile to execute eight
+channels, one for each algorithm, rather than projecting one channel linearly.
+The sine ROM
+moves to `r0`, leaving `r6/m6` exclusively owned by the real two-word SSI fast
+interrupt while buffer A loops. Thirty-two long phases and eight feedback
+pairs overlay the exact renderer's internal cache/scratch range at
+`L:$0054-$007b`; the cache is rebuilt before returning to the command loop.
+Both-output carriers reuse the internal-Y algorithm-4/5 branch ring. Left-only
+and right-only carriers accumulate into host-prepared planar PDX streams in
+external X/Y memory, which the final pass combines with the common ring and
+interleaves into the inactive SSI buffer. All profile arrays remain inside
+Falcon's 8,192-word X/Y reservations. The right stream temporarily overlays
+external-Y table storage, so the packed table is backed up in X and expanded
+again before the exact renderer resumes.
+
+Each 64-frame block services one ordered write from a profile-local FIFO,
+advances the drift-free 1280:1007 native clock, a decoded-rate LFO, both
+decoded timers, and a maximum-length one-step-per-frame noise LFSR, then runs
+one three-instruction, 32-iteration loop that advances every decoded
+per-operator envelope level by its decoded step while rebuilding every
+PM-adjusted per-operator phase increment. Pitch state is operator-major
+(slot = operator * 8 + channel), so each algorithm body preloads its stages'
+increments through the channel's feedback pointer as `y:(r2+n2)` beside the
+existing `x:(r7+n7)` gain preload, and the channel-control read rides the
+parallel Y-bank feedback pointer through `(r4+n4)`. The 32-event fixture
+covers every decoded register class: eight `$20-$27` algorithm/pan rewrites,
+five four-band total-level writes, four KC and two KF events that rebuild
+four base increments from the exact expanded `opm_phase_step` table with
+octave shift and doubled per-operator multiplier, four key on/off events
+rewriting decoded envelope levels and slopes, one write from each of the
+four envelope-rate groups translated through the raw-slot map into signed
+class-shifted steps, LFO rate/depth/waveform writes, and Timer B plus timer
+control load/run/status handling. The scaled `$19` PM depth multiplies the
+low eight control bits into this block's signed increment offset, and
+control bit 16 still selects full or 0.75 AM gain in all four stages.
+Full-accumulator moves invoke the DSP56001 limiter only after the complete
+mix. The exact 64-step Galois noise transform is applied through three
+6/6/5-bit slice tables that command setup derives from the x^17+x^14+1 step
+function itself — 17 single-bit columns advanced 64 steps, then a doubling
+fill — so no noise-table words occupy the bounded P-memory image. Cleanup
+disables SSI, reads SSISR and writes TX to clear a latched underrun,
+restores the external Y map, and rebuilds the exact phase cache, including
+the internal-Y frequency-cache words the decoded step/increment arrays
+overlay. The deterministic reply is `$791bf5`.
+
+Hatari measures 667,837 instruction cycles for 2,048 frames, or 326.09 cycles
+per frame against the 326.27-cycle budget. The 41.63 ms modeled block fits
+its 41.65 ms period with 0.18 cycles/frame (0.055%) remaining. Every decoded
+register class the real transport must apply now executes inside the budget
+beside live SSI, planar PDX mixing, and saturation, establishing full
+control feasibility for the fixture workload. The margin is deliberately
+reported at its knife-edge value: the next identified recovery lever is a
+write-first common-ring pass that removes the per-block 64-word clear, and
+noise-frequency decode plus per-frame-accurate envelope curvature remain
+outside this gate.
 
 ## Embedded second-stage program loader
 
@@ -242,11 +350,13 @@ final YM program deliberately begins at `P:$0080`, leaving
 through `Dsp_BlkUnpacked`.
 
 The generated stream starts with magic `$4d584c`, followed by a section count
-and address/count/data records. The current program contains 3,044 initialized
-words in five sparse P sections. After installing them, the loader replies
+and address/count/data records. The current program contains 4,993 initialized
+words in six sparse P sections and ends three words below the P:$1400 table
+boundary; the decoded-control gate fits only because its fixture data moved
+into P `dc` tables and the noise jump tables are derived at runtime. After installing them, the loader replies
 `$4c4f41` and jumps through the replaced reset vector at `P:$0000`. The build
 generator rejects a bootstrap above the 512-word XBIOS limit, any overlap with
-the reserved loader gap or `P:$0c80` table boundary, non-P sections, and
+the reserved loader gap or `P:$1400` table boundary, non-P sections, and
 sections outside 16-bit P memory.
 This removes the former 8 KiB converted-LOD ceiling from future specialized or
 unrolled kernels; the actual Falcon P-memory reservation is now the relevant

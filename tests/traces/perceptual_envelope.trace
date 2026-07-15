@@ -1,0 +1,14 @@
+# native sample  register  data
+# One carrier with visible attack, decay/sustain, and release segments.
+0 20 c7
+0 28 4c
+0 30 00
+0 58 01
+0 78 00
+0 98 1a
+0 b8 12
+0 d8 08
+0 f8 48
+0 08 40
+
+7000 08 00

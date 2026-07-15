@@ -1,0 +1,12 @@
+# native sample  register  data
+# A single sustained operator-4 carrier for long-term codec-rate pitch checks.
+0 20 c7
+0 28 4c
+0 30 00
+0 58 01
+0 78 00
+0 98 1f
+0 b8 00
+0 d8 00
+0 f8 0f
+0 08 40
