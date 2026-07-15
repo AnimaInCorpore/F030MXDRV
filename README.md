@@ -87,20 +87,26 @@ why the project publishes its own profiler.
   register class the transport must service**: `$20-$27` algorithm/pan,
   four-band total level, KC/KF pitch rebuilds from the exact phase-step
   table with octave shift and per-operator multipliers, key on/off, all four
-  envelope-rate groups, LFO rate/depth/waveform, and both timers. A single
-  three-instruction support loop advances all 32 decoded envelope levels
-  while rebuilding all 32 PM-adjusted per-operator phase increments each
-  block, and the exact 64-step noise transform runs through slice tables the
-  DSP derives from the LFSR step function at setup, keeping the program
-  inside its P-memory ceiling. Boundary service drains every due FIFO
-  write, and the fixture ends with an eight-event burst plus seven empty
-  boundaries to prove both paths. The gate executes every topology, changes
-  algorithm and pan during the live-SSI run, and measures **324.87 cycles
-  per frame** against the **326.27-cycle** budget — full decoded control
-  fits with **1.40 cycles (0.43%)** to spare after the write-first
-  mix-ring pass replaced the per-block ring clear with
-  bit-identical output. Noise-frequency decode and
-  per-frame envelope curvature stay outside the gate. The
+  envelope-rate groups, LFO rate/depth/waveform, and both timers — plus
+  **decoded envelope curvature**: envelope-active operators advance by
+  composed full-block affine steps from ymfm-derived per-rate tables, with
+  exponential attacks, block-boundary ADSR transitions,
+  activity-proportional retirement, and total-level gains rebuilt through a
+  2^(-x/64) decomposition only when the 10-bit attenuation moved. The
+  envelope pass runs from internal P RAM while the amortized decode helpers
+  and tables live in a program island at P:$2000, inside physically free
+  RAM that Falcon's external P/Y aliasing exposes above the Y reservation.
+  The exact 64-step noise transform runs through slice tables the DSP
+  derives from the LFSR step function at setup. Boundary service drains
+  every due FIFO write, and the fixture covers a seven-event burst, empty
+  boundaries, an eight-operator key-on transient that decays and retires,
+  a sustained decay tail, and a late release. Over the 128-block profile
+  the gate measures **319.97 cycles per frame** against the
+  **326.27-cycle** budget — full decoded control plus envelope curvature
+  fit with **6.30 cycles (1.9%)** to spare, and the prototype scores the
+  same block recurrence at MAE 2.99/1023, correlation 0.977, and 61-frame
+  transition lag against the exact ADSR reference, inside every comparator
+  boundary. Noise-frequency decode stays outside the gate. The
   exact-to-perceptual reference gate is present; capturing a complete
   integrated candidate remains required before playback integration.
 - MDX synchronization/modulation and real-time mixed-block production

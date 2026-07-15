@@ -300,13 +300,13 @@ external-Y table storage, so the packed table is backed up in X and expanded
 again before the exact renderer resumes.
 
 Each 64-frame block drains every due ordered write from a profile-local
-FIFO — the fixture schedules one write at each of the first 25 boundaries and
-an eight-event burst at boundary 24, the shape of a real MXDRV voice load —
-advances the drift-free 1280:1007 native clock, a decoded-rate LFO, both
-decoded timers, and a maximum-length one-step-per-frame noise LFSR, then runs
-one three-instruction, 32-iteration loop that advances every decoded
-per-operator envelope level by its decoded step while rebuilding every
-PM-adjusted per-operator phase increment. Pitch state is operator-major
+FIFO — the fixture schedules one write at each of the first 25 boundaries, a
+seven-event burst at boundary 24, the shape of a real MXDRV voice load, and
+a late boundary-90 key-off — advances the drift-free 1280:1007 native
+clock, a decoded-rate LFO, both decoded timers, and a maximum-length
+one-step-per-frame noise LFSR, runs one two-instruction, 32-iteration loop
+that rebuilds every PM-adjusted per-operator phase increment, and tail-calls
+the internal-P envelope pass described below. Pitch state is operator-major
 (slot = operator * 8 + channel), so each algorithm body preloads its stages'
 increments through the channel's feedback pointer as `y:(r2+n2)` beside the
 existing `x:(r7+n7)` gain preload, and the channel-control read rides the
@@ -314,11 +314,11 @@ parallel Y-bank feedback pointer through `(r4+n4)`. The 32-event fixture
 covers every decoded register class: eight `$20-$27` algorithm/pan rewrites,
 five four-band total-level writes, four KC and two KF events that rebuild
 four base increments from the exact expanded `opm_phase_step` table with
-octave shift and doubled per-operator multiplier, four key on/off events
-rewriting decoded envelope levels and slopes, one write from each of the
-four envelope-rate groups translated through the raw-slot map into signed
-class-shifted steps, LFO rate/depth/waveform writes, and Timer B plus timer
-control load/run/status handling. The scaled `$19` PM depth multiplies the
+octave shift and doubled per-operator multiplier, five key on/off edges
+driving real attack/release state, one write from each of the four
+envelope-rate groups that rebuilds the live affine constants when its class
+matches the operator's ADSR state, LFO rate/depth/waveform writes, and
+Timer B plus timer control load/run/status handling. The scaled `$19` PM depth multiplies the
 low eight control bits into this block's signed increment offset, and
 control bit 16 still selects full or 0.75 AM gain in all four stages.
 Full-accumulator moves invoke the DSP56001 limiter only after the complete
@@ -328,15 +328,42 @@ function itself — 17 single-bit columns advanced 64 steps, then a doubling
 fill — so no noise-table words occupy the bounded P-memory image. Cleanup
 disables SSI, reads SSISR and writes TX to clear a latched underrun,
 restores the external Y map, and rebuilds the exact phase cache, including
-the internal-Y frequency-cache words the decoded step/increment arrays
-overlay. The deterministic reply is `$7959b3`.
+the internal-Y frequency-cache words the decoded multiplier/increment arrays
+overlay. The deterministic reply is `$ab5f30`.
 
-Hatari measures 665,327 instruction cycles for 2,048 frames, or 324.87 cycles
-per frame against the 326.27-cycle budget. The 41.47 ms modeled block fits
-its 41.65 ms period with 1.40 cycles/frame (0.43%) remaining. Every decoded
-register class the real transport must apply now executes inside the budget
-beside live SSI, planar PDX mixing, and saturation, establishing full
-control feasibility for the fixture workload. The write-first common-ring
+Decoded envelope curvature runs as a block-boundary pass at `P:$0080` in
+internal P RAM, where instruction fetches avoid the external-memory penalty.
+Every envelope-active operator advances once per block by one composed
+full-block affine step, `level' = a*level + b` in 10.13 fixed point, whose
+per-rate constants `tools/generate_envelope_tables.py` composes from the
+exact ymfm per-tick recurrence over the average 27.117 envelope ticks per
+block: attack multiplies toward its exact fixed point at -1 (the addend is
+derived on the DSP as `a - 1`), and decay/sustain/release accumulate exact
+mean increments. Boundary checks apply the ADSR transitions — attack
+completes below four attenuation units in the block where the exact
+recurrence lands on zero, decay compares a sustain target cached at decay
+entry, and anything reaching full attenuation pins, silences its gains, and
+retires. A zero addend proves an operator can never move again, so it
+retires after one gain rebuild; retirement swaps the active-list tail into
+the walked slot. Gains rebuild as `tl * 2^(-level/64)` through a generated
+64-entry fraction table and per-octave shift, and only when the 10-bit
+attenuation actually moved. The amortized helpers — effective-rate decode
+with KSR, key/rate/total-level event handlers, and the activation list —
+live in the external island with the generated tables. The capture harness
+derives mid-block levels analytically from the same defining recurrence, so
+no mid-block state is stored.
+
+Hatari measures 2,621,166 instruction cycles for 8,192 frames over 128
+blocks, or 319.97 cycles per frame against the 326.27-cycle budget, leaving
+6.30 cycles (1.9%). The 163.39 ms modeled span fits its 166.61 ms period.
+The 128-block window amortizes the 32-event fixture at a realistic MXDRV
+write density, and the envelope fixture exercises an eight-operator key-on
+transient that decays to its sustain levels and retires, one sustained D2R
+decay tail, and a late release that caps and retires — so steady-state
+envelope cost is activity-proportional rather than a permanent 32-operator
+tax. Every decoded register class the real transport must apply executes
+inside the budget beside live SSI, planar PDX mixing, saturation, and
+decoded envelope curvature. The write-first common-ring
 pass has been spent: the block's first both-panned carrier stores instead of
 accumulating, the rare unwritten ring is cleared once at emission, and both
 write variants keep full-accumulator limiter moves so the checksum gate
@@ -344,8 +371,35 @@ proves the output bit-identical. Recovering the lever and the boundary drain
 cost P-memory pressure: the key-event decode became a four-iteration
 mask-shift loop, the fixed timer-register reads use absolute addressing, the
 total-level gain bases moved into a four-entry P table, and the program now
-ends one word below the P:$1400 table boundary. Noise-frequency decode plus
-per-frame-accurate envelope curvature remain outside this gate.
+ends one word below the P:$1400 table boundary; the envelope work later
+reopened that room by moving the cold event-decode bodies and fixture tables
+into the external island described below. Noise-frequency decode remains
+outside this gate.
+
+## Falcon external memory aliasing and the P:$2000 island
+
+Hatari's Falcon decode (and the hardware it models) maps external P to the
+32K SRAM directly, external Y onto the same lower 16K word for word, and
+external X onto the upper 16K at `phys = addr + $4000`. The `P:$1400` ceiling
+therefore only protects the Y-resident table region: everything between the
+end of the external-Y reservation at `Y:$1f7f` and the envelope arrays at
+`Y:$2400` is physically free program space. The envelope island at
+`P:$2000-$23ff` holds the generated per-rate tables, the amortized envelope
+helpers, the relocated cold event-decode bodies, and the rt5 fixtures; the
+stage-two generator admits P sections inside `[$2000,$2400)` and still
+rejects everything else above `$1400`. The uninitialized envelope arrays own
+`X:$2400`/`Y:$2400` (phys `$6400`/`$2400`), which nothing else maps.
+
+Two DSP56001 pitfalls bit during this work. REP with a register count of
+zero executes 65,536 times, and `tst` sees the whole 56-bit accumulator, so
+an octave count computed by fractional MPY must drop its A0/B0 fraction
+bits (`move b1,b`) before the zero guard. And TOS 4.02's `Dsp_BlkUnpacked`
+polls host-port TXDE only before its first word, then writes the rest of the
+block blind: any command whose receive loop starts more than about one
+host-write period after the command word consumes silently loses a word to
+the one-deep transmit latch. Protocol v18 gates every multi-word upload on a
+`$524459` ready token the DSP sends from immediately before its parked
+receive loop.
 
 ## Embedded second-stage program loader
 
@@ -357,15 +411,16 @@ final YM program deliberately begins at `P:$0080`, leaving
 through `Dsp_BlkUnpacked`.
 
 The generated stream starts with magic `$4d584c`, followed by a section count
-and address/count/data records. The current program ends one word below the
-P:$1400 table boundary; the decoded-control gate fits only because its fixture
-data moved into P `dc` tables, the noise jump tables are derived at runtime,
-and the write-first mix-ring and boundary-drain changes repaid their new code
-with the key-event, timer-decode, and gain-base word reclaims. After installing them, the loader replies
-`$4c4f41` and jumps through the replaced reset vector at `P:$0000`. The build
-generator rejects a bootstrap above the 512-word XBIOS limit, any overlap with
-the reserved loader gap or `P:$1400` table boundary, non-P sections, and
-sections outside 16-bit P memory.
+and address/count/data records. The main program stream now ends at
+`P:$13c1` — the internal-P envelope pass at `P:$0080` displaced the cold
+event-decode bodies and rt5 fixtures into the `P:$2000` island — and the
+stream carries the island as additional sparse sections. After installing
+them, the loader replies `$4c4f41` and jumps through the replaced reset
+vector at `P:$0000`. The build generator rejects a bootstrap above the
+512-word XBIOS limit, any overlap with the reserved loader gap, non-P
+sections, sections outside 16-bit P memory, and any section that neither
+stays below the `P:$1400` table boundary nor fits inside the declared
+`[$2000,$2400)` island.
 This removes the former 8 KiB converted-LOD ceiling from future specialized or
 unrolled kernels; the actual Falcon P-memory reservation is now the relevant
 limit.

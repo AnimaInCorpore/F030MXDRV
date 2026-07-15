@@ -69,9 +69,17 @@ dsp_render_mixed_loop:
         cmpa.l  a4,a3
         bcs     dsp_render_mixed_loop
 
+        ; TOS's Dsp_BlkUnpacked handshakes only its first word: exchange the
+        ; bare command for the DSP's parked-receiver token, then release the
+        ; PCM block. A wrong token is returned for the caller's check.
+        move.l  dsp_mixed_words,d0
+        bsr     dsp_exchange
+        cmp.l   #DSP_REPLY_BLOCK_READY,d0
+        bne     dsp_send_mixed_done
         clr.l   dsp_mixed_reply
-        Dsp_BlkUnpacked dsp_mixed_words,#DSP_MIX_TRANSFER_WORDS,dsp_mixed_reply,#1
+        Dsp_BlkUnpacked dsp_mixed_words+4,#DSP_MIX_TRANSFER_WORDS-1,dsp_mixed_reply,#1
         move.l  dsp_mixed_reply,d0
+dsp_send_mixed_done:
         rts
 
         bss

@@ -137,26 +137,26 @@ player_parse_return:
 
 ; Exercise command-tail boundaries in the no-argument conformance path.
 player_selftest:
-        lea     player_test_tail(pc),a0
+        lea     player_test_tail,a0
         bsr     player_parse_tail
         cmpi.l  #1,d0
         bne     player_selftest_error
         lea     player_mdx_filename,a0
-        lea     player_test_mdx(pc),a1
+        lea     player_test_mdx,a1
         bsr     player_compare_string
         tst.l   d0
         bne     player_selftest_error
         lea     player_pdx_filename,a0
-        lea     player_test_pdx(pc),a1
+        lea     player_test_pdx,a1
         bsr     player_compare_string
         tst.l   d0
         bne     player_selftest_error
 
-        lea     player_test_extra_tail(pc),a0
+        lea     player_test_extra_tail,a0
         bsr     player_parse_tail
         cmpi.l  #-1,d0
         bne     player_selftest_error
-        lea     player_test_empty_tail(pc),a0
+        lea     player_test_empty_tail,a0
         bsr     player_parse_tail
         tst.l   d0
         bne     player_selftest_error
@@ -165,7 +165,7 @@ player_selftest:
         ; path. Runtime bootstrap is embedded, but this artifact is small enough
         ; for the MDX buffer and keeps GEMDOS seek/read coverage in conformance
         ; mode. Reset discards it before the fixture song is installed.
-        lea     player_test_filename(pc),a0
+        lea     player_test_filename,a0
         lea     mxdrv_mdx_buffer,a1
         move.l  #PLAYER_MDX_CAPACITY,d1
         moveq   #2,d2

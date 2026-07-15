@@ -47,8 +47,14 @@ start:
         cmp.l   #DSP_REPLY_HELLO,d0
         bne     protocol_failed
 
+        ; TOS's Dsp_BlkUnpacked handshakes only its first word, so ask for
+        ; the DSP's parked-receiver token before releasing the table block.
+        move.l  #DSP_CMD_LOAD_TABLES,d0
+        bsr     dsp_exchange
+        cmp.l   #DSP_REPLY_BLOCK_READY,d0
+        bne     protocol_failed
         clr.l   dsp_table_reply
-        Dsp_BlkUnpacked ym2151_table_upload,#YM_TABLE_UPLOAD_WORDS,dsp_table_reply,#1
+        Dsp_BlkUnpacked ym2151_table_upload+4,#YM_TABLE_UPLOAD_WORDS-1,dsp_table_reply,#1
         move.l  dsp_table_reply,d0
         cmp.l   #DSP_REPLY_OK,d0
         bne     protocol_failed
@@ -1284,9 +1290,6 @@ clock_samples:
 
         data
 
-        include "ym2151_host_tables.i"
-        include "dsp_stage2_image.i"
-
 banner:
         dc.b    27,'E','F030MXDRV DSP core',13,10
         dc.b    '68030 MXDRV host + DSP56001 YM2151',13,10,13,10,0
@@ -1531,6 +1534,12 @@ rt4_algorithm_checksums:
         dc.l    DSP_RT4_ALG1_CHECKSUM,DSP_RT4_ALG2_CHECKSUM
         dc.l    DSP_RT4_ALG3_CHECKSUM,DSP_RT4_ALG4_CHECKSUM
         dc.l    DSP_RT4_ALG5_CHECKSUM,DSP_RT4_ALG6_CHECKSUM
+
+; The two large generated blobs close the data section so every small data
+; label above stays within 16-bit PC-relative reach of the code; both blobs
+; are only referenced through pea/lea at bounded displacements.
+        include "ym2151_host_tables.i"
+        include "dsp_stage2_image.i"
 
         bss
 

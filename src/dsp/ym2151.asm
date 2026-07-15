@@ -289,15 +289,16 @@ rt5_timer_control:
 rt5_timer_status:
         ds      1
 
-; Per-operator decoded envelope steps and the block's PM-adjusted phase
-; increments overlay the exact renderer's internal-Y frequency caches, which
-; rt2_restore_common rebuilds before the command replies. Both arrays use
-; operator-major order (slot = operator * 8 + channel), so the render bodies
-; can read one increment per 64-frame stage through the channel's feedback
-; pointer as y:(r2+n2) with a statically known negative offset per operator
-; position; indexed DSP56001 addressing only pairs same-numbered registers.
+; Per-operator half-block envelope multipliers and the block's PM-adjusted
+; phase increments overlay the exact renderer's internal-Y frequency caches,
+; which rt2_restore_common rebuilds before the command replies. Both arrays
+; use operator-major order (slot = operator * 8 + channel), so the render
+; bodies can read one increment per 64-frame stage through the channel's
+; feedback pointer as y:(r2+n2) with a statically known negative offset per
+; operator position; indexed DSP56001 addressing only pairs same-numbered
+; registers.
         org     y:$0
-rt5_envelope_step:
+rt5_env_a:
         ds      32
 rt5_operator_increment:
         ds      32
@@ -456,6 +457,41 @@ rt5_noise_jump_mid6:
 rt5_pan_right_stream:
         ds      DSP_RT_PROFILE_FRAMES
 
+; Envelope-active bookkeeping lives in the physically free window above the
+; 8,192-word external X/Y reservations. External P aliases external Y word
+; for word on the Falcon (and external X aliases P at +$4000), so phys
+; $2000-$23ff carries the envelope code island while these uninitialized
+; arrays own phys $2400 (Y) and $6400 (X); the stage-two island check keeps
+; the code below Y:$2400. Both base addresses are 64-aligned so (r5+n5)
+; state reads stay inside one modulo block under the render's m5=63.
+        org     x:$2400
+rt5_env_state:
+        ds      32                      ; bits 2:0 ADSR, bit 3 active, bit 4 keyed
+rt5_tl_base:
+        ds      32                      ; decoded 0.23 total-level amplitude
+rt5_active_list:
+        ds      32
+rt5_active_count:
+        ds      1
+rt5_active_index:
+        ds      1
+rt5_env_current:
+        ds      1                       ; operator index shared by the helpers
+rt5_env_slot:
+        ds      1
+rt5_env_rate:
+        ds      1
+rt5_env_key_phase:
+        ds      1
+
+        org     x:$2480
+rt5_env_target:
+        ds      32                      ; cached 10.13 sustain-level target
+
+        org     y:$2400
+rt5_env_b:
+        ds      32                      ; signed 10.13 full-block addend
+
 ; Phase and cache live in opposite internal memory banks so the common no-PM
 ; clock path can fetch both in one DSP instruction cycle. External Y below the
 ; reserved table boundary aliases external program RAM on the Falcon, so the
@@ -472,6 +508,210 @@ ym_phase_step_cache:
 ; P:$0040-$007f is reserved for the transient second-stage loader. It remains
 ; unused after bootstrap and keeps that loader out of the interrupt vectors.
         org     p:$80
+
+; -----------------------------------------------------------------------------
+; Block-boundary envelope pass
+; -----------------------------------------------------------------------------
+; This is the only recurring per-block envelope cost, so it leads the program
+; inside internal P RAM ($0080-$01ff) where instruction fetches avoid the
+; external-memory penalty; the amortized event-decode helpers live in the
+; external island instead. Each envelope-active operator advances by one
+; composed full-block affine step - the capture harness derives mid-block
+; levels analytically from the same defining recurrence - and its AM gain
+; pair is rebuilt only when the 10-bit attenuation actually moved. R4 walks
+; the active list; a retirement swaps the list tail into the current slot.
+rt5_env_scan:
+        move    x:rt5_active_count,a
+        move    #>rt5_active_list,x0
+        add     x0,a
+        move    a1,y1                   ; list end, held across the helpers
+        move    #rt5_active_list,r4
+rt5_env_scan_next:
+        move    r4,b
+        cmp     y1,b                    ; walker - end
+        jge     rt5_env_scan_done
+        move    x:(r4),b                ; operator index
+        ; fall through: the advance body is fused into the walk, ending in
+        ; either rt5_env_keep_done or a retirement jump back to this loop
+        move    b1,n1
+        move    b1,n2
+        move    b1,n3
+        move    b1,n5
+        ; a unity multiplier with a zero addend can never move the level
+        ; again: rebuild the gain once and retire the operator
+        move    #0,r2
+        nop
+        move    y:(r2+n2),x0            ; block multiplier
+        move    #rt5_env_b,r2
+        nop
+        move    y:(r2+n2),a             ; block addend
+        tst     a                       ; a zero addend can never move the
+        jne     rt5_env_op_moving       ; level: attack addends are a-1 and
+        jsr     rt5_env_gain_op         ; zero decay addends pair with unity
+        jmp     rt5_env_remove
+rt5_env_op_moving:
+        move    #rt5_envelope_level,r1
+        nop
+        move    x:(r1+n1),y0            ; pre-advance level, kept for the
+                                        ; gain-rebuild change test below
+        mac     x0,y0,a                 ; end-of-block level
+        move    #rt5_env_state,r5
+        move    #>$7fe000,x1            ; 1023 in 10.13 units
+        move    x:(r5+n5),b
+        jset    #2,b1,rt5_env_cap_path  ; release
+        jclr    #1,b1,rt5_env_attack_path
+        jset    #0,b1,rt5_env_cap_path  ; sustain
+        ; decay: the silence cap first, then the sustain boundary against
+        ; the target the decay-entry reload cached for this operator
+        cmp     x1,a
+        jge     rt5_env_retire_capped
+        move    #rt5_env_target,r3
+        nop
+        move    x:(r3+n3),x0
+        cmp     x0,a
+        jlt     rt5_env_store_keep
+        ; the decay reached its sustain level: keep the level, switch to D2R
+        move    x:(r5+n5),b
+        bset    #0,b1
+        move    b1,x:(r5+n5)
+        move    a1,x:(r1+n1)
+        jsr     rt5_env_transition_reload
+        jmp     rt5_env_finish_keep
+rt5_env_attack_path:
+        ; the affine attack converges past four attenuation units within the
+        ; block in which the exact recurrence lands on zero
+        move    #>$008000,x0
+        cmp     x0,a
+        jge     rt5_env_store_keep
+        clr     a
+        bclr    #0,b1
+        bset    #1,b1
+        move    b1,x:(r5+n5)
+        move    a1,x:(r1+n1)
+        jsr     rt5_env_transition_reload
+        jmp     rt5_env_finish_keep
+rt5_env_cap_path:
+        cmp     x1,a
+        jlt     rt5_env_store_keep
+rt5_env_retire_capped:
+        ; full attenuation: pin the level, silence both gain words directly
+        move    x1,a
+        move    a1,x:(r1+n1)
+        move    n2,b
+        move    #>rt5_env_gainmap,x0
+        add     x0,b
+        move    b1,r3
+        nop
+        movem   p:(r3),b
+        move    b1,n1
+        move    #rt5_operator_gain_full,r1
+        clr     a
+        move    a1,x:(r1+n1)
+        move    #rt5_operator_gain_attenuated,r1
+        nop
+        move    a1,x:(r1+n1)
+        jmp     rt5_env_remove
+rt5_env_store_keep:
+        move    a1,x:(r1+n1)
+        ; skip the gain rebuild while the 10-bit attenuation is unchanged
+        move    a1,x0
+        move    y0,b
+        eor     x0,b
+        move    #>$ffe000,y0
+        and     y0,b
+        jeq     rt5_env_keep_done
+rt5_env_finish_keep:
+        jsr     rt5_env_gain_op
+rt5_env_keep_done:
+        move    (r4)+
+        jmp     rt5_env_scan_next
+rt5_env_scan_done:
+        rts
+rt5_env_remove:
+        ; clear the active bit and swap the list tail into this slot
+        move    #rt5_env_state,r5
+        nop
+        move    x:(r5+n5),a
+        bclr    #3,a1
+        move    a1,x:(r5+n5)
+        move    x:rt5_active_count,a
+        move    #>1,x0
+        sub     x0,a
+        move    a1,x:rt5_active_count
+        move    a1,n0
+        move    #rt5_active_list,r0
+        move    y1,a
+        sub     x0,a
+        move    a1,y1                   ; the register-held end shrinks too
+        move    x:(r0+n0),b
+        move    b1,x:(r4)
+        jmp     rt5_env_scan_next
+
+; Rebuild both AM gain variants of the operator in N1 from its total-level
+; base and current envelope level: gain = tl * 2^(-level/64), decomposed
+; into the generated 64-entry fraction table and a per-octave shift.
+rt5_env_gain_op:
+        move    #rt5_envelope_level,r1
+        nop
+        move    x:(r1+n1),x0
+        move    #>$000400,y0
+        mpy     x0,y0,a                 ; integer level = level >> 13
+        move    #>1023,x0
+        cmp     x0,a
+        jge     rt5_env_gain_silent
+        move    a1,x0
+        move    #>$020000,y0
+        mpy     x0,y0,b                 ; octave = level >> 6
+        move    b1,b                    ; drop B0 fraction bits: REP of a
+                                        ; zero count would run 65536 times
+        move    #>$00003f,y0
+        and     y0,a
+        move    #>rt5_env_fraction,x0
+        add     x0,a
+        move    a1,r3
+        nop
+        movem   p:(r3),y0               ; 2^(-fraction/64)
+        move    #rt5_tl_base,r1
+        nop
+        move    x:(r1+n1),x0
+        mpy     x0,y0,a                 ; unshifted gain
+        tst     b
+        jeq     rt5_env_gain_shifted
+        move    b1,x0
+        rep     x0
+        asr     a
+rt5_env_gain_shifted:
+        move    a1,y0                   ; full gain
+        move    a,b
+        asr     a
+        asr     a
+        sub     a,b                     ; attenuated gain = 0.75 * full
+rt5_env_gain_store:
+        move    n1,a                    ; operator to channel-major index
+        move    #>rt5_env_gainmap,x0
+        add     x0,a
+        move    a1,r3
+        nop
+        movem   p:(r3),a
+        move    a1,n1
+        move    #rt5_operator_gain_full,r1
+        nop
+        move    y0,x:(r1+n1)
+        move    #rt5_operator_gain_attenuated,r1
+        nop
+        move    b1,x:(r1+n1)
+        rts
+rt5_env_gain_silent:
+        clr     b
+        move    b1,y0
+        jmp     rt5_env_gain_store
+
+; Boundary transitions call the island's rate decode with the operator
+; published in the helper mailbox.
+rt5_env_transition_reload:
+        move    n2,b
+        move    b1,x:rt5_env_current
+        jmp     rt5_env_reload_op
 
 start:
         movep   #1,x:m_pbc              ; enable the Falcon host port
@@ -683,6 +923,11 @@ command_query_lfo:
 ; Keeping immutable source data in the host executable leaves the constrained
 ; TOS DSP loader responsible only for code.
 command_load_tables:
+        ; TOS's Dsp_BlkUnpacked polls TXDE only before its first word, so the
+        ; host must not start a multi-word block until this handler is parked
+        ; in its receive loop; the READY token provides that guarantee.
+        move    #>DSP_REPLY_BLOCK_READY,a
+        jsr     send_reply
         move    #opm_uploaded_tables,r0
         do      #YM_TABLE_WORDS,command_load_tables_loop
         jclr    #0,x:m_hsr,*
@@ -1447,27 +1692,6 @@ rt4_independent_add_x_emit_done:
         move    b10,l:(r0)
         rts
 
-; Fixture data consumed once at command-17 setup: eight initial channel
-; control words and 32 ordered block-boundary writes covering every decoded
-; register class.
-rt5_channel_control_fixture:
-        dc      $000040,$0000c1,$0000c2,$000003
-        dc      $000044,$000085,$000006,$000007
-; Unattenuated per-slot gain bases in logical order M1, C1, M2, C2, matching
-; the values seeded by the operator-gain initialization below.
-rt5_gain_base_fixture:
-        dc      $000010,$000060,$000040,$080000
-rt5_event_fixture:
-        dc      $0220c1,$022182,$022203,$022344
-        dc      $0224c5,$022506,$022647,$022740
-        dc      $026010,$026933,$027255,$027b7f,$026477
-        dc      $02284a,$02295d,$022a3c,$022b65
-        dc      $023080,$023144
-        dc      $020878,$020801,$02081a,$020863
-        dc      $02801f,$02a90a,$02d205,$02fb8f
-        dc      $0218c6,$0219c0,$021b02
-        dc      $0212c8,$021433
-
 ; Derive the exact 64-step noise-LFSR jump tables from the x^17+x^14+1 step
 ; function. Each of the 17 state bits is advanced 64 steps to its jump
 ; column, then each slice table is filled by the standard doubling rule
@@ -1548,10 +1772,16 @@ rt5_clear_phase_done:
         move    a1,x:(r2)+
         move    a1,y:(r4)+
 rt5_clear_feedback_done:
+        ; Deterministic static attenuation spread: operator i starts at 8*i
+        ; units in the 10.13 level fixed point, so every initial gain is a
+        ; distinct decoded envelope product.
         move    #rt5_envelope_level,r1
-        do      #32,rt5_clear_envelopes_done
+        move    #>$010000,y0
+        do      #32,rt5_initialize_levels_done
         move    a1,x:(r1)+
-rt5_clear_envelopes_done:
+        add     y0,a
+rt5_initialize_levels_done:
+        clr     a
         move    a1,x:rt5_native_phase
         move    a1,x:rt5_lfo_phase
         move    a1,x:rt5_event_clock
@@ -1578,13 +1808,96 @@ rt5_clear_envelopes_done:
         move    #>$400000,a             ; $19 depth $40 is unity after MPY+ASL
         move    a1,x:rt5_pm_scale
 
-        ; Per-operator envelope steps start on the former shared +$100/block
-        ; slope; decoded key and rate events replace individual entries.
-        move    #rt5_envelope_step,r4
-        move    #>$000100,a
-        do      #32,rt5_initialize_steps_done
+        ; Envelope bookkeeping: unity multipliers, zero addends, and an
+        ; empty active list. Operators of channels 0-3 wait released for
+        ; their fixture key edges; channels 4-7 hold keyed static sustain so
+        ; half the mix is audible from the first block.
+        move    #0,r4
+        move    #>$7fffff,a
+        do      #32,rt5_initialize_env_a_done
         move    a1,y:(r4)+
-rt5_initialize_steps_done:
+rt5_initialize_env_a_done:
+        clr     a
+        move    #rt5_env_b,r4
+        do      #32,rt5_initialize_env_b_done
+        move    a1,y:(r4)+
+rt5_initialize_env_b_done:
+        move    a1,x:rt5_active_count
+        move    #rt5_env_state,r1
+        clr     b
+        move    #>1,x0
+        move    #>4,y0
+        move    #>7,x1
+        do      #32,rt5_initialize_env_state_done
+        move    b1,a
+        and     x1,a
+        cmp     y0,a
+        jge     rt5_env_state_keyed
+        move    #>$04,a                 ; released stasis
+        jmp     rt5_env_state_store
+rt5_env_state_keyed:
+        move    #>$13,a                 ; keyed static sustain
+rt5_env_state_store:
+        move    a1,x:(r1)+
+        add     x0,b
+rt5_initialize_env_state_done:
+
+        ; Deterministic decoded-rate register rows: KC/KF pitch context for
+        ; the KSR path and all four envelope-rate groups, so fixture key
+        ; edges attack and decay through reproducible effective rates.
+        move    #ym_regdata+$28,r1
+        move    #>$4a,a
+        do      #8,rt5_initialize_kc_done
+        move    a1,x:(r1)+
+        add     x0,a
+rt5_initialize_kc_done:
+        clr     a
+        move    #ym_regdata+$30,r1
+        do      #8,rt5_initialize_kf_done
+        move    a1,x:(r1)+
+rt5_initialize_kf_done:
+        move    #ym_regdata+$80,r1
+        clr     b
+        move    #>$14,y0
+        do      #32,rt5_initialize_ar_done
+        move    b1,a
+        and     x1,a
+        add     y0,a
+        move    a1,x:(r1)+
+        add     x0,b
+rt5_initialize_ar_done:
+        move    #ym_regdata+$a0,r1
+        clr     b
+        move    #>$18,y0
+        move    #>3,x1
+        do      #32,rt5_initialize_d1r_done
+        move    b1,a
+        and     x1,a
+        add     y0,a
+        move    a1,x:(r1)+
+        add     x0,b
+rt5_initialize_d1r_done:
+        ; D2R: one keyed operator keeps a perpetual slow sustained decay as
+        ; steady-state envelope evidence; every other operator freezes at
+        ; its sustain level and retires from the active list.
+        move    #ym_regdata+$c0,r1
+        move    #ym_regdata+$e0,r2
+        clr     b
+        move    #>8,y0
+        do      #32,rt5_initialize_d2r_done
+        move    b1,a
+        cmp     y0,a
+        jeq     rt5_env_d2r_slow
+        clr     a
+        jmp     rt5_env_d2r_store
+rt5_env_d2r_slow:
+        move    #>$04,a
+rt5_env_d2r_store:
+        move    a1,x:(r1)+
+        move    #>$4f,a                 ; D1L 4 with a fast, capping release
+        move    a1,x:(r2)+
+        add     x0,b
+rt5_initialize_d2r_done:
 
         ; Distinct per-operator base increments replace the former shared
         ; $9330 constant; KC/KF events rebuild four entries at a time. The
@@ -1636,7 +1949,7 @@ rt5_initialize_channel_controls_done:
 
         ; Schedule one ordered write at each of the first 25 block boundaries,
         ; then cluster the final eight at boundary 24 as one burst. The first
-        ; eight rewrite channel algorithm and pan while retaining one instance
+        ; seven rewrite channel algorithm and pan while retaining one instance
         ; of every topology; the remaining 24 cover every decoded register
         ; class: total level, key code, key fraction, key on/off, all four
         ; envelope rate groups, LFO rate/depth/waveform, and both timers. The
@@ -1655,6 +1968,10 @@ rt5_initialize_channel_controls_done:
 rt5_event_time_clamped:
         nop
 rt5_initialize_events_done:
+        ; the final ordered write is a late channel-0 key-off: the sustained
+        ; decayer releases at boundary 90 and retires through the fast RR
+        move    #>5760,a
+        move    a1,x:rt5_event_times+31
         move    #rt5_event_fixture,r3
         move    #rt5_event_commands,r1
         do      #32,rt5_initialize_event_commands_done
@@ -1662,29 +1979,39 @@ rt5_initialize_events_done:
         move    a1,x:(r1)+
 rt5_initialize_event_commands_done:
 
-        ; Initialize channel-major full and 0.75 gain variants. A decoded
-        ; total-level event can then replace one operator in both arrays while
-        ; the block-held AM selector switches the active n7 offset.
-        move    #rt5_operator_gain_full,r0
-        move    #rt5_operator_gain_attenuated,r1
-        do      #8,rt5_initialize_operator_gains_done
+        ; Operator total-level amplitude bases in operator-major order keep
+        ; the audible spread the block gains previously seeded per channel:
+        ; M1 $000010, C1 $000060, M2 $000040, C2 $080000.
+        move    #rt5_tl_base,r1
         move    #>$000010,a
-        move    a1,x:(r0)+
-        move    #>$00000c,a
+        do      #8,rt5_initialize_tl_m1_done
         move    a1,x:(r1)+
+rt5_initialize_tl_m1_done:
         move    #>$000060,a
-        move    a1,x:(r0)+
-        move    #>$000048,a
+        do      #8,rt5_initialize_tl_c1_done
         move    a1,x:(r1)+
+rt5_initialize_tl_c1_done:
         move    #>$000040,a
-        move    a1,x:(r0)+
-        move    #>$000030,a
+        do      #8,rt5_initialize_tl_m2_done
         move    a1,x:(r1)+
+rt5_initialize_tl_m2_done:
         move    #>$080000,a
-        move    a1,x:(r0)+
-        move    #>$060000,a
+        do      #8,rt5_initialize_tl_c2_done
         move    a1,x:(r1)+
-rt5_initialize_operator_gains_done:
+rt5_initialize_tl_c2_done:
+
+        ; Derive every operator's initial channel-major gain pair through the
+        ; island helper, so static levels attenuate their bases exactly the
+        ; way decoded envelope motion will during the profile.
+        clr     a
+        do      #32,rt5_initialize_gains_done
+        move    a1,x:rt5_env_current
+        move    a1,n1
+        jsr     rt5_env_gain_op
+        move    x:rt5_env_current,a
+        move    #>1,x0
+        add     x0,a
+rt5_initialize_gains_done:
 
         ; Preserve the packed source before the planar right stream overlays
         ; its Y-memory window. Cleanup restores it and mechanically regenerates
@@ -1740,7 +2067,7 @@ rt5_initialize_pdx_right_done:
         movep   #$5a00,x:m_crb
 
 rt5_profile_loop_start:
-        do      #DSP_RT2_PROFILE_BLOCKS,rt5_profile_blocks_done
+        do      #DSP_RT5_PROFILE_BLOCKS,rt5_profile_blocks_done
         jsr     rt5_update_support_block
 
         ; Dynamic pan may produce no both-panned carrier. Instead of clearing
@@ -1797,6 +2124,18 @@ rt5_emit_ring_ready:
 rt5_emit_stereo_done:
         move    r1,x:rt5_pan_left_base
         move    r7,x:rt5_pan_right_base
+        ; the deterministic planar PDX streams model successively refilled
+        ; host buffers: wrap both pointers at the 2048-frame stream end so
+        ; the 128-block profile reuses them without new storage
+        move    #>rt5_pan_left_stream+DSP_RT_PROFILE_FRAMES,a
+        move    r1,b
+        cmp     a,b
+        jlt     rt5_pan_streams_ready
+        move    #>rt5_pan_left_stream,a
+        move    a1,x:rt5_pan_left_base
+        move    #>rt5_pan_right_stream,a
+        move    a1,x:rt5_pan_right_base
+rt5_pan_streams_ready:
         move    #>63,m5
 rt5_profile_blocks_done:
         nop
@@ -1821,7 +2160,7 @@ rt5_restore_tables_done:
         ; Repay the bounded DDA residual for all 32 operator phases outside the
         ; measured window, then restore the exact renderer's memory mapping.
         clr     a
-        move    #>$60000,a0
+        move    #>$180000,a0            ; 128 blocks of bounded DDA residual
         move    #rt5_phase,r4
         do      #32,rt5_correct_phase_done
         move    l:(r4),b10
@@ -1832,18 +2171,32 @@ rt5_correct_phase_done:
         move    #>-1,m4
 
         ; Fold the decoded per-operator state into the reply before the
-        ; cache rebuild below reclaims the internal-Y overlays.
+        ; cache rebuild below reclaims the internal-Y overlays: the rebuilt
+        ; increments, both half-block affine constant arrays, every ADSR
+        ; state word, and the surviving active count.
         clr     a
         move    #rt5_operator_increment,r1
         do      #32,rt5_checksum_increments_done
         move    y:(r1)+,x0
         add     x0,a
 rt5_checksum_increments_done:
-        move    #rt5_envelope_step,r1
-        do      #32,rt5_checksum_steps_done
+        move    #0,r1
+        do      #32,rt5_checksum_env_a_done
         move    y:(r1)+,x0
         add     x0,a
-rt5_checksum_steps_done:
+rt5_checksum_env_a_done:
+        move    #rt5_env_b,r1
+        do      #32,rt5_checksum_env_b_done
+        move    y:(r1)+,x0
+        add     x0,a
+rt5_checksum_env_b_done:
+        move    #rt5_env_state,r1
+        do      #32,rt5_checksum_env_state_done
+        move    x:(r1)+,x0
+        add     x0,a
+rt5_checksum_env_state_done:
+        move    x:rt5_active_count,x0
+        add     x0,a
         move    a1,x:rt5_checksum
         jsr     rt2_restore_common
 
@@ -1867,15 +2220,15 @@ rt5_checksum_state_done:
         jsr     send_reply
         jmp     command_loop
 
-; Update one 64-frame block of global control state. One due FIFO event is
+; Update one 64-frame block of global control state. Every due FIFO event is
 ; decoded first so its state lands in this block. Native-time, LFO, and timer
 ; state advance with the exact 1280:1007 block DDA instead of repeating its
 ; quotient work in every frame; the LFO rate and both timer reloads are the
 ; decoded values, and the 17-bit maximum-length Galois LFSR still advances
 ; exactly once per frame. The tail scales the low control bits by the decoded
-; PM depth, selects the AM gain set, and runs one three-instruction loop that
-; advances all 32 decoded envelope levels while rebuilding all 32 PM-adjusted
-; phase increments consumed by the render stages through (r7+n5).
+; PM depth, selects the AM gain set, rebuilds all 32 PM-adjusted phase
+; increments in one two-instruction loop, and tail-calls the envelope island
+; pass that curves every envelope-active operator at the block boundary.
 rt5_update_support_block:
         jsr     rt5_service_event
 
@@ -2004,23 +2357,20 @@ rt5_am_selected:
 rt5_pm_sign_ready:
         move    a1,x1
 
-        ; Combined per-operator update: three instructions advance one
-        ; decoded envelope level and rebuild one PM-adjusted increment, using
-        ; at most one X and one Y access per instruction. B carries base+PM
-        ; one iteration ahead, so the final prefetch consumes the cleared
-        ; guard word after the 32 bases.
-        move    #rt5_envelope_level,r1
-        move    #rt5_envelope_step,r4
+        ; Two-instruction per-operator increment rebuild: the dual XY move
+        ; stores the previous finished sum while fetching the next base, so B
+        ; runs one iteration ahead and the final store consumes the cleared
+        ; guard word after the 32 bases. Envelope levels no longer ride this
+        ; loop; the island pass below moves only envelope-active operators.
         move    #rt5_increment_base,r2
         move    #rt5_operator_increment,r7
         move    x:(r2)+,b
         add     x1,b
         do      #32,rt5_operator_update_done
-        move    x:(r1),a        y:(r4)+,y0
-        add     y0,a            x:(r2)+,b       b,y:(r7)+
-        add     x1,b            a,x:(r1)+
+        move    x:(r2)+,b       b,y:(r7)+
+        add     x1,b
 rt5_operator_update_done:
-        rts
+        jmp     rt5_env_scan
 
 ; Drain every due block-boundary event from the profile-local FIFO and update
 ; the real register image. Events are already ordered, so the read side pays
@@ -2065,8 +2415,8 @@ rt5_service_event:
         jlt     rt5_event_below_60
         move    #>$80,x0
         cmp     x0,a
-        jge     rt5_event_decode_envelope_rate
-        jmp     rt5_event_decode_total_level
+        jge     rt5_env_rate_event
+        jmp     rt5_env_tl_event
 rt5_event_below_60:
         move    #>$28,x0
         cmp     x0,a
@@ -2090,370 +2440,9 @@ rt5_event_below_28:
         jge     rt5_event_decode_timer
         move    #>$08,x0
         cmp     x0,a
-        jeq     rt5_event_decode_key
+        jeq     rt5_env_key_event
         jmp     rt5_event_decode_done
 
-        ; Apply channel-control writes directly to the mutable algorithm/pan
-        ; array used by the block renderer.
-rt5_event_decode_channel_control:
-        move    #>$20,x0
-        sub     x0,a
-        move    a1,n0
-        move    #rt5_channel_control,r0
-        nop
-        move    y1,x:(r0+n0)
-        jmp     rt5_event_decode_done
-
-        ; Rebuild the block renderer's per-operator gain for total-level
-        ; writes. Registers $60-$7f use raw slots M1/M2/C1/C2; translate them
-        ; to the channel-major M1/C1/M2/C2 phase order, then apply a bounded
-        ; four-band attenuation to both AM variants.
-rt5_event_decode_total_level:
-        move    n0,b
-        move    #>7,x0
-        and     x0,b1
-        asl     b
-        asl     b                       ; channel * 4
-        move    n0,a
-        jclr    #4,a1,rt5_event_no_c1_bit
-        bset    #0,b1                   ; C1/C2 logical bit 0
-rt5_event_no_c1_bit:
-        jclr    #3,a1,rt5_event_gain_index_ready
-        bset    #1,b1                   ; M2/C2 logical bit 1
-rt5_event_gain_index_ready:
-        move    b1,n1
-
-        ; The slot's unattenuated base comes from a four-entry P table
-        ; indexed by the logical operator position (channel-relative bits).
-        move    #>3,x0
-        and     x0,b
-        move    #>rt5_gain_base_fixture,a
-        add     b,a
-        move    a1,r3
-        nop
-        movem   p:(r3),a
-        ; TL bits 6:5 select 0, 1, 2, or 3 power-of-two attenuation
-        ; steps. The profile fixture spans all four bands across 32 writes.
-        jclr    #6,y1,rt5_event_gain_low_band
-        asr     a
-        asr     a
-        jclr    #5,y1,rt5_event_gain_scaled
-        asr     a
-        jmp     rt5_event_gain_scaled
-rt5_event_gain_low_band:
-        jclr    #5,y1,rt5_event_gain_scaled
-        asr     a
-rt5_event_gain_scaled:
-        move    a1,x0                    ; full gain
-        asr     a
-        asr     a                       ; one quarter
-        move    x0,b
-        sub     a,b                     ; attenuated gain = 0.75 * full
-        move    #rt5_operator_gain_full,r0
-        move    #rt5_operator_gain_attenuated,r1
-        move    n1,n0
-        nop
-        move    x0,x:(r0+n0)
-        move    b1,x:(r1+n1)
-        jmp     rt5_event_decode_done
-
-        ; Envelope-rate classes $80-$ff translate the raw operator slot into
-        ; the operator-major step array (slot = logical operator * 8 +
-        ; channel), then derive a signed block-held level step: attack rates
-        ; subtract attenuation, the three decay classes add it, and the class
-        ; index selects a coarser shift.
-rt5_event_decode_envelope_rate:
-        move    n0,b
-        move    #>7,x0
-        and     x0,b1                   ; channel
-        move    n0,a
-        jclr    #4,a1,rt5_env_rate_no_c1_bit
-        move    #>8,x0
-        add     x0,b
-rt5_env_rate_no_c1_bit:
-        jclr    #3,a1,rt5_env_rate_index_ready
-        move    #>16,x0
-        add     x0,b
-rt5_env_rate_index_ready:
-        move    b1,n5
-
-        move    n0,a
-        rep     #5
-        lsr     a
-        move    #>3,x0
-        and     x0,a                    ; class 0-3 from register bits 6:5
-        move    a1,n0
-        move    #>6,b
-        sub     a,b                     ; shift = 6 - class
-        move    y1,a
-        move    #>$1f,x0
-        and     x0,a
-        move    #>1,x0
-        add     x0,a                    ; rate + 1
-        move    b1,x0
-        rep     x0
-        asl     a
-        move    n0,b
-        tst     b
-        jne     rt5_env_rate_store
-        neg     a                       ; attack rates ramp toward zero
-rt5_env_rate_store:
-        move    #rt5_envelope_step,r5
-        nop
-        move    a1,y:(r5+n5)
-        jmp     rt5_event_decode_done
-
-        ; KC writes rebuild all four operator base increments for their
-        ; channel from the exact expanded phase-step table, the stored KF
-        ; fraction, the octave shift, and the doubled multiplier.
-rt5_event_decode_kc:
-        move    #>$28,x0
-        sub     x0,a                    ; channel
-        move    a1,n1
-        move    a1,b
-        move    #>$30,x0
-        add     x0,b
-        move    b1,n0                   ; paired KF register index
-        move    y1,b                    ; b1 = key code
-        nop
-        move    x:(r0+n0),a
-        rep     #2
-        lsr     a
-        move    #>$3f,x0
-        and     x0,a
-        move    a1,y0                   ; stored key fraction
-        jmp     rt5_rebuild_channel_pitch
-
-        ; KF writes reread the stored KC and rebuild the same four
-        ; increments through the shared pitch path.
-rt5_event_decode_kf:
-        move    #>$30,x0
-        sub     x0,a                    ; channel
-        move    a1,n1
-        move    a1,b
-        move    #>$28,x0
-        add     x0,b
-        move    b1,n0                   ; paired KC register index
-        move    y1,a
-        rep     #2
-        lsr     a
-        move    #>$3f,x0
-        and     x0,a
-        move    a1,y0                   ; written key fraction
-        move    x:(r0+n0),b             ; b1 = stored key code
-        jmp     rt5_rebuild_channel_pitch
-
-        ; Shared pitch rebuild: n1 = channel, b1 = KC, y0 = KF fraction.
-        ; The gap-removed note selects one of twelve 64-step table rows, the
-        ; octave shifts the exact 10.10 step, and each operator applies its
-        ; doubled multiplier before the bounded conversion into block DDA
-        ; increment units. DT1/DT2 remain fixture state in this gate.
-rt5_rebuild_channel_pitch:
-        move    b1,a
-        rep     #4
-        lsr     a
-        move    #>7,x0
-        and     x0,a                    ; octave block
-        move    a1,x1
-        move    #>7,a
-        sub     x1,a
-        move    a1,n0                   ; right-shift count = 7 - block
-        move    b1,a
-        move    #>15,x0
-        and     x0,a
-        move    a1,x1                   ; raw note
-        lsr     a
-        lsr     a
-        move    a1,x0
-        move    x1,a
-        sub     x0,a                    ; gap-removed note 0-11
-        rep     #6
-        asl     a
-        add     y0,a                    ; 64-step row plus fraction
-        move    a1,n2
-        move    #opm_phase_step,r2
-        nop
-        move    y:(r2+n2),a             ; exact 10.10 base step
-        move    n0,b
-        tst     b
-        jeq     rt5_pitch_shift_done
-        rep     n0
-        lsr     a
-rt5_pitch_shift_done:
-        move    a1,y0                   ; channel step
-        move    #8,n2                   ; operator-major array stride
-        move    #8,n3
-        move    #>rt5_operator_mul,a
-        move    n1,x0                   ; channel
-        add     x0,a
-        move    a1,r2
-        move    #>rt5_increment_base,a
-        add     x0,a
-        move    a1,r3
-        do      #4,rt5_pitch_ops_done
-        move    x:(r2)+n2,x0            ; doubled multiplier
-        mpy     x0,y0,b
-        asr     b
-        asr     b
-        move    b0,a                    ; integer step * MUL
-        rep     #5
-        lsr     a
-        move    #>$001000,x0
-        or      x0,a                    ; bounded, non-silent DDA increment
-        move    a1,x:(r3)+n3
-rt5_pitch_ops_done:
-        jmp     rt5_event_decode_done
-
-        ; Key events rewrite the four decoded envelope levels and steps in
-        ; the operator-major arrays: a set mask bit restarts its operator's
-        ; block attack from zero attenuation, a clear bit switches the
-        ; operator to a shared release slope while keeping its level.
-rt5_event_decode_key:
-        move    y1,a
-        move    #>7,x0
-        and     x0,a
-        move    a1,x0                   ; channel
-        move    #8,n2
-        move    #8,n5
-        move    #>rt5_envelope_level,a
-        add     x0,a
-        move    a1,r2
-        move    #>rt5_envelope_step,a
-        add     x0,a
-        move    a1,r5
-        ; Four identical mask-bit passes: y1's operator bit is always tested
-        ; at position 3 and the data byte shifts right once per operator. y1
-        ; is dead after this decode; the caller reloads its constants.
-        do      #4,rt5_key_ops_done
-        jclr    #3,y1,rt5_key_op_off
-        clr     a
-        move    a1,x:(r2)
-        move    #>$140,a
-        jmp     rt5_key_op_store
-rt5_key_op_off:
-        move    #>$ffff40,a
-rt5_key_op_store:
-        move    a1,y:(r5)
-        move    (r2)+n2
-        move    (r5)+n5
-        move    y1,b
-        lsr     b
-        move    b1,y1
-rt5_key_ops_done:
-        jmp     rt5_event_decode_done
-
-        ; LFO writes: $18 stores the decoded per-tick rate beside its
-        ; precomputed 81-tick block product, $19 banks PM depth (bit 7 set)
-        ; or AM depth, and $1b keeps the two waveform bits whose low bit
-        ; flips the block PM sign.
-rt5_event_decode_lfo:
-        move    #>$19,x0
-        cmp     x0,a
-        jeq     rt5_event_decode_lfo_depth
-        jgt     rt5_event_decode_lfo_waveform
-        move    y1,a
-        move    #>15,x0
-        and     x0,a
-        move    #>16,x0
-        add     x0,a                    ; 16 + low nibble
-        move    y1,b
-        rep     #4
-        lsr     b
-        move    b1,n0
-        tst     b
-        jeq     rt5_lfo_rate_shifted
-        rep     n0
-        asl     a
-rt5_lfo_rate_shifted:
-        move    a1,x:rt5_lfo_step_tick
-        move    a1,x0
-        move    a1,b
-        rep     #4
-        asl     b                       ; rate * 16
-        rep     #6
-        asl     a                       ; rate * 64
-        add     b,a
-        add     x0,a                    ; rate * 81
-        move    a1,x:rt5_lfo_step_block
-        jmp     rt5_event_decode_done
-rt5_event_decode_lfo_depth:
-        jclr    #7,y1,rt5_lfo_amd_write
-        move    y1,a
-        move    #>$7f,x0
-        and     x0,a
-        rep     #16
-        asl     a
-        move    a1,x:rt5_pm_scale
-        jmp     rt5_event_decode_done
-rt5_lfo_amd_write:
-        move    y1,a
-        move    #>$7f,x0
-        and     x0,a
-        move    a1,x:rt5_lfo_amd
-        jmp     rt5_event_decode_done
-rt5_event_decode_lfo_waveform:
-        move    #>$1b,x0
-        cmp     x0,a
-        jne     rt5_event_decode_done
-        move    y1,a
-        move    #>3,x0
-        and     x0,a
-        move    a1,x:rt5_lfo_waveform
-        jmp     rt5_event_decode_done
-
-        ; Timer writes: $10/$11 rebuild the 10-bit Timer A reload from the
-        ; register mirror, $12 scales the Timer B reload by 16, and $14
-        ; applies run/load bits and clears status flags. IRQ enables and CSM
-        ; stay outside this gate.
-rt5_event_decode_timer:
-        move    #>$12,x0
-        cmp     x0,a
-        jeq     rt5_event_decode_timer_b
-        jgt     rt5_event_decode_timer_control
-        move    x:ym_regdata+$10,b
-        asl     b
-        asl     b
-        move    x:ym_regdata+$11,a
-        move    #>3,x0
-        and     x0,a
-        add     b,a                     ; CLKA
-        move    a1,x0
-        move    #>1024,a
-        sub     x0,a
-        move    a1,x:rt5_timer_a_reload
-        jmp     rt5_event_decode_done
-rt5_event_decode_timer_b:
-        move    y1,x0
-        move    #>256,a
-        sub     x0,a
-        rep     #4
-        asl     a
-        move    a1,x:rt5_timer_b_reload
-        jmp     rt5_event_decode_done
-rt5_event_decode_timer_control:
-        move    #>$14,x0
-        cmp     x0,a
-        jne     rt5_event_decode_done
-        move    y1,a
-        move    #>3,x0
-        and     x0,a
-        move    a1,x:rt5_timer_control
-        jclr    #0,y1,rt5_timer_control_no_a
-        move    x:rt5_timer_a_reload,a
-        move    a1,x:rt5_timer_counter
-rt5_timer_control_no_a:
-        jclr    #1,y1,rt5_timer_control_no_b
-        move    x:rt5_timer_b_reload,a
-        move    a1,x:rt5_timer_b_counter
-rt5_timer_control_no_b:
-        move    x:rt5_timer_status,a
-        jclr    #4,y1,rt5_timer_status_no_a
-        bclr    #0,a1
-rt5_timer_status_no_a:
-        jclr    #5,y1,rt5_timer_status_no_b
-        bclr    #1,a1
-rt5_timer_status_no_b:
-        move    a1,x:rt5_timer_status
 rt5_event_decode_done:
 
         move    x:rt5_event_read,a
@@ -3036,6 +3025,10 @@ command_start_mixed:
         move    a1,x:ssi_active_buffer
         move    #>-1,m6
         move    #ssi_buffer_a,r6
+        ; the host holds its PCM block until this READY token arrives, so the
+        ; blind TOS block blast cannot outrun the receive loop below
+        move    #>DSP_REPLY_BLOCK_READY,a
+        jsr     send_reply
         do      #DSP_MIX_FRAME_COUNT,command_start_mixed_receive
         jclr    #0,x:m_hsr,*
         movep   x:m_hrx,a
@@ -3146,6 +3139,10 @@ command_refill_buffer_a:
         move    #ssi_buffer_a,r7
 command_refill_receive:
         move    r7,x:ssi_refill_buffer
+        ; same READY gate as command_start_mixed: park here before the host
+        ; releases its blind block transfer
+        move    #>DSP_REPLY_BLOCK_READY,a
+        jsr     send_reply
         do      #DSP_MIX_FRAME_COUNT,command_refill_receive_done
         jclr    #0,x:m_hsr,*
         movep   x:m_hrx,a
@@ -5388,6 +5385,596 @@ ym_clock_timers_done:
         rts
 
         ym_lfo_code
+
+; -----------------------------------------------------------------------------
+; Realtime envelope island
+; -----------------------------------------------------------------------------
+; External P aliases external Y word for word on the Falcon, so this island
+; occupies the physically free window between the external-Y reservation
+; (which ends at Y:$1f7f) and the envelope arrays at Y:$2400. The stage-two
+; generator admits P sections inside [$2000,$2400) and nothing else maps the
+; phys page. Everything here runs at block boundaries or event decode time,
+; so its cost is proportional to envelope activity and amortizes across the
+; 1007-frame period exactly like FIFO event bursts.
+        org     p:$2000
+
+; Generated full-block affine constants, amplitude fractions, and index maps.
+        include 'envtabs.inc'           ; DOS assembler requires an 8.3 name
+
+; Cold rt5 fixtures and event-decode bodies live in the island so the
+; internal-P envelope pass and the sub-$1400 program keep their room;
+; every path here is event-amortized.
+; Fixture data consumed once at command-17 setup: eight initial channel
+; control words and 32 ordered block-boundary writes covering every decoded
+; register class.
+rt5_channel_control_fixture:
+        dc      $000040,$0000c1,$0000c2,$000003
+        dc      $000044,$000085,$000006,$000007
+rt5_event_fixture:
+        dc      $0220c1,$022182,$022203,$022344
+        dc      $0224c5,$022506,$022647,$021433
+        dc      $026010,$026933,$027255,$027b7f,$026477
+        dc      $02284a,$02295d,$022a3c,$022b65
+        dc      $023080,$023144
+        dc      $020878,$020801,$02081a,$020863
+        dc      $02801f,$02a90a,$02d205,$02fb8f
+        dc      $0218c6,$0219c0,$021b02
+        dc      $0212c8,$020800
+
+
+        ; Apply channel-control writes directly to the mutable algorithm/pan
+        ; array used by the block renderer.
+rt5_event_decode_channel_control:
+        move    #>$20,x0
+        sub     x0,a
+        move    a1,n0
+        move    #rt5_channel_control,r0
+        nop
+        move    y1,x:(r0+n0)
+        jmp     rt5_event_decode_done
+
+        ; KC writes rebuild all four operator base increments for their
+        ; channel from the exact expanded phase-step table, the stored KF
+        ; fraction, the octave shift, and the doubled multiplier.
+rt5_event_decode_kc:
+        move    #>$28,x0
+        sub     x0,a                    ; channel
+        move    a1,n1
+        move    a1,b
+        move    #>$30,x0
+        add     x0,b
+        move    b1,n0                   ; paired KF register index
+        move    y1,b                    ; b1 = key code
+        nop
+        move    x:(r0+n0),a
+        rep     #2
+        lsr     a
+        move    #>$3f,x0
+        and     x0,a
+        move    a1,y0                   ; stored key fraction
+        jmp     rt5_rebuild_channel_pitch
+
+        ; KF writes reread the stored KC and rebuild the same four
+        ; increments through the shared pitch path.
+rt5_event_decode_kf:
+        move    #>$30,x0
+        sub     x0,a                    ; channel
+        move    a1,n1
+        move    a1,b
+        move    #>$28,x0
+        add     x0,b
+        move    b1,n0                   ; paired KC register index
+        move    y1,a
+        rep     #2
+        lsr     a
+        move    #>$3f,x0
+        and     x0,a
+        move    a1,y0                   ; written key fraction
+        move    x:(r0+n0),b             ; b1 = stored key code
+        jmp     rt5_rebuild_channel_pitch
+
+        ; Shared pitch rebuild: n1 = channel, b1 = KC, y0 = KF fraction.
+        ; The gap-removed note selects one of twelve 64-step table rows, the
+        ; octave shifts the exact 10.10 step, and each operator applies its
+        ; doubled multiplier before the bounded conversion into block DDA
+        ; increment units. DT1/DT2 remain fixture state in this gate.
+rt5_rebuild_channel_pitch:
+        move    b1,a
+        rep     #4
+        lsr     a
+        move    #>7,x0
+        and     x0,a                    ; octave block
+        move    a1,x1
+        move    #>7,a
+        sub     x1,a
+        move    a1,n0                   ; right-shift count = 7 - block
+        move    b1,a
+        move    #>15,x0
+        and     x0,a
+        move    a1,x1                   ; raw note
+        lsr     a
+        lsr     a
+        move    a1,x0
+        move    x1,a
+        sub     x0,a                    ; gap-removed note 0-11
+        rep     #6
+        asl     a
+        add     y0,a                    ; 64-step row plus fraction
+        move    a1,n2
+        move    #opm_phase_step,r2
+        nop
+        move    y:(r2+n2),a             ; exact 10.10 base step
+        move    n0,b
+        tst     b
+        jeq     rt5_pitch_shift_done
+        rep     n0
+        lsr     a
+rt5_pitch_shift_done:
+        move    a1,y0                   ; channel step
+        move    #8,n2                   ; operator-major array stride
+        move    #8,n3
+        move    #>rt5_operator_mul,a
+        move    n1,x0                   ; channel
+        add     x0,a
+        move    a1,r2
+        move    #>rt5_increment_base,a
+        add     x0,a
+        move    a1,r3
+        do      #4,rt5_pitch_ops_done
+        move    x:(r2)+n2,x0            ; doubled multiplier
+        mpy     x0,y0,b
+        asr     b
+        asr     b
+        move    b0,a                    ; integer step * MUL
+        rep     #5
+        lsr     a
+        move    #>$001000,x0
+        or      x0,a                    ; bounded, non-silent DDA increment
+        move    a1,x:(r3)+n3
+rt5_pitch_ops_done:
+        jmp     rt5_event_decode_done
+
+        ; LFO writes: $18 stores the decoded per-tick rate beside its
+        ; precomputed 81-tick block product, $19 banks PM depth (bit 7 set)
+        ; or AM depth, and $1b keeps the two waveform bits whose low bit
+        ; flips the block PM sign.
+rt5_event_decode_lfo:
+        move    #>$19,x0
+        cmp     x0,a
+        jeq     rt5_event_decode_lfo_depth
+        jgt     rt5_event_decode_lfo_waveform
+        move    y1,a
+        move    #>15,x0
+        and     x0,a
+        move    #>16,x0
+        add     x0,a                    ; 16 + low nibble
+        move    y1,b
+        rep     #4
+        lsr     b
+        move    b1,n0
+        tst     b
+        jeq     rt5_lfo_rate_shifted
+        rep     n0
+        asl     a
+rt5_lfo_rate_shifted:
+        move    a1,x:rt5_lfo_step_tick
+        move    a1,x0
+        move    a1,b
+        rep     #4
+        asl     b                       ; rate * 16
+        rep     #6
+        asl     a                       ; rate * 64
+        add     b,a
+        add     x0,a                    ; rate * 81
+        move    a1,x:rt5_lfo_step_block
+        jmp     rt5_event_decode_done
+rt5_event_decode_lfo_depth:
+        jclr    #7,y1,rt5_lfo_amd_write
+        move    y1,a
+        move    #>$7f,x0
+        and     x0,a
+        rep     #16
+        asl     a
+        move    a1,x:rt5_pm_scale
+        jmp     rt5_event_decode_done
+rt5_lfo_amd_write:
+        move    y1,a
+        move    #>$7f,x0
+        and     x0,a
+        move    a1,x:rt5_lfo_amd
+        jmp     rt5_event_decode_done
+rt5_event_decode_lfo_waveform:
+        move    #>$1b,x0
+        cmp     x0,a
+        jne     rt5_event_decode_done
+        move    y1,a
+        move    #>3,x0
+        and     x0,a
+        move    a1,x:rt5_lfo_waveform
+        jmp     rt5_event_decode_done
+
+        ; Timer writes: $10/$11 rebuild the 10-bit Timer A reload from the
+        ; register mirror, $12 scales the Timer B reload by 16, and $14
+        ; applies run/load bits and clears status flags. IRQ enables and CSM
+        ; stay outside this gate.
+rt5_event_decode_timer:
+        move    #>$12,x0
+        cmp     x0,a
+        jeq     rt5_event_decode_timer_b
+        jgt     rt5_event_decode_timer_control
+        move    x:ym_regdata+$10,b
+        asl     b
+        asl     b
+        move    x:ym_regdata+$11,a
+        move    #>3,x0
+        and     x0,a
+        add     b,a                     ; CLKA
+        move    a1,x0
+        move    #>1024,a
+        sub     x0,a
+        move    a1,x:rt5_timer_a_reload
+        jmp     rt5_event_decode_done
+rt5_event_decode_timer_b:
+        move    y1,x0
+        move    #>256,a
+        sub     x0,a
+        rep     #4
+        asl     a
+        move    a1,x:rt5_timer_b_reload
+        jmp     rt5_event_decode_done
+rt5_event_decode_timer_control:
+        move    #>$14,x0
+        cmp     x0,a
+        jne     rt5_event_decode_done
+        move    y1,a
+        move    #>3,x0
+        and     x0,a
+        move    a1,x:rt5_timer_control
+        jclr    #0,y1,rt5_timer_control_no_a
+        move    x:rt5_timer_a_reload,a
+        move    a1,x:rt5_timer_counter
+rt5_timer_control_no_a:
+        jclr    #1,y1,rt5_timer_control_no_b
+        move    x:rt5_timer_b_reload,a
+        move    a1,x:rt5_timer_b_counter
+rt5_timer_control_no_b:
+        move    x:rt5_timer_status,a
+        jclr    #4,y1,rt5_timer_status_no_a
+        bclr    #0,a1
+rt5_timer_status_no_a:
+        jclr    #5,y1,rt5_timer_status_no_b
+        bclr    #1,a1
+rt5_timer_status_no_b:
+        move    a1,x:rt5_timer_status
+        jmp     rt5_event_decode_done
+
+
+; Rebuild the live affine constants of rt5_env_current from its current ADSR
+; state, raw rate register, and KSR-scaled keycode, leaving the effective
+; rate in x:rt5_env_rate for the key-on instant-attack test. The attack
+; addend is derived from its multiplier because the per-tick attack affine
+; has its fixed point at exactly -1.
+rt5_env_reload_op:
+        move    x:rt5_env_current,b
+        move    #>rt5_env_slotmap,x0
+        add     x0,b
+        move    b1,r3
+        nop
+        movem   p:(r3),a
+        move    a1,x:rt5_env_slot
+        move    x:rt5_env_current,b
+        move    b1,n5
+        move    #rt5_env_state,r5
+        nop
+        move    x:(r5+n5),b
+        move    #>7,x0
+        and     x0,b
+        move    #>1,x0
+        sub     x0,b
+        rep     #5
+        asl     b                       ; class base $80/$a0/$c0/$e0
+        move    #>ym_regdata+$80,x0
+        add     x0,b
+        add     a,b
+        move    b1,r2
+        nop
+        move    x:(r2),a                ; raw rate register value
+        move    x:(r5+n5),b
+        jset    #2,b1,rt5_env_reload_release
+        move    #>$1f,x0
+        and     x0,a
+        jeq     rt5_env_rate_select     ; a zero raw rate ignores KSR
+        asl     a
+        jmp     rt5_env_rate_ksr
+rt5_env_reload_release:
+        move    #>$0f,x0
+        and     x0,a
+        rep     #2
+        asl     a
+        move    #>2,x0
+        add     x0,a
+rt5_env_rate_ksr:
+        move    a1,x:rt5_env_rate
+        move    x:rt5_env_slot,b
+        move    #>ym_regdata+$80,x0
+        add     x0,b
+        move    b1,r2
+        nop
+        move    x:(r2),b                ; the AR register carries KS
+        rep     #6
+        lsr     b
+        move    #>3,a
+        sub     b,a                     ; ksrval shift = 3 - KS
+        move    x:rt5_env_current,b
+        move    a1,y0
+        move    #>7,x1
+        and     x1,b
+        move    #>ym_regdata+$28,x1
+        add     x1,b
+        move    b1,r2
+        nop
+        move    x:(r2),b                ; channel KC register
+        rep     #2
+        lsr     b
+        move    #>$1f,x1
+        and     x1,b                    ; keycode
+        move    y0,a
+        tst     a
+        jeq     rt5_env_ksr_shifted
+        rep     y0
+        lsr     b
+rt5_env_ksr_shifted:
+        move    x:rt5_env_rate,a
+        add     b,a
+        move    #>63,x0
+        cmp     x0,a
+        jle     rt5_env_rate_select
+        move    x0,a
+rt5_env_rate_select:
+        move    a1,x:rt5_env_rate
+        move    x:rt5_env_current,a
+        move    a1,n2
+        move    x:(r5+n5),b
+        jset    #2,b1,rt5_env_reload_decay
+        jset    #1,b1,rt5_env_reload_decay
+        move    x:rt5_env_rate,b
+        move    #>rt5_attack_factor,x0
+        add     x0,b
+        move    b1,r3
+        nop
+        movem   p:(r3),a
+        move    #0,r2
+        nop
+        move    a1,y:(r2+n2)
+        move    #>$800000,x0
+        add     x0,a                    ; multiplier - 1.0, a negative 0.23
+        rep     #10
+        asr     a                       ; rescaled to the 10.13 level domain
+        move    #rt5_env_b,r2
+        nop
+        move    a1,y:(r2+n2)
+        rts
+rt5_env_reload_decay:
+        ; a decay entry caches its sustain-level target so the per-block
+        ; boundary check avoids this register and table walk
+        move    x:(r5+n5),b
+        move    #>7,x0
+        and     x0,b
+        move    #>2,x0
+        cmp     x0,b
+        jne     rt5_env_reload_decay_tables
+        move    x:rt5_env_slot,b
+        move    #>ym_regdata+$e0,x0
+        add     x0,b
+        move    b1,r2
+        nop
+        move    x:(r2),b
+        rep     #4
+        lsr     b
+        move    #>$0f,x0
+        and     x0,b
+        move    #>rt5_env_sustain,x0
+        add     x0,b
+        move    b1,r3
+        nop
+        movem   p:(r3),a
+        move    #rt5_env_target,r2
+        nop
+        move    a1,x:(r2+n2)
+rt5_env_reload_decay_tables:
+        move    x:rt5_env_rate,b
+        move    #>rt5_decay_step,x0
+        add     x0,b
+        move    b1,r3
+        move    #>$7fffff,a
+        move    #0,r2
+        nop
+        move    a1,y:(r2+n2)
+        movem   p:(r3),a
+        move    #rt5_env_b,r2
+        nop
+        move    a1,y:(r2+n2)
+        rts
+
+; Append rt5_env_current to the active list unless its active bit is set.
+rt5_env_activate_op:
+        move    x:rt5_env_current,b
+        move    b1,n5
+        move    #rt5_env_state,r5
+        nop
+        move    x:(r5+n5),a
+        jset    #3,a1,rt5_env_activate_done
+        bset    #3,a1
+        move    a1,x:(r5+n5)
+        move    x:rt5_active_count,a
+        move    a1,n0
+        move    #rt5_active_list,r0
+        nop
+        move    b1,x:(r0+n0)
+        move    #>1,x0
+        add     x0,a
+        move    a1,x:rt5_active_count
+rt5_env_activate_done:
+        rts
+
+; Decoded key events: data bit 3+op keys logical operator `op` of the masked
+; channel. A set edge restarts the operator's attack from its current level
+; with a zeroed phase; a cleared edge moves it to release. Both edges
+; activate the operator; writes without an edge are ignored.
+rt5_env_key_event:
+        move    y1,a
+        move    #>7,x0
+        and     x0,a
+        move    a1,x:rt5_env_current    ; operator M1 of the channel
+        rep     #2
+        asl     a
+        move    #>rt5_phase,x0
+        add     x0,a
+        move    a1,x:rt5_env_key_phase  ; channel-major phase pointer
+        do      #4,rt5_env_key_ops_done
+        jclr    #3,y1,rt5_env_key_off
+        move    x:rt5_env_current,b
+        move    b1,n5
+        move    #rt5_env_state,r5
+        nop
+        move    x:(r5+n5),b
+        jset    #4,b1,rt5_env_key_next  ; already keyed: not an edge
+        bset    #4,b1
+        bset    #0,b1
+        bclr    #1,b1
+        bclr    #2,b1                   ; keyed attack
+        move    b1,x:(r5+n5)
+        move    x:rt5_env_key_phase,r2
+        clr     a
+        move    a10,l:(r2)              ; key-on resets the operator phase
+        jsr     rt5_env_activate_op
+        jsr     rt5_env_reload_op
+        move    x:rt5_env_rate,a
+        move    #>62,x0
+        cmp     x0,a
+        jlt     rt5_env_key_next
+        move    x:rt5_env_current,b     ; instant attack at rates 62-63
+        move    b1,n1
+        move    #rt5_envelope_level,r1
+        nop
+        clr     a
+        move    a1,x:(r1+n1)
+        jmp     rt5_env_key_next
+rt5_env_key_off:
+        move    x:rt5_env_current,b
+        move    b1,n5
+        move    #rt5_env_state,r5
+        nop
+        move    x:(r5+n5),b
+        jclr    #4,b1,rt5_env_key_next  ; not keyed: not an edge
+        bclr    #4,b1
+        bset    #2,b1
+        bclr    #0,b1
+        bclr    #1,b1                   ; released
+        move    b1,x:(r5+n5)
+        jsr     rt5_env_activate_op
+        jsr     rt5_env_reload_op
+rt5_env_key_next:
+        move    x:rt5_env_current,a
+        move    #>8,x0
+        add     x0,a
+        move    a1,x:rt5_env_current
+        move    x:rt5_env_key_phase,a
+        move    #>1,x0
+        add     x0,a
+        move    a1,x:rt5_env_key_phase
+        move    y1,b
+        lsr     b
+        move    b1,y1
+rt5_env_key_ops_done:
+        jmp     rt5_event_decode_done
+
+; Envelope rate classes $80-$ff: the register mirror is already updated, so
+; translate the raw slot into the operator-major index and rebuild the live
+; affine constants only when the write's class matches the operator's
+; current ADSR state, reactivating a rate-frozen operator.
+rt5_env_rate_event:
+        move    n0,b
+        move    #>7,x0
+        and     x0,b
+        move    n0,a
+        jclr    #4,a1,rt5_env_rate_no_c1
+        move    #>8,x0
+        add     x0,b
+rt5_env_rate_no_c1:
+        jclr    #3,a1,rt5_env_rate_ready
+        move    #>16,x0
+        add     x0,b
+rt5_env_rate_ready:
+        move    b1,x:rt5_env_current
+        move    b1,n5
+        move    n0,a
+        rep     #5
+        lsr     a
+        move    #>3,x0
+        and     x0,a
+        move    #>1,x0
+        add     x0,a                    ; register class as ADSR state 1-4
+        move    #rt5_env_state,r5
+        nop
+        move    x:(r5+n5),b
+        move    #>7,x1
+        and     x1,b
+        cmp     b,a
+        jeq     rt5_env_rate_reload
+        ; a D1L rewrite during decay must refresh the cached sustain target
+        move    #>4,x0
+        cmp     x0,a
+        jne     rt5_env_rate_done
+        move    #>2,x0
+        cmp     x0,b
+        jne     rt5_env_rate_done
+rt5_env_rate_reload:
+        jsr     rt5_env_reload_op
+        jsr     rt5_env_activate_op
+rt5_env_rate_done:
+        jmp     rt5_event_decode_done
+
+; Total-level writes decode the true 7-bit TL into a 0.23 amplitude base and
+; rebuild the operator's gain pair through its current envelope level.
+rt5_env_tl_event:
+        move    n0,b
+        move    #>7,x0
+        and     x0,b
+        move    n0,a
+        jclr    #4,a1,rt5_env_tl_no_c1
+        move    #>8,x0
+        add     x0,b
+rt5_env_tl_no_c1:
+        jclr    #3,a1,rt5_env_tl_ready
+        move    #>16,x0
+        add     x0,b
+rt5_env_tl_ready:
+        move    b1,x:rt5_env_current
+        move    b1,n1
+        move    y1,a
+        move    #>$7f,x0
+        and     x0,a
+        move    a1,b
+        move    #>7,x0
+        and     x0,a
+        move    #>rt5_tl_fraction,x0
+        add     x0,a
+        move    a1,r3
+        rep     #3
+        lsr     b                       ; octave shift count
+        movem   p:(r3),a
+        tst     b
+        jeq     rt5_env_tl_shifted
+        move    b1,x0
+        rep     x0
+        asr     a
+rt5_env_tl_shifted:
+        move    #rt5_tl_base,r1
+        nop
+        move    a1,x:(r1+n1)
+        jsr     rt5_env_gain_op
+        jmp     rt5_event_decode_done
 
         ; Generated program-memory noise jump tables and external-Y exact
         ; renderer reservations. No P code follows this include.

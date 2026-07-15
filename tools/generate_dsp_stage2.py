@@ -110,7 +110,9 @@ def make_boot_image(path: Path) -> list[int]:
 
 
 def make_program_stream(
-    path: Path, program_limit: int | None = None
+    path: Path,
+    program_limit: int | None = None,
+    island: tuple[int, int] | None = None,
 ) -> tuple[list[int], int, int]:
     sections, entry = parse_lod(path)
     sections = merge_sections(sections)
@@ -131,10 +133,23 @@ def make_program_stream(
                 "error: final program overlaps reserved loader gap "
                 f"P:${LOADER_FIRST:04x}-P:${LOADER_LIMIT - 1:04x}"
             )
-        if program_limit is not None and section.limit > program_limit:
+        # A section must either stay below the Y-aliased table boundary or sit
+        # entirely inside the declared free island above the external-Y
+        # reservation; Falcon external P aliases external Y word for word.
+        below_tables = program_limit is None or section.limit <= program_limit
+        inside_island = island is not None and (
+            section.address >= island[0] and section.limit <= island[1]
+        )
+        if not (below_tables or inside_island):
             raise SystemExit(
-                f"error: final program reaches P:${section.limit - 1:04x}, "
-                f"overlapping the reserved table boundary at P:${program_limit:04x}"
+                f"error: final program section P:${section.address:04x}-"
+                f"${section.limit - 1:04x} overlaps the reserved table region "
+                f"at P:${program_limit:04x} and lies outside the free island"
+                + (
+                    f" P:${island[0]:04x}-${island[1] - 1:04x}"
+                    if island is not None
+                    else ""
+                )
             )
 
     stream = [STAGE2_MAGIC, len(sections)]
@@ -155,11 +170,14 @@ def format_values(directive: str, values: list[int], digits: int, width: int) ->
 
 
 def emit_include(
-    bootstrap: Path, program: Path, program_limit: int | None = None
+    bootstrap: Path,
+    program: Path,
+    program_limit: int | None = None,
+    island: tuple[int, int] | None = None,
 ) -> str:
     boot_words = make_boot_image(bootstrap)
     stream, section_count, initialized_words = make_program_stream(
-        program, program_limit
+        program, program_limit, island
     )
 
     boot_bytes: list[int] = []
@@ -188,9 +206,23 @@ def main() -> None:
     parser.add_argument("--bootstrap", type=Path, required=True)
     parser.add_argument("--program", type=Path, required=True)
     parser.add_argument("--program-limit", type=lambda value: int(value, 0))
+    parser.add_argument(
+        "--island",
+        nargs=2,
+        type=lambda value: int(value, 0),
+        metavar=("START", "LIMIT"),
+        help="allow P sections inside [START, LIMIT), a physically free "
+        "window above the external-Y reservation",
+    )
     arguments = parser.parse_args()
+    island = tuple(arguments.island) if arguments.island else None
     print(
-        emit_include(arguments.bootstrap, arguments.program, arguments.program_limit),
+        emit_include(
+            arguments.bootstrap,
+            arguments.program,
+            arguments.program_limit,
+            island,
+        ),
         end="",
     )
 

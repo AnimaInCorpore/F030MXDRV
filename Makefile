@@ -29,13 +29,14 @@ DSP_RT_PROFILE_FRAMES := 2048
 DSP_RT2_PROFILE_FRAMES := 2048
 DSP_RT3_PROFILE_FRAMES := 2048
 DSP_RT4_PROFILE_FRAMES := 2048
-DSP_RT5_PROFILE_FRAMES := 2048
+DSP_RT5_PROFILE_FRAMES := 8192
 DSP_RT4_PROFILE_TARGETS := $(addprefix profile-dsp-rt4-alg,1 2 3 4 5 6)
 RELEASE_DIR := release
 
 YM2151_ORACLE := $(NATIVE_BUILD)/ym2151_oracle
 PDX_ADPCM_ORACLE := $(NATIVE_BUILD)/pdx_adpcm_oracle
 YM2151_TABLES := $(GENERATED_BUILD)/ym2151_tables.inc
+ENVELOPE_TABLES := $(GENERATED_BUILD)/envelope_tables.inc
 YM2151_HOST_TABLES := $(GENERATED_BUILD)/ym2151_host_tables.i
 DSP_STAGE2_IMAGE := $(GENERATED_BUILD)/dsp_stage2_image.i
 YM2151_REFERENCE := $(GENERATED_BUILD)/ym2151_reference.i
@@ -119,6 +120,10 @@ $(YM2151_HOST_TABLES): tools/generate_ym2151_tables.py $(YMFM_SOURCE)/ymfm_fm.ip
 	@mkdir -p $(GENERATED_BUILD)
 	python3 tools/generate_ym2151_tables.py --host $(YMFM_SOURCE)/ymfm_fm.ipp > $@
 
+$(ENVELOPE_TABLES): tools/generate_envelope_tables.py $(YMFM_SOURCE)/ymfm_fm.ipp
+	@mkdir -p $(GENERATED_BUILD)
+	python3 tools/generate_envelope_tables.py $(YMFM_SOURCE)/ymfm_fm.ipp > $@
+
 $(YM2151_VECTORS): $(YM2151_ORACLE) tests/traces/attack_all_carriers.trace
 	@mkdir -p $(REFERENCE_BUILD)
 	$(YM2151_ORACLE) --vectors tests/traces/attack_all_carriers.trace 256 > $@
@@ -182,12 +187,14 @@ $(RELEASE_DIR)/f030mxdrv.ttp: $(RELEASE_DIR)/f030mxdrv.tos
 	cp $< $@
 
 $(DSP_BUILD)/BUILD.BAT: tools/BUILD_DSP.BAT src/dsp/ym2151.asm \
-		src/dsp/stage2_loader.asm src/dsp/protocol.inc $(YM2151_TABLES)
+		src/dsp/stage2_loader.asm src/dsp/protocol.inc $(YM2151_TABLES) \
+		$(ENVELOPE_TABLES)
 	@mkdir -p $(DSP_BUILD)
 	cp tools/BUILD_DSP.BAT $(DSP_BUILD)/BUILD.BAT
 	cp src/dsp/ym2151.asm src/dsp/protocol.inc $(DSP_BUILD)/
 	cp src/dsp/stage2_loader.asm $(DSP_BUILD)/YMBOOT.ASM
 	cp $(YM2151_TABLES) $(DSP_BUILD)/ymtables.inc
+	cp $(ENVELOPE_TABLES) $(DSP_BUILD)/envtabs.inc
 	cp $(DSP_TOOL_SOURCE)/ASM56000.EXE $(DSP_TOOL_SOURCE)/CLDLOD.EXE \
 		$(DSP_TOOL_SOURCE)/DOS4GW.EXE $(DSP_TOOL_SOURCE)/ioequ.inc $(DSP_BUILD)/
 	@touch $@
@@ -213,7 +220,8 @@ $(DSP_STAGE2_IMAGE): tools/generate_dsp_stage2.py $(DSP_BUILD)/.assembled
 	python3 tools/generate_dsp_stage2.py \
 		--bootstrap $(DSP_BUILD)/YMBOOT.LOD \
 		--program $(DSP_BUILD)/YM2151.LOD \
-		--program-limit 0x1400 > $@
+		--program-limit 0x1400 \
+		--island 0x2000 0x2400 > $@
 
 check: all reference
 	@test -s $(RELEASE_DIR)/f030mxdrv.tos
@@ -251,7 +259,7 @@ smoke: check
 		--machine falcon --dsp emu \
 		--tos third_party/f030dsp3d/tools/tos402.rom --patch-tos true \
 		--fast-boot true --fast-forward true --sound off \
-		--confirm-quit false --run-vbls 1400 \
+		--confirm-quit false --run-vbls 1700 \
 		--log-file build/hatari-smoke.log \
 		--trace-file build/hatari-smoke.trace \
 		--trace gemdos,dsp_host_interface,xbios \
@@ -259,7 +267,8 @@ smoke: check
 	@rg -q "XBIOS 0x6E Dsp_ExecBoot" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x4d584c" build/hatari-smoke.trace
 	@rg -q "Transfer 0x4c4f41" build/hatari-smoke.trace
-	@rg -q "Transfer 0x4d5811" build/hatari-smoke.trace
+	@rg -q "Transfer 0x4d5812" build/hatari-smoke.trace
+	@rg -q "Transfer 0x524459" build/hatari-smoke.trace
 	@rg -q "GEMDOS 0x42 Fseek\\(0, [0-9]+, 2\\)" build/hatari-smoke.trace
 	@rg -q "GEMDOS 0x42 Fseek\\(0, [0-9]+, 0\\)" build/hatari-smoke.trace
 	@rg -q "Transfer 0x000080" build/hatari-smoke.trace
@@ -314,7 +323,7 @@ smoke: check
 	@rg -q "Direct Transfer 0x01c5de" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x01c6c0" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x170000" build/hatari-smoke.trace
-	@rg -q "Transfer 0x7959b3" build/hatari-smoke.trace
+	@rg -q "Transfer 0xab5f30" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x01c6de" build/hatari-smoke.trace
 	@rg -q "XBIOS 0x80 Locksnd" build/hatari-smoke.trace
 	@rg -q "XBIOS 0x89 Dsptristate\\(0x1, 0x0\\)" build/hatari-smoke.trace

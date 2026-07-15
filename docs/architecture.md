@@ -12,13 +12,13 @@ routine receives the register in `d1.b` and data in `d2.b`, mirrors the byte in
 `OPMBuf`, then writes the X68000 OPM ports. `src/m68k/mxdrv_port.s` preserves
 those input conventions and replaces the hardware write with one DSP word.
 
-## Host/DSP protocol v17
+## Host/DSP protocol v18
 
 Every transport unit is one DSP/host 24-bit word. The upper byte is an opcode.
 
 | Word | Meaning | Reply |
 | --- | --- | --- |
-| `01 00 00` | ping/protocol query | `4d 58 11` (`MX`, version 17) |
+| `01 00 00` | ping/protocol query | `4d 58 12` (`MX`, version 18) |
 | `02 rr dd` | write YM2151 register `rr = dd`, including during SSI playback | `00 00 00` |
 | `03 00 00` | reset YM2151 state | `00 00 00` |
 | `04 00 00` | clock one native 62.5 kHz sample | signed left sample |
@@ -27,20 +27,20 @@ Every transport unit is one DSP/host 24-bit word. The upper byte is an opcode.
 | `07 00 ii` | query logical operator `ii` | 10-bit envelope attenuation |
 | `08 00 00` | query chip status | timer flags plus busy in bit 7 |
 | `09 00 00` | query LFO state | packed phase, AM, signed PM bytes |
-| `0a 00 00` + 329 words | upload packed immutable ymfm tables | `00 00 00` after expansion/reset |
+| `0a 00 00`, then 329 words after `52 44 59` | upload packed immutable ymfm tables | ready token, then `00 00 00` after expansion/reset |
 | `0b 00 00` | pre-render FM and start interrupt-fed SSI on buffer A | `00 00 00` before transmit starts |
 | `0c 00 00` | stop and disable DSP SSI transmit | `00 00 00` |
 | `0d 00 00` | query prepared SSI stereo frames | unsigned 24-bit frame count |
 | `0e tt tt` + `02 rr dd` | queue `rr = dd` at absolute rolling native time `tttt` | `00 00 00`, or error if invalid/full/out of order |
 | `0f 00 00` | query the rolling 16-bit native-sample clock | unsigned 16-bit time |
 | `10 00 00` | run the 2048-frame codec-rate four-operator feasibility kernel | deterministic checksum `6c 67 9b` |
-| `11 00 00` + 2014 words | upload 1007 interleaved stereo PCM frames, mix with a new FM period, and start interrupt-fed SSI | `00 00 00` before transmit starts |
+| `11 00 00`, then 2014 words after `52 44 59` | upload 1007 interleaved stereo PCM frames, mix with a new FM period, and start interrupt-fed SSI | ready token, then `00 00 00` before transmit starts |
 | `12 00 00` | query the first nonzero mixed stereo probe | signed left+right sample sum |
-| `13 00 00` + 2014 words | upload PCM to the inactive buffer, render FM in place, and switch at a stereo boundary | `00 00 00` after the switch |
+| `13 00 00`, then 2014 words after `52 44 59` | upload PCM to the inactive buffer, render FM in place, and switch at a stereo boundary | ready token, then `00 00 00` after the switch |
 | `14 00 00` | run the 2048-frame block-oriented algorithm-0 channel spike | deterministic checksum `0f 26 66` |
 | `15 00 00` | run the 2048-frame block-oriented algorithm-7 carrier spike | deterministic checksum `89 eb 00` |
 | `16 00 aa` | run the 2048-frame mixed-topology spike for algorithm `aa = 1..6` | per-algorithm deterministic checksum |
-| `17 00 00` | run the live-SSI eight-channel decoded ALG/PAN/AM/PM/TL spike | deterministic checksum `79 59 b3` |
+| `17 00 00` | run the 128-block live-SSI decoded-control and envelope engine | deterministic checksum `ab 5f 30` |
 | anything else | unsupported command | `ff ff ff` |
 
 The synchronous acknowledgement intentionally provides back-pressure and keeps
@@ -162,18 +162,34 @@ output — and the command checksum — are bit-identical to the cleared-ring
 ordering. Algorithms 6/7 route their already-summed
 carrier rings through a separate decoded-pan path. The command explicitly
 clears a latched SSI underrun before restoring the external Y map and exact
-phase cache. Its checksum is `79 59 b3`.
+phase cache. Its checksum is `ab 5f 30`.
 
-Hatari measures 324.87 cycles per codec frame against the 326.27-cycle
-budget, leaving 1.40 cycles (0.43%). Dynamic topology/pan routing, planar
-PDX accumulation, final saturation, live SSI, and the full decoded register
-control path therefore fit the budget together, establishing the control
-feasibility that the previous 322.55-cycle floor left open. The write-first
-common-ring lever recovered 1.55 cycles per frame over the earlier 326.09
-measurement, and the multi-event boundary drain with its burst fixture costs
-0.33 of them back; the remaining margin is reserved for envelope curvature.
-Noise-frequency decode and per-frame envelope curvature stay outside this
-gate.
+Hatari measures 319.97 cycles per codec frame over the 8,192-frame,
+128-block profile against the 326.27-cycle budget, leaving 6.30 cycles
+(1.9%). Dynamic topology/pan routing, planar PDX accumulation, final
+saturation, live SSI, the full decoded register control path, and decoded
+envelope curvature therefore fit the budget together. Envelope-active
+operators advance once per block by a composed full-block affine step from
+generated per-rate tables — exponential attacks toward zero attenuation,
+linear decay/sustain/release with exact mean tick rates, block-boundary
+ADSR transitions, and total-level gains rebuilt through a 2^(-x/64)
+decomposition only when the 10-bit attenuation moved. The pass runs from
+internal P RAM and its cost is proportional to envelope activity: operators
+whose envelope can no longer move retire from the active list, and the
+fixture's eight-operator key-on transient, sustained D2R decay tail, and
+late release all retire inside the measured window. The 128-block window
+amortizes the 32-event fixture at a realistic MXDRV write density instead of
+the previous 4x-dense 32-block window. Noise-frequency decode stays outside
+this gate.
+
+Multi-word block uploads are gated by the `52 44 59` ready token because
+TOS 4.02's `Dsp_BlkUnpacked` polls the host-port TXDE flag only before its
+first word and then writes the remaining block blind. A third back-to-back
+word overwrites the one-deep transmit latch whenever the DSP has not yet
+parked in its tight receive loop, so the host now transfers the bare command,
+waits for the token the DSP sends from immediately before that loop, and only
+then releases the block. The race cost one PCM word and deadlocked both sides
+under Hatari, and real hardware shares the blind-write behavior.
 
 The constants are duplicated in `src/m68k/protocol.i` and
 `src/dsp/protocol.inc` because the two assemblers do not share syntax. Keep the
@@ -319,23 +335,26 @@ feed later operator state.
 
 ## Remaining roadmap
 
-1. **Full decoded control feasibility measured:** commands `14`-`16` cover
-   every isolated YM topology: algorithms 0-7 cost 37.75, 37.00, 37.98, 37.00,
-   38.00, 39.05, 35.98, and 37.70 cycles per channel/frame, and their linear
-   eight-channel projections fit the 326.27-cycle budget. Command `17` now
-   measures eight channels, one per algorithm, with internal phase/feedback
-   state, live SSI, stereo emission, drift-free LFO/noise/timer advancement,
-   dynamic algorithm/pan, planar PDX/FM accumulation, final saturation,
-   block-held AM/PM in every operator, and decoded application of every
-   remaining write class — total level, KC/KF pitch rebuilds from the exact
-   phase-step table, key on/off, all four envelope-rate groups, LFO
-   rate/depth/waveform, and both timers — at 324.87 cycles/frame, inside the
-   budget with 0.43% remaining. The write-first common-ring pass has been
-   spent, recovering 1.55 cycles per frame with bit-identical output, and
-   boundary service now drains every due event, absorbing an eight-event
-   burst inside the budget; the freed margin is reserved for envelope
-   curvature. Noise-frequency decode and per-frame envelope
-   curvature remain outside the gate.
+1. **Full decoded control and envelope feasibility measured:** commands
+   `14`-`16` cover every isolated YM topology: algorithms 0-7 cost 37.75,
+   37.00, 37.98, 37.00, 38.00, 39.05, 35.98, and 37.70 cycles per
+   channel/frame, and their linear eight-channel projections fit the
+   326.27-cycle budget. Command `17` now measures eight channels, one per
+   algorithm, over 128 blocks with internal phase/feedback state, live SSI,
+   stereo emission, drift-free LFO/noise/timer advancement, dynamic
+   algorithm/pan, planar PDX/FM accumulation, final saturation, block-held
+   AM/PM in every operator, decoded application of every remaining write
+   class — total level, KC/KF pitch rebuilds from the exact phase-step
+   table, key on/off, all four envelope-rate groups, LFO
+   rate/depth/waveform, and both timers — and decoded envelope curvature:
+   per-rate full-block affine steps with exponential attacks, block-boundary
+   ADSR transitions, activity-proportional retirement, and
+   attenuation-gated gain rebuilds, at 319.97 cycles/frame, inside the
+   budget with 1.9% remaining. The Python prototype scores the same
+   quantized block recurrence at mean attenuation error 2.99/1023,
+   correlation 0.977, and 61-frame transition lag against the exact ADSR
+   reference, inside every comparator boundary. Noise-frequency decode
+   remains outside the gate.
 2. **Reference gate complete:** the build now validates exact codec-rate
    vectors for pitch, key/write timing, envelopes, LFO/noise rates, feedback
    spectra, and all eight algorithms, gates an independent native perceptual
