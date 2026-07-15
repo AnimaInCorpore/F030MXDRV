@@ -46,6 +46,7 @@ YM2151_VECTORS := $(REFERENCE_BUILD)/attack_all_carriers.tsv
 M68K_SOURCES := \
 	src/m68k/main.s \
 	src/m68k/player.s \
+	src/m68k/capture.s \
 	src/m68k/dsp_link.s \
 	src/m68k/mxdrv_core.s \
 	src/m68k/mxdrv_port.s \

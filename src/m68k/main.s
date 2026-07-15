@@ -65,9 +65,17 @@ start:
         bne     protocol_failed
 
         tst.l   player_mode
-        beq     run_conformance
+        beq     conformance_mode
         bsr     player_run
         bra     clean_exit
+
+        ; A CAPTURE.SCN beside the TTP replays one compiled scenario through
+        ; the realtime stream for the external state-capture harness, then
+        ; exits without waiting for a key; the harness run is unattended.
+conformance_mode:
+        bsr     capture_try_run
+        tst.l   d0
+        bne     capture_exit
 
 run_conformance:
         bsr     player_selftest
@@ -1365,6 +1373,11 @@ clean_exit:
         bsr     mxdrv_mdx_clock_stop
         Dsp_Unlock
         bsr     wait_for_exit_key
+        Pterm0
+
+capture_exit:
+        bsr     mxdrv_mdx_clock_stop
+        Dsp_Unlock
         Pterm0
 
 usage_failed:

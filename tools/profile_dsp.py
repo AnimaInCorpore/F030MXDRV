@@ -11,7 +11,7 @@ from pathlib import Path
 
 
 LABEL_RE = re.compile(r"^\s*\d+\s+(?:[PXY]:[0-9A-F]+\s+)?\s*([A-Za-z_][A-Za-z0-9_]*):\s*$")
-ADDRESS_RE = re.compile(r"^\s*\d+\s+([PXY]):([0-9A-F]+)\b")
+ADDRESS_RE = re.compile(r"^\s*\d+\s+([PXYL]):([0-9A-F]+)\b")
 PROFILE_RE = re.compile(
     r"^p:([0-9a-f]+).*?\s([0-9]+\.[0-9]+)% \((\d+), (\d+), (\d+)\)$"
 )
@@ -30,8 +30,11 @@ def parse_listing(path: Path) -> dict[tuple[str, str], int]:
             continue
         space = address.group(1).upper()
         value = int(address.group(2), 16)
+        # An l-memory word is the X:Y pair at one address, so record both.
+        spaces = ("X", "Y") if space == "L" else (space,)
         for name in pending:
-            symbols[(space, name)] = value
+            for resolved_space in spaces:
+                symbols[(resolved_space, name)] = value
         pending.clear()
     return symbols
 
