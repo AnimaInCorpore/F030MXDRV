@@ -64,6 +64,47 @@ A DSP capture directory must contain the same 15 filenames and columns. Run:
 make compare-realtime REALTIME_CANDIDATE_DIR=path/to/capture
 ```
 
+## Capture harness
+
+`make capture-realtime` produces and gates that directory automatically. For
+each scenario the harness compiles the exact trace into a `CAPTURE.SCN`
+(every scenario fits the 32-entry FIFO ring and its 32,767-sample horizon),
+which switches the TTP's no-argument launch into capture mode: reset, queue
+every write through the real rolling FIFO, then start and refill the
+protocol-v19 realtime stream with silent PCM. Hatari debugger breakpoints
+dump the rt5 phase accumulators, envelope state and block coefficients,
+LFO/noise/timer scalars, and native clock at every 64-frame block entry, and
+both SSI buffers after each completed 1024-frame transaction; buffer
+completion anchors on each handler's single `jsr send_reply` because Hatari
+samples the DSP PC at do-loop-end+1 on every iteration.
+
+Reconstruction refuses to guess: the dumped native clock must match the
+1280:1007 DDA at every boundary, consecutive LFSR dumps must be exactly 64
+Galois steps apart, and phase deltas must be block-uniform, or the run
+aborts. Audio comes from the captured buffers (24-bit 0.23 samples reported
+in the 16-bit host domain), phases interpolate the verified per-block
+deltas into ymfm's 22-bit domain (`phase48 >> 22`), envelope levels follow
+the affine mid-block contract above with the addend derived from the
+realized step, per-frame noise replays the same right-shifting
+x^17+x^14+1 Galois LFSR, and the schedule columns replicate the oracle's
+event policy bit for bit.
+
+Two reconstruction limits are documented rather than hidden: an attack that
+key-ons and converges inside one block never exposes its true multiplier or
+an attack-state boundary, so that block falls back to a linear mid and the
+attack state is invisible; and the reported `lfo_am` is the kernel's actual
+deterministic full/0.75 block gain selection, not a modeled LFO.
+
+The first baseline report (protocol v19, commit `5471cf8` capture) fails
+the gate as expected and quantifies the open kernel work: pitch runs about
+10.6x low because the realtime increment conversion is still the bounded
+fixture placeholder (`(step*MUL)>>5 | $1000`), which also pulls algorithms
+2-7 and feedback-0 under the spectral boundaries; the LFO checks fail
+against the placeholder AM; FM output sits on the swapped stereo channel
+(the comparator's max-RMS channel pick tolerates this). Envelope tracking
+is already within one attenuation unit outside the attack block (MAE 4.44,
+both late transitions within 64 frames), and the noise boundaries pass.
+
 The realtime engine advances envelope state once per 64-frame block with a
 published per-rate affine recurrence, so a capture reconstructs each
 operator's mid-block level analytically from the block-boundary dump and the

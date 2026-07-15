@@ -276,12 +276,267 @@ def run_scenario(
     return records, events, frames
 
 
-def reconstruct_rows(name, records, events, frames, symbols):
-    raise SystemExit("error: reconstruction is not implemented yet")
+PHASE48_MODULUS = 1 << 48
+LEVEL_MAX = 1023 << 13
+# Right-shifting Galois form of the YM2151 x^17+x^14+1 noise LFSR.
+LFSR_TAPS = (1 << 16) | (1 << 13)
+COLUMNS = (
+    ["frame", "native_sample", "event_count", "event_hash", "left", "right",
+     "lfo_am", "noise_state"]
+    + [f"op{op}_{field}" for op in range(4) for field in ("phase", "env", "state")]
+)
 
 
-def write_vector(path, name, rows):
-    raise SystemExit("error: reconstruction is not implemented yet")
+def lfsr_step(state: int) -> int:
+    low = state & 1
+    state >>= 1
+    if low:
+        state ^= LFSR_TAPS
+    return state
+
+
+def dsp_state_to_ymfm(state: int) -> int:
+    # DSP bits 2:0 encode attack=0, decay=%010, sustain=%011, release=%1xx;
+    # ymfm numbers the same stages 1-4.
+    bits = state & 7
+    if bits & 4:
+        return 4
+    if bits & 2:
+        return 3 if bits & 1 else 2
+    return 1
+
+
+def schedule_events(
+    events: list[TraceEvent], frames: int
+) -> tuple[list[tuple[int, int, int]], list[int]]:
+    """Oracle-identical 1280:1007 schedule: per frame (native, count, hash)."""
+    schedule: list[tuple[int, int, int]] = []
+    natives: list[int] = []
+    event_index = 0
+    native_sample = 0
+    resample_phase = 0
+    for _ in range(frames):
+        event_count = 0
+        event_hash = FNV_OFFSET
+        last_native = native_sample
+        resample_phase += CODEC_NUMERATOR
+        while True:
+            resample_phase -= CODEC_DENOMINATOR
+            while (
+                event_index < len(events)
+                and events[event_index].sample == native_sample
+            ):
+                event = events[event_index]
+                event_index += 1
+                for value in (event.sample, event.reg, event.data):
+                    for shift in (0, 8, 16, 24):
+                        event_hash ^= (value >> shift) & 0xFF
+                        event_hash = (event_hash * FNV_PRIME) & 0xFFFFFFFF
+                event_count += 1
+            last_native = native_sample
+            native_sample += 1
+            if resample_phase < CODEC_DENOMINATOR:
+                break
+        schedule.append((last_native, event_count, event_hash if event_count else 0))
+        natives.append(native_sample)
+    return schedule, natives
+
+
+@dataclass
+class Boundary:
+    native_count: int
+    lfsr: int
+    lfo_phase: int
+    phases48: list[int]  # channel-major ch*4+op 48-bit accumulators
+    levels: list[int]  # operator-major op*8+ch 10.13 attenuation
+    env_states: list[int]  # operator-major raw DSP state bits
+    env_a: list[int]  # operator-major 0.23 block multiplier
+    env_b: list[int]  # operator-major signed 10.13 block addend
+
+
+def read_boundary(record: Record, symbols: dict[tuple[str, str], int]) -> Boundary:
+    def x_addr(name: str) -> int:
+        return require_symbol(symbols, "X", name)
+
+    def y_addr(name: str) -> int:
+        return require_symbol(symbols, "Y", name)
+
+    def signed24(value: int) -> int:
+        return value - 0x1000000 if value & 0x800000 else value
+
+    high = record.array("x", x_addr("rt5_phase"), 32)
+    low = record.array("y", y_addr("rt5_phase"), 32)
+    return Boundary(
+        native_count=record.words[("x", x_addr("ssi_native_sample_count"))],
+        lfsr=record.words[("x", x_addr("rt5_noise_lfsr"))],
+        lfo_phase=record.words[("x", x_addr("rt5_lfo_phase"))],
+        phases48=[(h << 24) | l for h, l in zip(high, low)],
+        levels=record.array("x", x_addr("rt5_envelope_level"), 32),
+        env_states=record.array("x", x_addr("rt5_env_state"), 32),
+        env_a=record.array("y", y_addr("rt5_env_a"), 32),
+        env_b=[signed24(v) for v in record.array("y", y_addr("rt5_env_b"), 32)],
+    )
+
+
+def read_audio(
+    records: list[Record], symbols: dict[tuple[str, str], int], frames: int
+) -> list[tuple[int, int]]:
+    """Frame-ordered (left, right) 0.23 samples from the completed buffers."""
+    buffer_a = require_symbol(symbols, "X", "ssi_buffer_a")
+    buffer_b = require_symbol(symbols, "X", "ssi_buffer_b")
+    output_addr = require_symbol(symbols, "X", "rt5_runtime_output")
+
+    def signed24(value: int) -> int:
+        return value - 0x1000000 if value & 0x800000 else value
+
+    samples: list[tuple[int, int]] = []
+    for record in records:
+        if record.kind != BUFFER_MARKER:
+            continue
+        end = record.words[("x", output_addr)]
+        base = end - 2 * BUFFER_FRAMES
+        if base not in (buffer_a, buffer_b):
+            raise SystemExit(
+                f"error: buffer dump output pointer {end:#x} matches no SSI buffer"
+            )
+        words = record.array("x", base, 2 * BUFFER_FRAMES)
+        samples += [
+            (signed24(words[2 * i]), signed24(words[2 * i + 1]))
+            for i in range(BUFFER_FRAMES)
+        ]
+    if len(samples) != frames:
+        raise SystemExit(f"error: captured {len(samples)} audio frames, need {frames}")
+    return samples
+
+
+def mid_block_level(before: int, after: int, multiplier: int) -> int:
+    """Analytic 32-frame level from the published full-block affine step."""
+    if before == after:
+        return before
+    alpha = multiplier / (1 << 23)
+    alpha_half = alpha**0.5
+    addend = after - alpha * before
+    mid = alpha_half * before + addend / (1.0 + alpha_half)
+    return max(0, min(LEVEL_MAX, int(round(mid))))
+
+
+def reconstruct_rows(
+    name: str,
+    records: list[Record],
+    events: list[TraceEvent],
+    frames: int,
+    symbols: dict[tuple[str, str], int],
+) -> list[list[int]]:
+    del name
+    schedule, natives = schedule_events(events, frames)
+    audio = read_audio(records, symbols, frames)
+
+    boundaries = [
+        read_boundary(record, symbols)
+        for record in records
+        if record.kind == STATE_MARKER
+    ]
+    final = [record for record in records if record.kind == BUFFER_MARKER][-1]
+    boundaries.append(read_boundary(final, symbols))
+    blocks = frames // BLOCK_FRAMES
+    if len(boundaries) != blocks + 1:
+        raise SystemExit(
+            f"error: {len(boundaries)} boundary dumps for {blocks} blocks"
+        )
+
+    # The DSP's own bookkeeping must agree with the exact schedule and the
+    # published LFSR/phase recurrences; a silent mismatch here would turn the
+    # comparator into a test of this script instead of the DSP.
+    for index, boundary in enumerate(boundaries):
+        expected = natives[index * BLOCK_FRAMES - 1] & 0xFFFF if index else 0
+        if boundary.native_count != expected:
+            raise SystemExit(
+                f"error: boundary {index} native clock {boundary.native_count}, "
+                f"DDA expects {expected}"
+            )
+    for index in range(blocks):
+        state = boundaries[index].lfsr
+        for _ in range(BLOCK_FRAMES):
+            state = lfsr_step(state)
+        if state != boundaries[index + 1].lfsr:
+            raise SystemExit(f"error: LFSR jump mismatch entering block {index}")
+        for slot in range(32):
+            delta = (
+                boundaries[index + 1].phases48[slot]
+                - boundaries[index].phases48[slot]
+            ) % PHASE48_MODULUS
+            if delta % BLOCK_FRAMES:
+                raise SystemExit(
+                    f"error: block {index} slot {slot} phase advance is not uniform"
+                )
+
+    # Channel-0 logical operators M1,C1,M2,C2: channel-major phase slots and
+    # operator-major envelope slots.
+    phase_slots = [0, 1, 2, 3]
+    env_slots = [0, 8, 16, 24]
+
+    rows: list[list[int]] = []
+    for frame in range(frames):
+        block = frame // BLOCK_FRAMES
+        offset = frame % BLOCK_FRAMES
+        entry = boundaries[block]
+        exit_ = boundaries[block + 1]
+
+        native, event_count, event_hash = schedule[frame]
+        left, right = audio[frame]
+
+        # Per-frame noise replays the same Galois steps the block jump
+        # composes; the DSP consumes bit 16 as its output/state bit.
+        lfsr = entry.lfsr
+        for _ in range(offset):
+            lfsr = lfsr_step(lfsr)
+        noise_state = (lfsr >> 16) & 1
+
+        # The block's AM is the deterministic full/0.75 gain selection made
+        # from the post-jump LFSR; report it in ymfm's offset domain.
+        lfo_am = 27 if (exit_.lfsr >> 16) & 1 else 0
+
+        row = [frame, native, event_count, event_hash, left >> 8, right >> 8,
+               lfo_am, noise_state]
+        for op in range(4):
+            p_slot = phase_slots[op]
+            e_slot = env_slots[op]
+            delta = (
+                exit_.phases48[p_slot] - entry.phases48[p_slot]
+            ) % PHASE48_MODULUS
+            phase48 = (
+                entry.phases48[p_slot] + delta * offset // BLOCK_FRAMES
+            ) % PHASE48_MODULUS
+            phase = (phase48 >> 22) & 0x3FFFFF
+
+            before = entry.levels[e_slot]
+            after = exit_.levels[e_slot]
+            if offset < 32:
+                mid = mid_block_level(before, after, entry.env_a[e_slot])
+                level = before + (mid - before) * offset // 32
+            else:
+                mid = mid_block_level(before, after, entry.env_a[e_slot])
+                level = mid + (after - mid) * (offset - 32) // 32
+            env = min(1023, max(0, level >> 13))
+            state = dsp_state_to_ymfm(exit_.env_states[e_slot])
+            row += [phase, env, state]
+        rows.append(row)
+    return rows
+
+
+def write_vector(path: Path, name: str, rows: list[list[int]]) -> None:
+    trace_name, frames, algorithm, feedback = SCENARIOS[name]
+    header = (
+        f"# Falcon DSP realtime capture; scenario={name}; trace={trace_name}; "
+        f"frames={frames}; ratio={CODEC_NUMERATOR}/{CODEC_DENOMINATOR}"
+    )
+    if algorithm is not None:
+        header += f"; algorithm={algorithm}"
+    if feedback is not None:
+        header += f"; feedback={feedback}"
+    lines = [header, "\t".join(COLUMNS)]
+    lines += ["\t".join(str(value) for value in row) for row in rows]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def main() -> int:

@@ -403,9 +403,23 @@ are implementation gaps against the contract, not relaxed acceptance criteria.
    blocks into inactive A/B SSI buffers, and restore the exact path on stop.
    The Hatari smoke gate checks FIFO and direct-write service, three buffers,
    clocks 1301/2603/3904, 3072 prepared frames, and checksum `fe2fb0`.
-4. Split blocks at due write timestamps to meet the sub-frame latency contract,
-   integrate DT1/DT2 pitch offsets and decoded noise frequency/output, and feed
-   the production kernel's state/output capture through the comparison gate.
+4. **Capture harness measuring (in progress):** `make capture-realtime` replays
+   all 15 perceptual scenarios through the production commands `18`/`19` in
+   Hatari, dumps DSP state at every 64-frame block boundary plus each completed
+   buffer, reconstructs per-frame vectors, and feeds them through the
+   comparator. The DSP's native clock, LFSR jumps, and phase advances verify
+   against the published recurrences, and every schedule column matches the
+   exact reference. The baseline report fails as expected: the realtime pitch
+   conversion is still the bounded fixture placeholder
+   (`(step*MUL)>>5 | $1000`, about 10.6x low), which also drags algorithms 2-7
+   and feedback-0 under the spectral boundaries; block-held AM is the
+   deterministic full/0.75 selection, failing the LFO checks; and FM lands on
+   the swapped stereo channel. Envelope tracking already sits within one
+   attenuation unit outside the attack block (MAE 4.44, decay/sustain and
+   sustain/release transitions within 64 frames), and noise passes. Remaining:
+   real pitch-increment conversion with DT1/DT2, decoded noise
+   frequency/output, true AM application, sub-block event splitting for the
+   sub-frame latency contract, and attack-block reconstruction resolution.
 5. Measure cycle count, SSI underruns, buffer switches, and host/DSP contention
    on a real Falcon before declaring the audio transport complete.
 6. Finish MDX software modulation, synchronization, legato, remaining command

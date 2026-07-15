@@ -58,7 +58,7 @@ M68K_OBJECTS := $(patsubst src/m68k/%.s,$(M68K_BUILD)/%.o,$(M68K_SOURCES))
 DOSBOX ?= $(shell command -v dosbox-staging 2>/dev/null || command -v dosbox 2>/dev/null)
 DOSBOX_FLAGS ?= --noprimaryconf --set output=texture
 
-.PHONY: all host dsp reference check compare-realtime smoke profile-dsp profile-dsp-rt \
+.PHONY: all host dsp reference check capture-realtime compare-realtime smoke profile-dsp profile-dsp-rt \
 	profile-dsp-rt2 profile-dsp-rt3 profile-dsp-rt4 profile-dsp-rt5 \
 	clean run tools
 
@@ -239,6 +239,17 @@ check: all reference
 	@rg -q "^DSP_BOOT_WORDS equ " $(DSP_STAGE2_IMAGE)
 	@rg -q "^DSP_STAGE2_PROGRAM_WORDS equ " $(DSP_STAGE2_IMAGE)
 	@file $(RELEASE_DIR)/f030mxdrv.tos $(RELEASE_DIR)/ym2151.lod
+
+# Replay every perceptual scenario through the protocol-v19 realtime stream
+# in Hatari, reconstruct per-frame vectors from the block-boundary dumps, and
+# feed them through the exact-to-perceptual comparator.
+capture-realtime: check
+	@if ! command -v hatari >/dev/null 2>&1; then \
+		echo "error: capture-realtime target needs Hatari" >&2; \
+		exit 1; \
+	fi
+	python3 tools/capture_ym2151_realtime.py --output build/capture/vectors
+	$(MAKE) compare-realtime REALTIME_CANDIDATE_DIR=build/capture/vectors
 
 compare-realtime: $(YM2151_PERCEPTUAL_STAMP)
 	@if [ -z "$(REALTIME_CANDIDATE_DIR)" ]; then \

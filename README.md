@@ -110,9 +110,14 @@ why the project publishes its own profiler.
   imports the current register/key image, consumes the real rolling FIFO,
   applies direct live writes (including multiplier changes), mixes planar
   PDX, renders the inactive 1024-frame buffer, and restores the exact tables
-  on stop. DT1/DT2 pitch offsets, noise-frequency/output substitution,
-  sub-block event splitting, and a complete integrated perceptual capture
-  remain.
+  on stop. `make capture-realtime` now replays all 15 perceptual scenarios
+  through that production stream in Hatari and gates the reconstructed
+  vectors: the baseline report quantifies the remaining kernel work — the
+  realtime pitch conversion is still the bounded fixture placeholder, AM is
+  a deterministic block selection, and stereo is swapped — while envelope
+  tracking is already within one attenuation unit outside the attack block
+  and noise passes. Real pitch/DT1/DT2 conversion, noise-frequency/output
+  substitution, true AM, and sub-block event splitting remain.
 - MDX synchronization/modulation, remaining command behavior, real-hardware
   contention measurement, and the compatibility corpus remain. The exact
   boundary between implemented and pending work is kept in
@@ -191,12 +196,17 @@ ADSR state, AM/PM LFO and noise rates, feedback spectra, and all eight
 algorithms. Its native projection independently renders the proposed
 256-step, codec-rate-feedback compromise; across the topology suite it retains
 0.7229-0.9999 spectral cosine and 0.967-1.028x RMS energy with zero control
-drift. A future DSP capture can be checked against the same explicit rate,
-timing, envelope, and spectral limits with:
+drift. The production DSP kernel is captured and checked against the same
+explicit rate, timing, envelope, and spectral limits with:
 
 ```sh
-make compare-realtime REALTIME_CANDIDATE_DIR=path/to/capture
+make capture-realtime
 ```
+
+which replays every scenario in Hatari, dumps block-boundary DSP state,
+reconstructs the per-frame vectors, and runs the comparator (equivalently,
+`make compare-realtime REALTIME_CANDIDATE_DIR=path/to/capture` gates an
+existing capture directory).
 
 The vector schema and thresholds are documented in
 [`docs/perceptual-compatibility.md`](docs/perceptual-compatibility.md).
