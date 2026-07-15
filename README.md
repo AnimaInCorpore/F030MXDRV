@@ -126,7 +126,7 @@ why the project publishes its own profiler.
   Terminal release envelopes and fully silent channels bypass work that
   cannot affect chip state or output; hot scalar state lives in
   short-addressable internal X RAM.
-- Protocol v17 gives the DSP two interleaved stereo buffers in external
+- Protocol v18 gives the DSP two interleaved stereo buffers in external
   X RAM. The 68030 uploads one 1007-frame PDX period into the inactive
   buffer; the DSP renders the matching FM period in place with signed 16-bit
   saturation, switches buffers at a stereo boundary, and leaves the last

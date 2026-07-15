@@ -115,7 +115,7 @@ channels, preloads the new block's first left word, and restores `$5a00`.
 Buffer pointers use `r6/r7`; the phase-cache loop owns `r4`, so sharing that
 register would displace the refill position during every YM sample.
 
-Protocol v17 implements the event shape with a rolling clock. A refillable
+Protocol v18 implements the event shape with a rolling clock. A refillable
 32-entry ring FIFO stores an absolute 16-bit native-sample time beside each
 packed register write. Entries must be in nondecreasing modular order and
 within the 32,767-sample future horizon; all writes due at a boundary are
@@ -370,10 +370,10 @@ write variants keep full-accumulator limiter moves so the checksum gate
 proves the output bit-identical. Recovering the lever and the boundary drain
 cost P-memory pressure: the key-event decode became a four-iteration
 mask-shift loop, the fixed timer-register reads use absolute addressing, the
-total-level gain bases moved into a four-entry P table, and the program now
-ends one word below the P:$1400 table boundary; the envelope work later
-reopened that room by moving the cold event-decode bodies and fixture tables
-into the external island described below. Noise-frequency decode remains
+total-level gain bases moved into a four-entry P table, and the program
+then ended one word below the P:$1400 table boundary; the envelope work
+later reopened that room by moving the cold event-decode bodies and fixture
+tables into the external island described below. Noise-frequency decode remains
 outside this gate.
 
 ## Falcon external memory aliasing and the P:$2000 island

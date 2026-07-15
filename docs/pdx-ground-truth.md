@@ -52,7 +52,7 @@ bounds against that vector.
 ## Current boundary
 
 `src/m68k/pdx.s` provides validated lookup plus the eight-voice host mixer. It
-can render one exact Falcon codec period, which protocol v17 uploads to the DSP,
+can render one exact Falcon codec period, which protocol v18 uploads to the DSP,
 combines with a newly rendered FM period, and loops through SSI to the DAC. MDX
 tracks 8-15 now start and stop those voices, and the TTP player uploads each
 successive period through the inactive-buffer refill command. This is not yet

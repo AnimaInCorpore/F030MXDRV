@@ -124,32 +124,37 @@ both/left/right/mute modes route audible carriers into an internal common ring
 or host-prepared planar PDX streams. The final pass adds the common group,
 interleaves left/right into buffer B, and moves full accumulators so the
 DSP56001 limiter supplies signed 24-bit saturation. The 2,048-frame planar
-fixture represents 32 successively refilled inactive blocks; its preparation
-is outside the measured DSP bracket, as it would be on the 68030. Every profile
-array stays within Falcon's 8,192-word X/Y reservations. The right stream
-temporarily overlays external-Y table storage, so the packed table is backed up
-in X and re-expanded after the measurement.
+fixture represents successively refilled inactive blocks and wraps every 32
+blocks across the 128-block profile; its preparation is outside the measured
+DSP bracket, as it would be on the 68030. Every profile array stays within
+Falcon's 8,192-word X/Y reservations. The right stream temporarily overlays
+external-Y table storage, so the packed table is backed up in X and
+re-expanded after the measurement.
 
 The measured window also advances the complete decoded control state: a
 drift-free 1280:1007 native clock, a decoded-rate LFO, both decoded timers
 under their control bits, a maximum-length one-step-per-frame noise LFSR, and
 a profile-local 32-entry FIFO whose boundary service drains every due event:
-one write at each of the first 25 block boundaries, then an eight-event
-burst — the shape of a real MXDRV voice load — at boundary 24, leaving seven
-empty boundaries on the fast path. One
-three-instruction, 32-iteration support loop advances every decoded
-per-operator envelope level by its decoded signed step while rebuilding every
-PM-adjusted per-operator phase increment from its decoded base. Pitch state
+one write at each of the first 25 block boundaries, a seven-event burst —
+the shape of a real MXDRV voice load — at boundary 24, and a late key-off
+at boundary 90, leaving the remaining boundaries on the empty fast path.
+One two-instruction, 32-iteration support loop rebuilds every PM-adjusted
+per-operator phase increment from its decoded base, then tail-calls the
+internal-P envelope pass that advances every envelope-active operator by
+its composed full-block affine step, applies the boundary ADSR
+transitions, and rebuilds moved gains through the 2^(-x/64) decomposition. Pitch state
 is operator-major, so the algorithm bodies preload each stage's increment
 through the channel's feedback pointer while the channel-control read rides
 the parallel Y-bank pointer; the DSP56001 only pairs same-numbered index and
 address registers, which fixed this layout. The 32 fixture events cover
 every decoded register class: `$20-$27` algorithm/pan, four-band total
 level, KC/KF pitch rebuilds from the exact expanded phase-step table with
-octave shift and doubled per-operator multipliers, key on/off envelope
-restarts and releases, all four envelope-rate groups translated through the
-raw M1/M2/C1/C2 slot map, LFO rate/depth/waveform, and Timer B plus timer
-control load/run/status behavior. The scaled `$19` depth turns the low
+octave shift and doubled per-operator multipliers, key edges that restart
+real attacks with zeroed phases or move operators to release, all four
+envelope-rate groups translated through the raw M1/M2/C1/C2 slot map into
+live affine-constant reloads when the class matches the operator's ADSR
+state, LFO rate/depth/waveform, and Timer B plus timer control
+load/run/status behavior. The scaled `$19` depth turns the low
 eight control bits into this block's signed PM offset, bit 16 still selects
 full or 0.75 AM gain, and the exact 64-step noise transform runs through
 6/6/5-bit slice tables the command derives from the LFSR step function at
@@ -228,7 +233,7 @@ protocol version in the ping reply whenever either side changes incompatibly.
    and the write-busy status bit are implemented.
 5. **Falcon audio (in progress):** the DSP converts 1280 native 62.5 kHz
    samples into 1007 frames at the Falcon's 25.175 MHz / 4 / 128 codec rate.
-   Protocol v17 feeds 16-bit, two-word SSI network frames from a fast transmit
+   Protocol v18 feeds 16-bit, two-word SSI network frames from a fast transmit
    interrupt using two aligned external-X buffers. The normal interrupt mutates
    only its dedicated `r6/m6` pair; a separate long exception path reads SSISR
    and writes TX to clear a transmit underrun. The 68030 can fill the inactive
@@ -243,7 +248,7 @@ protocol version in the ping reply whenever either side changes incompatibly.
    the cached no-PM path selected, rendering one 1280-sample period consumes
    15,391,151 instruction cycles, or 12,024.34 per native sample. The Falcon
    budget is 256.68 cycles per sample, so the exact scalar kernel misses real
-   time by 46.85x before steady SSI and host-port overhead. Protocol v17 makes
+   time by 46.85x before steady SSI and host-port overhead. Protocol v18 makes
    that miss safe by repeating the last complete block, but it does not make
    playback temporally accurate. The exact kernel is retained as the
    conformance reference; the real-time output contract now requires an
@@ -259,7 +264,7 @@ protocol version in the ping reply whenever either side changes incompatibly.
    pan, voice start/stop and active masks, and signed 16-bit saturation. A
    generated oracle checks low-nibble-first decoding, predictor and step state,
    sample exhaustion, malformed bank ranges, and deterministic two-voice mixer
-   frames under Hatari. A protocol-v17 integration gate renders one 1007-frame
+   frames under Hatari. A protocol-v18 integration gate renders one 1007-frame
    PCM period on the host, uploads it, checks the DSP-mixed stereo sum, and sends
    the block through the Falcon SSI path. MDX PCM notes now bind tracks 8-15 to
    PDX voices 0-7 with encoded durations and default rate/gain/pan. Continuous
