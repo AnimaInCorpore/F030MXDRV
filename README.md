@@ -93,10 +93,11 @@ why the project publishes its own profiler.
   block, and the exact 64-step noise transform runs through slice tables the
   DSP derives from the LFSR step function at setup, keeping the program
   inside its P-memory ceiling. The gate executes every topology, changes
-  algorithm and pan during the live-SSI run, and measures **326.09 cycles
+  algorithm and pan during the live-SSI run, and measures **324.54 cycles
   per frame** against the **326.27-cycle** budget — full decoded control
-  fits, with **0.18 cycles (0.055%)** to spare and a write-first mix-ring
-  pass identified as the next ~2-cycle recovery. Noise-frequency decode and
+  fits with **1.73 cycles (0.53%)** to spare after the identified
+  write-first mix-ring pass replaced the per-block ring clear with
+  bit-identical output. Noise-frequency decode and
   per-frame envelope curvature stay outside the gate. The
   exact-to-perceptual reference gate is present; capturing a complete
   integrated candidate remains required before playback integration.
@@ -108,7 +109,7 @@ why the project publishes its own profiler.
 
 - The 68030 executable embeds everything the DSP needs: packed immutable
   ymfm tables, plus the complete sparse DSP program behind a 111-word
-  `Dsp_ExecBoot` first stage that receives 4,993 initialized P-memory words
+  `Dsp_ExecBoot` first stage that receives 4,994 initialized P-memory words
   through the host port — removing the 8 KiB converted-LOD ceiling.
 - The DSP kernel caches all 32 unmodulated phase increments across register
   writes in internal Y RAM and advances them with parallel X/Y fetches.

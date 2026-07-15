@@ -308,6 +308,14 @@ rt5_operator_increment:
 rt5_noise_columns:
         ds      17
 
+; Write-first common-ring state: zero while this block's both-panned carrier
+; ring is still unwritten. The first both-routed carrier then writes instead
+; of accumulating, and the stereo emit pass skips a never-written ring, so no
+; per-block ring clear is needed. Lives outside the checksummed decoded-state
+; span, keeping command $17's deterministic reply unchanged.
+rt5_mix_written:
+        ds      1
+
 ; The PRE offsets apply before the operator-1 feedback stage advances r2 by
 ; one channel slot; the POST offsets compensate for that advance. The @cvs
 ; wrapper only strips the Y-memory attribute so the X-space feedback anchor
@@ -1722,13 +1730,11 @@ rt5_profile_loop_start:
         do      #DSP_RT2_PROFILE_BLOCKS,rt5_profile_blocks_done
         jsr     rt5_update_support_block
 
-        ; Dynamic pan may produce no both-panned carrier, so initialize the
-        ; common ring independently of channel order before accumulation.
+        ; Dynamic pan may produce no both-panned carrier. Instead of clearing
+        ; the common ring every block, mark it unwritten: the first both-routed
+        ; carrier writes it and the emit pass skips a ring nothing wrote.
         clr     a
-        move    #rt5_mix_ring,r1
-        do      #DSP_RT2_BLOCK_FRAMES,rt5_clear_mix_ring_done
-        move    a1,y:(r1)+
-rt5_clear_mix_ring_done:
+        move    a1,y:rt5_mix_written
 
         move    #>$100,r0
         move    #rt5_feedback_1,r2
@@ -1751,12 +1757,23 @@ rt5_channel_block_done:
         ; Add the both-output carrier group to the planar PDX/side-channel
         ; accumulators, then interleave them for SSI. Moving the full
         ; accumulator (A/B rather than A1/B1) invokes the DSP56001 data limiter,
-        ; producing signed 24-bit saturation only after the complete mix.
+        ; producing signed 24-bit saturation only after the complete mix. The
+        ; rare block whose dynamic pan left the common ring unwritten clears
+        ; it here instead of paying that clear on every block.
         move    #rt5_mix_ring,r4
         move    x:rt5_pan_left_base,r1
         move    x:rt5_pan_right_base,r7
         move    #ssi_buffer_b,r5
         move    #>-1,m5
+        move    y:rt5_mix_written,a
+        tst     a
+        jne     rt5_emit_ring_ready
+        clr     a
+        do      #DSP_RT2_BLOCK_FRAMES,rt5_emit_ring_cleared
+        move    a1,y:(r4)+
+rt5_emit_ring_cleared:
+        move    #rt5_mix_ring,r4
+rt5_emit_ring_ready:
         do      #DSP_RT2_BLOCK_FRAMES,rt5_emit_stereo_done
         move    x:(r1)+,x0 y:(r4)+,a
         move    a,b
@@ -2293,51 +2310,25 @@ rt5_event_decode_key:
         move    #>rt5_envelope_step,a
         add     x0,a
         move    a1,r5
-        jclr    #3,y1,rt5_key_op0_off
+        ; Four identical mask-bit passes: y1's operator bit is always tested
+        ; at position 3 and the data byte shifts right once per operator. y1
+        ; is dead after this decode; the caller reloads its constants.
+        do      #4,rt5_key_ops_done
+        jclr    #3,y1,rt5_key_op_off
         clr     a
         move    a1,x:(r2)
         move    #>$140,a
-        move    a1,y:(r5)
-        jmp     rt5_key_op0_done
-rt5_key_op0_off:
+        jmp     rt5_key_op_store
+rt5_key_op_off:
         move    #>$ffff40,a
+rt5_key_op_store:
         move    a1,y:(r5)
-rt5_key_op0_done:
         move    (r2)+n2
         move    (r5)+n5
-        jclr    #4,y1,rt5_key_op1_off
-        clr     a
-        move    a1,x:(r2)
-        move    #>$140,a
-        move    a1,y:(r5)
-        jmp     rt5_key_op1_done
-rt5_key_op1_off:
-        move    #>$ffff40,a
-        move    a1,y:(r5)
-rt5_key_op1_done:
-        move    (r2)+n2
-        move    (r5)+n5
-        jclr    #5,y1,rt5_key_op2_off
-        clr     a
-        move    a1,x:(r2)
-        move    #>$140,a
-        move    a1,y:(r5)
-        jmp     rt5_key_op2_done
-rt5_key_op2_off:
-        move    #>$ffff40,a
-        move    a1,y:(r5)
-rt5_key_op2_done:
-        move    (r2)+n2
-        move    (r5)+n5
-        jclr    #6,y1,rt5_key_op3_off
-        clr     a
-        move    a1,x:(r2)
-        move    #>$140,a
-        move    a1,y:(r5)
-        jmp     rt5_event_decode_done
-rt5_key_op3_off:
-        move    #>$ffff40,a
-        move    a1,y:(r5)
+        move    y1,b
+        lsr     b
+        move    b1,y1
+rt5_key_ops_done:
         jmp     rt5_event_decode_done
 
         ; LFO writes: $18 stores the decoded per-tick rate beside its
@@ -2408,16 +2399,10 @@ rt5_event_decode_timer:
         cmp     x0,a
         jeq     rt5_event_decode_timer_b
         jgt     rt5_event_decode_timer_control
-        move    #>$10,a
-        move    a1,n0
-        nop
-        move    x:(r0+n0),b
+        move    x:ym_regdata+$10,b
         asl     b
         asl     b
-        move    #>$11,a
-        move    a1,n0
-        nop
-        move    x:(r0+n0),a
+        move    x:ym_regdata+$11,a
         move    #>3,x0
         and     x0,a
         add     b,a                     ; CLKA
@@ -2781,6 +2766,34 @@ rt5_serial_accumulate_x_done:
         move    b10,l:(r7)+
         rts
 
+; Write-first variant of the both-panned carrier: the block's first common
+; carrier stores into the Y mix ring without reading it, replacing the former
+; per-block ring clear. The stored full-A move keeps the same limiter
+; semantics as accumulating onto a cleared ring, so output is bit-identical.
+; The shared prologue routes an already-written ring to the accumulate loop.
+rt5_serial_mix_common:
+        move    y:rt5_mix_written,a
+        tst     a
+        jne     rt5_serial_accumulate_x
+        move    #>1,a
+        move    a1,y:rt5_mix_written
+rt5_serial_write_y:
+        move    #rt2_stage_ring,r3
+        move    l:(r7),b10
+        move    x:(r3)+,a
+        do      #DSP_RT2_BLOCK_FRAMES,rt5_serial_write_y_done
+        add     b,a
+        and     y1,a1
+        move    a1,n0
+        mac     x1,y1,b
+        move    y:(r0+n0),x0
+        mpy     x0,y0,a x:(r3)+,x0
+        move    a,y:(r5)+
+        move    x0,a
+rt5_serial_write_y_done:
+        move    b10,l:(r7)+
+        rts
+
 ; Left-only channels use an X-memory accumulator so their planar PCM can be
 ; fetched in parallel with the right Y-memory stream during stereo emission.
 rt5_serial_accumulate_left_x:
@@ -2809,13 +2822,12 @@ rt5_route_accumulated_carriers:
         jclr    #7,a1,rt5_route_accumulated_no_left
         jclr    #6,a1,rt5_route_accumulated_left
         move    #rt5_mix_ring,r5
-        jmp     rt5_accumulate_ring_y
+        jmp     rt5_ring_mix_common
 rt5_route_accumulated_no_left:
         jclr    #6,a1,rt5_route_accumulated_mute
         move    x:rt5_pan_right_base,r5
         jmp     rt5_accumulate_ring_y
 rt5_route_accumulated_left:
-        move    x:rt5_pan_left_base,r1
         move    x:rt5_pan_left_base,r5
         jmp     rt5_accumulate_ring_x
 rt5_route_accumulated_mute:
@@ -2830,11 +2842,29 @@ rt5_accumulate_ring_y:
 rt5_accumulate_ring_y_done:
         rts
 
+; Write-first variant for the already-summed algorithm-6/7 carrier ring: copy
+; the X stage ring into the unwritten Y mix ring through the full B move,
+; matching the limiter semantics of adding onto a cleared ring. The shared
+; prologue routes an already-written ring to the accumulate loop.
+rt5_ring_mix_common:
+        move    y:rt5_mix_written,a
+        tst     a
+        jne     rt5_accumulate_ring_y
+        move    #>1,a
+        move    a1,y:rt5_mix_written
+rt5_write_ring_y:
+        move    #rt2_stage_ring,r3
+        do      #DSP_RT2_BLOCK_FRAMES,rt5_write_ring_y_done
+        move    x:(r3)+,b
+        move    b,y:(r5)+
+rt5_write_ring_y_done:
+        rts
+
 rt5_accumulate_ring_x:
         move    #rt2_stage_ring,r3
         do      #DSP_RT2_BLOCK_FRAMES,rt5_accumulate_ring_x_done
         move    x:(r3)+,a
-        move    x:(r1)+,x0
+        move    x:(r5),x0
         add     x0,a
         move    a,x:(r5)+
 rt5_accumulate_ring_x_done:
@@ -2850,7 +2880,7 @@ rt5_route_carrier:
         jclr    #6,a1,rt5_route_left
         move    #rt5_mix_ring,r1
         move    #rt5_mix_ring,r5
-        jmp     rt5_serial_accumulate_x
+        jmp     rt5_serial_mix_common
 rt5_route_no_left:
         jclr    #6,a1,rt5_route_mute
 rt5_route_right:

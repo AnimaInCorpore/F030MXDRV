@@ -329,16 +329,20 @@ restores the external Y map, and rebuilds the exact phase cache, including
 the internal-Y frequency-cache words the decoded step/increment arrays
 overlay. The deterministic reply is `$791bf5`.
 
-Hatari measures 667,837 instruction cycles for 2,048 frames, or 326.09 cycles
-per frame against the 326.27-cycle budget. The 41.63 ms modeled block fits
-its 41.65 ms period with 0.18 cycles/frame (0.055%) remaining. Every decoded
+Hatari measures 664,666 instruction cycles for 2,048 frames, or 324.54 cycles
+per frame against the 326.27-cycle budget. The 41.43 ms modeled block fits
+its 41.65 ms period with 1.73 cycles/frame (0.53%) remaining. Every decoded
 register class the real transport must apply now executes inside the budget
 beside live SSI, planar PDX mixing, and saturation, establishing full
-control feasibility for the fixture workload. The margin is deliberately
-reported at its knife-edge value: the next identified recovery lever is a
-write-first common-ring pass that removes the per-block 64-word clear, and
-noise-frequency decode plus per-frame-accurate envelope curvature remain
-outside this gate.
+control feasibility for the fixture workload. The write-first common-ring
+pass has been spent: the block's first both-panned carrier stores instead of
+accumulating, the rare unwritten ring is cleared once at emission, and both
+write variants keep full-accumulator limiter moves so the checksum gate
+proves the output bit-identical. Recovering the lever cost P-memory pressure:
+the key-event decode became a four-iteration mask-shift loop, the fixed
+timer-register reads use absolute addressing, and the program now ends two
+words below the P:$1400 table boundary. Noise-frequency decode plus
+per-frame-accurate envelope curvature remain outside this gate.
 
 ## Embedded second-stage program loader
 
@@ -350,10 +354,11 @@ final YM program deliberately begins at `P:$0080`, leaving
 through `Dsp_BlkUnpacked`.
 
 The generated stream starts with magic `$4d584c`, followed by a section count
-and address/count/data records. The current program contains 4,993 initialized
-words in six sparse P sections and ends three words below the P:$1400 table
-boundary; the decoded-control gate fits only because its fixture data moved
-into P `dc` tables and the noise jump tables are derived at runtime. After installing them, the loader replies
+and address/count/data records. The current program ends two words below the
+P:$1400 table boundary; the decoded-control gate fits only because its fixture
+data moved into P `dc` tables, the noise jump tables are derived at runtime,
+and the write-first mix-ring change repaid its new loops with the key-event
+and timer-decode word reclaims. After installing them, the loader replies
 `$4c4f41` and jumps through the replaced reset vector at `P:$0000`. The build
 generator rejects a bootstrap above the 512-word XBIOS limit, any overlap with
 the reserved loader gap or `P:$1400` table boundary, non-P sections, and
