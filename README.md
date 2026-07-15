@@ -39,8 +39,8 @@ interrupt-fed DAC transport, all on stock Falcon hardware.
   at 49.17 kHz into the Falcon DAC, double-buffered, with timestamped YM
   register events on a rolling native-sample clock that survives refills.
 - **Verified, measured, reproducible.** A native ymfm oracle, golden
-  tone/noise/CSM/vibrato traces, a Hatari integration smoke test, and two
-  deterministic DSP cycle profilers gate every change.
+  tone/noise/CSM/vibrato traces, a Hatari integration smoke test, and four
+  deterministic DSP cycle profiles gate every change.
 
 ## Honest status
 
@@ -52,8 +52,8 @@ why the project publishes its own profiler.
   playback**: the sample-exact FM kernel currently needs about 959 ms of
   modeled DSP time to render each 20.48 ms block, so a completed block
   repeats while the next one renders.
-- The exact kernel measures **12,022.76 instruction cycles per native
-  62.5 kHz sample** against the Falcon's **256.68-cycle** budget — a 46.84x
+- The exact kernel measures **12,024.34 instruction cycles per native
+  62.5 kHz sample** against the Falcon's **256.68-cycle** budget — a 46.85x
   real-time miss (down from 50.10x before the current optimization pass).
   It is kept as the conformance reference.
 - The selected real-time target is a perceptual codec-rate FM kernel with
@@ -62,16 +62,17 @@ why the project publishes its own profiler.
   advances four drift-free oscillators in 39.16 cycles per codec frame using
   modulo rings and parallel X/Y moves. A second, block-oriented spike now
   renders a complete serial algorithm-0 channel — operator-1 feedback,
-  per-frame modulation, per-frame envelope gain slopes, and interleaved
-  stereo — in 50.30 cycles per codec frame. Its linear eight-channel
-  projection is 402.39 cycles against the 326.27-cycle frame budget, so the
-  worst-case all-algorithm-0 workload currently misses real time by **1.23x**
-  (not the exact kernel's 46.84x). Split X/Y feedback state and software-
-  pipelined ring/output traffic now feed a command-local 64-step full-wave
-  table in internal X RAM, keeping this frame-accurate-gain version 16.3%
-  below the first block-rate implementation. The coarse waveform is an
-  explicit perceptual compromise that still needs comparison-vector gating;
-  cheaper parallel-algorithm stages remain unexploited.
+  per-frame modulation, block-held operator gains, and interleaved stereo —
+  in 40.75 cycles per codec frame. Its linear eight-channel synthesis
+  projection is 325.98 cycles against the 326.27-cycle frame budget: the
+  former 1.23x arithmetic gap is closed, but by only **0.09%** before envelope
+  evolution, register-event service, SSI, and LFO/noise costs. A new
+  algorithm-7-shaped spike preloads carrier accumulation beside its phase
+  masks and reaches 37.70 cycles per frame, projecting to 301.61 cycles and
+  **7.56%** synthesis headroom for four-carrier channels. A bounded
+  accumulator DDA feeds the DSP56001's on-chip 256-step sine ROM and preserves
+  exact profile-block-boundary phase. Comparison gating and the remaining
+  algorithm stage shapes are still required before integration.
 - MDX synchronization/modulation and real-time mixed-block production
   remain. The exact boundary between implemented and pending work is kept in
   [the architecture notes](docs/architecture.md).
@@ -80,7 +81,7 @@ why the project publishes its own profiler.
 
 - The 68030 executable embeds everything the DSP needs: packed immutable
   ymfm tables, plus the complete sparse DSP program behind a 111-word
-  `Dsp_ExecBoot` first stage that receives 2,952 initialized P-memory words
+  `Dsp_ExecBoot` first stage that receives 3,044 initialized P-memory words
   through the host port — removing the 8 KiB converted-LOD ceiling.
 - The DSP kernel caches all 32 unmodulated phase increments across register
   writes in internal Y RAM and advances them with parallel X/Y fetches.
@@ -89,7 +90,7 @@ why the project publishes its own profiler.
   Terminal release envelopes and fully silent channels bypass work that
   cannot affect chip state or output; hot scalar state lives in
   short-addressable internal X RAM.
-- Protocol v11 gives the DSP two interleaved stereo buffers in external
+- Protocol v12 gives the DSP two interleaved stereo buffers in external
   X RAM. The 68030 uploads one 1007-frame PDX period into the inactive
   buffer; the DSP renders the matching FM period in place with signed 16-bit
   saturation, switches buffers at a stereo boundary, and leaves the last
@@ -149,6 +150,7 @@ Hatari can also capture the cycle profiles behind the status numbers above:
 make profile-dsp      # exact eight-channel renderer -> build/dsp-profile/report.txt
 make profile-dsp-rt   # codec-rate four-operator floor -> build/dsp-profile-rt/report.txt
 make profile-dsp-rt2  # algorithm-0 block spike -> build/dsp-profile-rt2/report.txt
+make profile-dsp-rt3  # algorithm-7 carrier spike -> build/dsp-profile-rt3/report.txt
 ```
 
 ## Run
@@ -176,7 +178,7 @@ The MDX is limited to 65,536 bytes and the optional raw PDX bank to 319,488
 bytes. Filenames are whitespace-delimited TOS paths. Press any key during
 playback to stop. This is an integration player rather than a finished audio
 path: SSI transport remains continuous, but the exact full-load FM renderer
-is about 46.84 times slower than the codec consumes it. `make run` starts the
+is about 46.85 times slower than the codec consumes it. `make run` starts the
 no-argument conformance mode in Hatari.
 
 ## Source map

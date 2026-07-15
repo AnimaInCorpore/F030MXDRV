@@ -191,28 +191,26 @@ rt_gain_alignment_pad:
 rt_envelope_gain:
         ds      4
 
-; The real-time spike is mutually exclusive with the exact renderer. Reuse
-; its internal-X scratch window for a 64-entry full-wave sine table, populated
-; from every fourth entry of rt_linear_sine when command $14 starts. A coarse
-; internal lookup avoids the Falcon external-memory penalty on all four hot
-; indexed reads while retaining a complete signed waveform.
-        org     x:$40
-rt2_coarse_sine:
-        ds      64
+; The block spike keeps oscillator position as a 48-bit table index: the X
+; word is the integer position and the Y word is its fractional remainder.
+; These locations overlay exact-renderer cache words only while a block-profile
+; command owns the DSP; the cache is rebuilt before returning to the loop.
+        org     l:$54
+rt2_phase:
+        ds      4
+        org     l:$58
+rt2_phase_correction:
+        ds      1
 
-; One operator stage writes this ring while the next consumes it in place
-; as its modulator. Modulo-64 addressing requires the 64-word alignment.
+; One operator stage writes this ring while the next consumes its quantized
+; table-index modulation. Modulo-64 addressing requires 64-word alignment.
         org     x:$80
 rt2_stage_ring:
         ds      64
 
-; Block-oriented spike state: four 8.16 operator phases in table-entry
-; units, four signed fractional gains advanced by per-frame slopes, and the
-; feedback output history. This follows the stage ring in otherwise-unused
-; internal X RAM so the coarse sine overlay can occupy a full aligned page.
+; Block-oriented spike state: four gains and the feedback output history.
+; This follows the stage ring in otherwise-unused internal X RAM.
         org     x:$c0
-rt2_phase:
-        ds      4
 rt2_gain:
         ds      4
 rt2_fb_1:
@@ -273,13 +271,6 @@ ym_cache_mul2:
 ; so their traffic can share an instruction with the modulator ring.
 rt2_fb_0_y:
         ds      1
-
-; One operator at a time consumes this 64-frame gain ramp. Building it once
-; per stage lets the synthesis MPY fetch the next per-frame gain for free in
-; its otherwise-unused Y-memory parallel-move slot.
-        org     y:$c0
-rt2_gain_ramp:
-        ds      64
 
 ; Phase and cache live in opposite internal memory banks so the common no-PM
 ; clock path can fetch both in one DSP instruction cycle. External Y below the
@@ -383,6 +374,10 @@ command_loop:
         cmp     x0,a
         jeq     command_profile_realtime2
 
+        move    #>DSP_CMD_PROFILE_RT3,x0
+        cmp     x0,a
+        jeq     command_profile_realtime3
+
         move    #>DSP_CMD_START_MIXED,x0
         cmp     x0,a
         jeq     command_start_mixed
@@ -395,9 +390,9 @@ command_loop:
         jsr     send_reply
         jmp     command_loop
 
-; Command $14 reuses the internal-X window containing this persistent table.
-; Centralizing setup lets the isolated benchmark restore the exact renderer's
-; logical-to-raw operator mapping before returning to the normal protocol.
+; Runtime initialization keeps this persistent table out of the .LOD image
+; while making the exact renderer's logical-to-raw operator mapping a single
+; fetch.
 ym_initialize_slot_offsets:
         ; MAME's raw register order is M1,C1,M2,C2: offsets 0,16,8,24.
         move    #ym_slot_offsets,r0
@@ -523,10 +518,15 @@ command_profile_realtime:
 rt_profile_clear_fraction:
         move    a1,x:rt_profile_checksum
 
-        move    #rt_linear_sine,r0
-        move    #rt_linear_sine,r1
-        move    #rt_linear_sine,r2
-        move    #rt_linear_sine,r3
+        ; Use the same on-chip 256-step sine ROM selected by the block spikes.
+        ; The exact-renderer cache at Y:$0100 is rebuilt after restoring the
+        ; external map, outside the measured profile bracket.
+        ori     #$04,omr
+        nop
+        move    #>$100,r0
+        move    #>$100,r1
+        move    #>$100,r2
+        move    #>$100,r3
         move    #rt_phase_fraction,r4
         move    #rt_phase_fraction,r5
         move    #rt_envelope_gain,r7
@@ -601,6 +601,8 @@ rt_profile_frame_done:
 rt_profile_loop_done:
         ; The exact renderer uses linear addressing. The benchmark owns these
         ; address-mode registers only for the duration of this command.
+        andi    #$fb,omr
+        nop
         move    #>-1,m0
         move    #>-1,m1
         move    #>-1,m2
@@ -612,54 +614,34 @@ rt_profile_loop_done:
         move    #>0,n1
         move    #>0,n2
         move    #>0,n3
+        jsr     ym_rebuild_phase_cache
         move    x:rt_profile_checksum,a
         jsr     send_reply
         jmp     command_loop
 
 ; Profile one block-oriented, algorithm-0-shaped codec-rate channel: a
 ; serial M1(feedback)->C1->M2->C2 chain with per-frame feedback and
-; modulation, per-frame envelope gain slopes, and interleaved stereo output.
-; Each operator processes one 64-frame block so its phase and gain stay
-; in registers while the modulator ring is consumed in place by the next
-; stage. This adds the work the four-carrier lower bound deliberately
-; omitted. SSI must be stopped: both audio buffers are reused as the
-; 2048-frame stereo output block, and the reply is its checksum.
+; modulation, block-held gains, and interleaved stereo output. Each operator
+; processes one 64-frame block so its phase stays in an accumulator while the
+; modulator ring is consumed in place by the next stage. This adds the work
+; the four-carrier lower bound deliberately omitted. SSI must be stopped: both
+; audio buffers are reused as the 2048-frame stereo output block, and the
+; reply is its checksum.
 command_profile_realtime2:
-        clr     a
-        move    #rt2_phase,r4
-        do      #4,rt2_clear_state
-        move    a1,x:(r4)+
-rt2_clear_state:
-        move    a1,x:rt2_fb_1
-        move    a1,y:rt2_fb_0_y
+        jsr     rt2_initialize_common
 
         move    #rt2_gain,r4
-        move    #>$400000,x0           ; 0.5 signed fractional gain
+        ; Modulator gains are stored in table-index units so their 48-bit
+        ; products can feed the following operator without another phase-
+        ; extraction multiply. The carrier retains signed fractional gain.
+        move    #>$000080,x0           ; 0.5 * 256 table-index depth
         move    x0,x:(r4)+
-        move    #>$300000,x0           ; 0.375
+        move    #>$000060,x0           ; 0.375 * 256
         move    x0,x:(r4)+
-        move    #>$200000,x0           ; 0.25
+        move    #>$000040,x0           ; 0.25 * 256
         move    x0,x:(r4)+
         move    #>$100000,x0           ; 0.125
         move    x0,x:(r4)+
-
-        ; Build a complete 64-step waveform in internal X RAM. The benchmark
-        ; markers intentionally exclude this one-time command setup cost.
-        move    #rt_linear_sine,r0
-        move    #rt2_coarse_sine,r6
-        move    #>4,n0
-        do      #64,rt2_coarse_sine_ready
-        move    y:(r0)+n0,x0
-        move    x0,x:(r6)+
-rt2_coarse_sine_ready:
-        move    #rt2_coarse_sine,r6
-        move    #ssi_buffer_a,r1
-        move    #>63,m3
-        move    #>63,m5
-        move    m3,m6
-        move    #>63,m7
-        move    #>$10,y1               ; 6-bit index into the coarse waveform
-        move    #>$024a74,x1           ; 440 Hz: 2 + $4a74/65536 entries
 
 rt2_profile_loop_start:
         do      #DSP_RT2_PROFILE_BLOCKS,rt2_blocks_done
@@ -670,126 +652,274 @@ rt2_profile_loop_start:
         move    #rt2_stage_ring,r3
         move    #rt2_fb_1,r2
         move    #rt2_fb_0_y,r4
-        move    x:rt2_phase,b
+        move    l:rt2_phase,b10
 
-        ; Derive a 64-frame operator gain ramp. The parallel store observes
-        ; A before SUB, leaving A at the next block's starting gain.
-        move    x:rt2_gain,a
-        move    #>$10,x0
-        move    #rt2_gain_ramp,r7
-        do      #DSP_RT2_BLOCK_FRAMES,rt2_op1_gain_ramp_done
-        sub     x0,a a1,y:(r7)+
-rt2_op1_gain_ramp_done:
-        move    a1,x:rt2_gain
-        move    y:(r7)+,y0
+        ; Modulator depth is quantized to the sine-ROM step and held for this
+        ; 64-frame operator block. The carrier uses the same block-held model;
+        ; envelope evolution remains outside this synthesis-only spike.
+        move    x:rt2_gain,y0
+rt2_op1_loop_start:
 
         do      #DSP_RT2_BLOCK_FRAMES,rt2_op1_done
         move    x:(r2),x0 y:(r4),a
-        move    a1,x:(r2)              ; age the history before summing it
-        add     x0,a
+        add     x0,a a1,x:(r2)         ; age history while summing both words
         asr     a
         asr     a
         asr     a                      ; (out[-1]+out[-2]) >> 3 feedback
         add     b,a
-        move    a1,x0
-        mpy     x0,y1,a
+        and     y1,a1
         move    a1,n6
-        add     x1,b
-        move    x:(r6+n6),x0
-        mpy     x0,y0,a y:(r7)+,y0
+        mac     x1,y1,b               ; also spaces the N6 indexed-address use
+        move    y:(r6+n6),x0
+        mpy     x0,y0,a
         move    a,x:(r3)+ a,y:(r4)
 rt2_op1_done:
-        move    b1,x:rt2_phase
+        move    b10,l:rt2_phase
 
         ; Operator 2: prefetch the next modulator beside the current MPY, then
         ; store the result while moving that prefetched value into A.
         move    #rt2_stage_ring,r3
         move    #rt2_stage_ring,r5
-        move    x:rt2_phase+1,b
+        move    l:rt2_phase+1,b10
 
-        move    x:rt2_gain+1,a
-        move    #>$0c,x0
-        move    #rt2_gain_ramp,r7
-        do      #DSP_RT2_BLOCK_FRAMES,rt2_op2_gain_ramp_done
-        sub     x0,a a1,y:(r7)+
-rt2_op2_gain_ramp_done:
-        move    a1,x:rt2_gain+1
-        move    y:(r7)+,y0
+        move    x:rt2_gain+1,y0
+rt2_op2_loop_start:
 
         move    x:(r3)+,a
         do      #DSP_RT2_BLOCK_FRAMES,rt2_op2_done
         add     b,a
-        move    a1,x0
-        mpy     x0,y1,a
+        and     y1,a1
         move    a1,n6
-        add     x1,b
-        move    x:(r6+n6),x0
-        mpy     x0,y0,a x:(r3)+,x0 y:(r7)+,y0
+        mac     x1,y1,b               ; also spaces the N6 indexed-address use
+        move    y:(r6+n6),x0
+        mpy     x0,y0,a x:(r3)+,x0
         move    a,x:(r5)+ x0,a
 rt2_op2_done:
-        move    b1,x:rt2_phase+1
+        move    b10,l:rt2_phase+1
 
         ; Operator 3: same stage shape as operator 2.
         move    #rt2_stage_ring,r3
         move    #rt2_stage_ring,r5
-        move    x:rt2_phase+2,b
+        move    l:rt2_phase+2,b10
 
-        move    x:rt2_gain+2,a
-        move    #>$08,x0
-        move    #rt2_gain_ramp,r7
-        do      #DSP_RT2_BLOCK_FRAMES,rt2_op3_gain_ramp_done
-        sub     x0,a a1,y:(r7)+
-rt2_op3_gain_ramp_done:
-        move    a1,x:rt2_gain+2
-        move    y:(r7)+,y0
+        move    x:rt2_gain+2,y0
+rt2_op3_loop_start:
 
         move    x:(r3)+,a
         do      #DSP_RT2_BLOCK_FRAMES,rt2_op3_done
         add     b,a
-        move    a1,x0
-        mpy     x0,y1,a
+        and     y1,a1
         move    a1,n6
-        add     x1,b
-        move    x:(r6+n6),x0
-        mpy     x0,y0,a x:(r3)+,x0 y:(r7)+,y0
+        mac     x1,y1,b               ; also spaces the N6 indexed-address use
+        move    y:(r6+n6),x0
+        mpy     x0,y0,a x:(r3)+,x0
         move    a,x:(r5)+ x0,a
 rt2_op3_done:
-        move    b1,x:rt2_phase+2
+        move    b10,l:rt2_phase+2
 
         ; Operator 4: the carrier writes interleaved stereo, right at a
         ; fixed half-amplitude pan.
         move    #rt2_stage_ring,r3
-        move    x:rt2_phase+3,b
+        move    l:rt2_phase+3,b10
 
-        move    x:rt2_gain+3,a
-        move    #>$04,x0
-        move    #rt2_gain_ramp,r7
-        do      #DSP_RT2_BLOCK_FRAMES,rt2_op4_gain_ramp_done
-        sub     x0,a a1,y:(r7)+
-rt2_op4_gain_ramp_done:
-        move    a1,x:rt2_gain+3
-        move    y:(r7)+,y0
+        move    x:rt2_gain+3,y0
+rt2_op4_loop_start:
 
         move    x:(r3)+,a
         do      #DSP_RT2_BLOCK_FRAMES,rt2_op4_done
         add     b,a
-        move    a1,x0
-        mpy     x0,y1,a
+        and     y1,a1
         move    a1,n6
-        add     x1,b
-        move    x:(r6+n6),x0
-        mpy     x0,y0,a x:(r3)+,x0 y:(r7)+,y0
+        mac     x1,y1,b               ; also spaces the N6 indexed-address use
+        move    y:(r6+n6),x0
+        mpy     x0,y0,a x:(r3)+,x0
         asr     a a1,x:(r1)+           ; left, then half-amplitude right
         move    a,x:(r1)+ x0,a
 rt2_op4_done:
-        move    b1,x:rt2_phase+3
+        move    b10,l:rt2_phase+3
 rt2_blocks_done:
         nop
-rt2_profile_loop_done:
-        jsr     ym_initialize_slot_offsets
 
-        ; Checksum the rendered stereo block. The cycle bracket above
-        ; excludes this conformance pass.
+        jsr     rt2_correct_phase
+rt2_profile_loop_done:
+        jsr     rt2_restore_common
+        jsr     rt2_checksum_output
+        jsr     send_reply
+        jmp     command_loop
+
+; Profile an algorithm-7-shaped channel. Operator 1 retains per-frame
+; feedback, but all four operators are carriers accumulated through the same
+; internal ring. The carrier-only stages mask the phase accumulator directly,
+; avoiding the modulator add/copy required by the serial algorithm-0 path.
+command_profile_realtime3:
+        jsr     rt2_initialize_common
+
+        move    #rt2_gain,r4
+        ; Operator 1 stores feedback pre-scaled by 1/8, removing three shifts
+        ; from the hot loop while preserving command $14's feedback depth. Its
+        ; carrier is the ROM sample shifted to 0.5 separately. The remaining
+        ; carriers keep the worst-case aligned sum below full scale.
+        move    #>$000010,x0           ; pre-scaled feedback depth
+        move    x0,x:(r4)+
+        move    #>$200000,x0           ; 0.25 carrier
+        move    x0,x:(r4)+
+        move    #>$100000,x0           ; 0.125 carrier
+        move    x0,x:(r4)+
+        move    #>$080000,x0           ; 0.0625 carrier
+        move    x0,x:(r4)+
+
+rt3_profile_loop_start:
+        do      #DSP_RT2_PROFILE_BLOCKS,rt3_blocks_done
+
+        ; Operator 1: feed back a table-index-scaled product while placing a
+        ; half-amplitude carrier in the accumulation ring.
+        move    #rt2_stage_ring,r3
+        move    #rt2_fb_1,r2
+        move    #rt2_fb_0_y,r4
+        move    l:rt2_phase,b10
+        move    x:rt2_gain,y0
+rt3_op1_loop_start:
+        do      #DSP_RT2_BLOCK_FRAMES,rt3_op1_done
+        move    x:(r2),x0 y:(r4),a
+        add     x0,a a1,x:(r2)         ; histories are already feedback-scaled
+        add     b,a
+        and     y1,a1
+        move    a1,n6
+        mac     x1,y1,b               ; also spaces the N6 indexed-address use
+        move    y:(r6+n6),x0
+        mpy     x0,y0,a
+        move    a,y:(r4)
+        move    x0,a
+        asr     a
+        move    a,x:(r3)+
+rt3_op1_done:
+        move    b10,l:rt2_phase
+
+        ; Operators 2 and 3 are carrier-only accumulation stages. With no
+        ; incoming modulation, masking B in place removes the temporary phase
+        ; add used by the serial stages.
+        move    #rt2_stage_ring,r3
+        move    #rt2_stage_ring,r5
+        move    l:rt2_phase+1,b10
+        move    x:rt2_gain+1,y0
+rt3_op2_loop_start:
+        do      #DSP_RT2_BLOCK_FRAMES,rt3_op2_done
+        and     y1,b1 x:(r3)+,a
+        move    b1,n6
+        mac     x1,y1,b               ; also spaces the N6 indexed-address use
+        move    y:(r6+n6),x0
+        mac     x0,y0,a
+        move    a,x:(r5)+
+rt3_op2_done:
+        move    b10,l:rt2_phase+1
+
+        move    #rt2_stage_ring,r3
+        move    #rt2_stage_ring,r5
+        move    l:rt2_phase+2,b10
+        move    x:rt2_gain+2,y0
+rt3_op3_loop_start:
+        do      #DSP_RT2_BLOCK_FRAMES,rt3_op3_done
+        and     y1,b1 x:(r3)+,a
+        move    b1,n6
+        mac     x1,y1,b               ; also spaces the N6 indexed-address use
+        move    y:(r6+n6),x0
+        mac     x0,y0,a
+        move    a,x:(r5)+
+rt3_op3_done:
+        move    b10,l:rt2_phase+2
+
+        ; Operator 4 adds the last carrier and emits interleaved stereo.
+        move    #rt2_stage_ring,r3
+        move    l:rt2_phase+3,b10
+        move    x:rt2_gain+3,y0
+rt3_op4_loop_start:
+        do      #DSP_RT2_BLOCK_FRAMES,rt3_op4_done
+        and     y1,b1 x:(r3)+,a
+        move    b1,n6
+        mac     x1,y1,b               ; also spaces the N6 indexed-address use
+        move    y:(r6+n6),x0
+        mac     x0,y0,a
+        asr     a a1,x:(r1)+           ; left, then half-amplitude right
+        move    a,x:(r1)+
+rt3_op4_done:
+        move    b10,l:rt2_phase+3
+rt3_blocks_done:
+        nop
+
+        jsr     rt2_correct_phase
+rt3_profile_loop_done:
+        jsr     rt2_restore_common
+        jsr     rt2_checksum_output
+        jsr     send_reply
+        jmp     command_loop
+
+; Shared block-profile setup. The measured brackets deliberately begin after
+; this command-local state and memory-map work.
+rt2_initialize_common:
+        clr     b
+        move    #rt2_phase,r4
+        do      #4,rt2_clear_state
+        move    b10,l:(r4)+
+rt2_clear_state:
+        clr     a
+        move    a1,x:rt2_fb_1
+        move    a1,y:rt2_fb_0_y
+
+        ; Using $ff as both the ROM-address mask and the phase MAC operand
+        ; makes the per-frame increment $9330*$ff, 48 product units below the
+        ; exact $024a74*$40 value. Restore the accumulated $60000 low-word
+        ; residual once per full 2,048-frame profile block, keeping its boundary
+        ; phase exact while bounding the intermediate error below 0.012 step.
+        clr     a
+        move    #>$60000,a0
+        move    a10,l:rt2_phase_correction
+
+        ; The DSP56001's on-chip Y data ROM is a full 256-step signed sine
+        ; wave. Commands $14/$15 are mutually exclusive with the exact renderer,
+        ; so temporarily map that ROM over external Y:$0100-$01ff and avoid
+        ; both the external-memory wait state and former 64-step quantization.
+        ori     #$04,omr
+        nop                             ; OMR memory-map pipeline delay
+        move    #>$100,r6
+        move    #ssi_buffer_a,r1
+        move    #>63,m3
+        move    #>63,m5
+        move    #>255,m6
+        move    #>63,m7
+        ; MAC fractional products place the integer table step in B1 and the
+        ; sub-entry remainder in B0. The profile-block residual above makes
+        ; this DDA exactly equal to 2 + $4a74/65536 entries at the boundary.
+        move    #>$ff,y1
+        move    #>$9330,x1
+        rts
+
+; Repay the small DDA residual once per complete profile block.
+rt2_correct_phase:
+        move    l:rt2_phase_correction,a10
+        move    #rt2_phase,r4
+        do      #4,rt2_phase_correction_done
+        move    l:(r4),b10
+        add     a,b
+        move    b10,l:(r4)+
+rt2_phase_correction_done:
+        rts
+
+rt2_restore_common:
+        andi    #$fb,omr
+        nop                             ; restore external Y:$0100-$01ff
+        move    #>-1,m0
+        move    #>-1,m3
+        move    #>-1,m5
+        move    m3,m6
+        move    #>-1,m7
+        move    #>0,n0
+        move    #>0,n6
+        jsr     ym_rebuild_phase_cache  ; restore Y:$0054-$0058 cache overlays
+        rts
+
+; Checksum the rendered stereo block. The cycle brackets above exclude this
+; conformance pass.
+rt2_checksum_output:
         move    #ssi_buffer_a,r1
         clr     a
         do      #DSP_RT2_CHECKSUM_PAIRS,rt2_checksum_done
@@ -798,15 +928,7 @@ rt2_profile_loop_done:
         move    x:(r1)+,x0
         add     x0,a
 rt2_checksum_done:
-        move    #>-1,m0
-        move    #>-1,m3
-        move    #>-1,m5
-        move    m3,m6
-        move    #>-1,m7
-        move    #>0,n0
-        move    #>0,n6
-        jsr     send_reply
-        jmp     command_loop
+        rts
 
 ; Start a host-controlled Falcon audio session. First pre-render one exact
 ; 1007-frame resampling period while SSI is disabled, then let the transmit

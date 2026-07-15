@@ -17,8 +17,10 @@ REFERENCE_BUILD := build/reference
 DSP_PROFILE_DIR := build/dsp-profile
 DSP_RT_PROFILE_DIR := build/dsp-profile-rt
 DSP_RT2_PROFILE_DIR := build/dsp-profile-rt2
+DSP_RT3_PROFILE_DIR := build/dsp-profile-rt3
 DSP_RT_PROFILE_FRAMES := 2048
 DSP_RT2_PROFILE_FRAMES := 2048
+DSP_RT3_PROFILE_FRAMES := 2048
 RELEASE_DIR := release
 
 YM2151_ORACLE := $(NATIVE_BUILD)/ym2151_oracle
@@ -45,7 +47,7 @@ DOSBOX ?= $(shell command -v dosbox-staging 2>/dev/null || command -v dosbox 2>/
 DOSBOX_FLAGS ?= --noprimaryconf --set output=texture
 
 .PHONY: all host dsp reference check smoke profile-dsp profile-dsp-rt \
-	profile-dsp-rt2 clean run tools
+	profile-dsp-rt2 profile-dsp-rt3 clean run tools
 
 all: host dsp
 
@@ -156,7 +158,7 @@ $(DSP_STAGE2_IMAGE): tools/generate_dsp_stage2.py $(DSP_BUILD)/.assembled
 	python3 tools/generate_dsp_stage2.py \
 		--bootstrap $(DSP_BUILD)/YMBOOT.LOD \
 		--program $(DSP_BUILD)/YM2151.LOD \
-		--program-limit 0xc20 > $@
+		--program-limit 0xc80 > $@
 
 check: all reference
 	@test -s $(RELEASE_DIR)/f030mxdrv.tos
@@ -190,7 +192,7 @@ smoke: check
 	@rg -q "XBIOS 0x6E Dsp_ExecBoot" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x4d584c" build/hatari-smoke.trace
 	@rg -q "Transfer 0x4c4f41" build/hatari-smoke.trace
-	@rg -q "Transfer 0x4d580b" build/hatari-smoke.trace
+	@rg -q "Transfer 0x4d580c" build/hatari-smoke.trace
 	@rg -q "GEMDOS 0x42 Fseek\\(0, [0-9]+, 2\\)" build/hatari-smoke.trace
 	@rg -q "GEMDOS 0x42 Fseek\\(0, [0-9]+, 0\\)" build/hatari-smoke.trace
 	@rg -q "Transfer 0x000080" build/hatari-smoke.trace
@@ -213,12 +215,17 @@ smoke: check
 	@rg -q "Direct Transfer 0x01c1c0" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x01c2c0" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x100000" build/hatari-smoke.trace
-	@rg -q "Transfer 0x041ac9" build/hatari-smoke.trace
+	@rg -q "Transfer 0x6c679b" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x01c0de" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x01c3c0" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x140000" build/hatari-smoke.trace
-	@rg -q "Transfer 0xfef11f" build/hatari-smoke.trace
+	@rg -q "Transfer 0x27d93b" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x01c3de" build/hatari-smoke.trace
+	@rg -q "Direct Transfer 0x01c4c0" build/hatari-smoke.trace
+	@rg -q "Direct Transfer 0x150000" build/hatari-smoke.trace
+	@rg -q "Transfer 0x89eb00" build/hatari-smoke.trace
+	@! rg -q "Modulo addressing result unpredictable|Illegal instruction" build/hatari-smoke.log
+	@rg -q "Direct Transfer 0x01c4de" build/hatari-smoke.trace
 	@rg -q "XBIOS 0x80 Locksnd" build/hatari-smoke.trace
 	@rg -q "XBIOS 0x89 Dsptristate\\(0x1, 0x0\\)" build/hatari-smoke.trace
 	@rg -q "XBIOS 0x8B Devconnect\\(1, 0x8, 0, 1, 1\\)" build/hatari-smoke.trace
@@ -361,6 +368,45 @@ profile-dsp-rt2: check tools/profile_dsp.py
 		--projection-factor 8 \
 		--projection-label "linear eight-channel projection" \
 		--title "DSP56001 codec-rate algorithm-0 block-spike profile"
+
+profile-dsp-rt3: check tools/profile_dsp.py
+	@if ! command -v hatari >/dev/null 2>&1; then \
+		echo "error: profile-dsp-rt3 target needs Hatari" >&2; \
+		exit 1; \
+	fi
+	@rm -rf $(DSP_RT3_PROFILE_DIR)
+	@python3 tools/profile_dsp.py prepare \
+		--listing $(DSP_BUILD)/YM2151.LST \
+		--output-dir $(DSP_RT3_PROFILE_DIR) \
+		--marker 0x01c4c0 \
+		--start-symbol rt3_profile_loop_start \
+		--end-symbol rt3_profile_loop_done
+	@SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy hatari \
+		--machine falcon --dsp emu \
+		--tos third_party/f030dsp3d/tools/tos402.rom --patch-tos true \
+		--fast-boot true --fast-forward true --sound off \
+		--confirm-quit false --run-vbls 1200 \
+		--parse $(DSP_RT3_PROFILE_DIR)/start.ini \
+		$(RELEASE_DIR)/f030mxdrv.tos \
+		> $(DSP_RT3_PROFILE_DIR)/debug.log 2>&1 || { \
+			tail -n 100 $(DSP_RT3_PROFILE_DIR)/debug.log >&2; \
+			exit 1; \
+		}
+	@test -s $(DSP_RT3_PROFILE_DIR)/profile.txt || { \
+		echo "error: Hatari did not capture the carrier block profile" >&2; \
+		tail -n 100 $(DSP_RT3_PROFILE_DIR)/debug.log >&2; \
+		exit 1; \
+	}
+	@python3 tools/profile_dsp.py report \
+		--listing $(DSP_BUILD)/YM2151.LST \
+		--profile $(DSP_RT3_PROFILE_DIR)/profile.txt \
+		--output $(DSP_RT3_PROFILE_DIR)/report.txt \
+		--samples $(DSP_RT3_PROFILE_FRAMES) \
+		--sample-rate 49169.921875 \
+		--unit-label "codec frame" \
+		--projection-factor 8 \
+		--projection-label "linear eight-channel projection" \
+		--title "DSP56001 codec-rate algorithm-7 carrier block profile"
 
 run: all
 	@if ! command -v hatari >/dev/null 2>&1; then \

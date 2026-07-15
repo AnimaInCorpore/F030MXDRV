@@ -12,13 +12,13 @@ routine receives the register in `d1.b` and data in `d2.b`, mirrors the byte in
 `OPMBuf`, then writes the X68000 OPM ports. `src/m68k/mxdrv_port.s` preserves
 those input conventions and replaces the hardware write with one DSP word.
 
-## Host/DSP protocol v11
+## Host/DSP protocol v12
 
 Every transport unit is one DSP/host 24-bit word. The upper byte is an opcode.
 
 | Word | Meaning | Reply |
 | --- | --- | --- |
-| `01 00 00` | ping/protocol query | `4d 58 0b` (`MX`, version 11) |
+| `01 00 00` | ping/protocol query | `4d 58 0c` (`MX`, version 12) |
 | `02 rr dd` | write YM2151 register `rr = dd`, including during SSI playback | `00 00 00` |
 | `03 00 00` | reset YM2151 state | `00 00 00` |
 | `04 00 00` | clock one native 62.5 kHz sample | signed left sample |
@@ -27,17 +27,18 @@ Every transport unit is one DSP/host 24-bit word. The upper byte is an opcode.
 | `07 00 ii` | query logical operator `ii` | 10-bit envelope attenuation |
 | `08 00 00` | query chip status | timer flags plus busy in bit 7 |
 | `09 00 00` | query LFO state | packed phase, AM, signed PM bytes |
-| `0a 00 00` + 608 words | upload packed immutable ymfm tables plus the codec-rate sine table | `00 00 00` after expansion/reset |
+| `0a 00 00` + 329 words | upload packed immutable ymfm tables | `00 00 00` after expansion/reset |
 | `0b 00 00` | pre-render FM and start interrupt-fed SSI on buffer A | `00 00 00` before transmit starts |
 | `0c 00 00` | stop and disable DSP SSI transmit | `00 00 00` |
 | `0d 00 00` | query prepared SSI stereo frames | unsigned 24-bit frame count |
 | `0e tt tt` + `02 rr dd` | queue `rr = dd` at absolute rolling native time `tttt` | `00 00 00`, or error if invalid/full/out of order |
 | `0f 00 00` | query the rolling 16-bit native-sample clock | unsigned 16-bit time |
-| `10 00 00` | run the 2048-frame codec-rate four-operator feasibility kernel | deterministic checksum `04 1a c9` |
+| `10 00 00` | run the 2048-frame codec-rate four-operator feasibility kernel | deterministic checksum `6c 67 9b` |
 | `11 00 00` + 2014 words | upload 1007 interleaved stereo PCM frames, mix with a new FM period, and start interrupt-fed SSI | `00 00 00` before transmit starts |
 | `12 00 00` | query the first nonzero mixed stereo probe | signed left+right sample sum |
 | `13 00 00` + 2014 words | upload PCM to the inactive buffer, render FM in place, and switch at a stereo boundary | `00 00 00` after the switch |
-| `14 00 00` | run the 2048-frame block-oriented algorithm-0 channel spike | deterministic checksum `fe f1 1f` |
+| `14 00 00` | run the 2048-frame block-oriented algorithm-0 channel spike | deterministic checksum `27 d9 3b` |
+| `15 00 00` | run the 2048-frame block-oriented algorithm-7 carrier spike | deterministic checksum `89 eb 00` |
 | anything else | unsupported command | `ff ff ff` |
 
 The synchronous acknowledgement intentionally provides back-pressure and keeps
@@ -52,7 +53,7 @@ FIFO, so the host can refill slots after earlier entries are consumed. The
 ahead. Command `0f` exposes the current scheduling position to the host.
 
 Commands `0a`, `11`, and `13` are the exceptions to the single-word transaction
-shape. Command `0a` consumes exactly 608 following host words before replying.
+shape. Command `0a` consumes exactly 329 following host words before replying.
 Command `11` consumes 1007 interleaved signed left/right frame pairs, renders
 the matching FM period, saturates PCM+FM to signed 16-bit, and starts SSI on
 buffer A. While SSI's fast transmit interrupt repeats that complete block,
@@ -74,19 +75,30 @@ refill.
 
 Command `10` is a conformance and cycle-measurement spike, not an audio command.
 It owns `r0-r5`, `m0-m5`, and `n0-n3` while SSI is stopped, restores linear
-addressing before returning, and lets Hatari bracket only its hot loop through
-listing-resolved symbols. Its checksum is gated so address-ring or parallel-
-move regressions cannot silently invalidate the timing result.
+addressing and the external Y map before returning, and lets Hatari bracket
+only its hot loop through listing-resolved symbols. Like the block spikes, it
+uses the DSP56001's factory sine ROM and rebuilds the exact-renderer phase cache
+after unmapping it. Its checksum is gated so address-ring or parallel-move
+regressions cannot silently invalidate the timing result.
 
 Command `14` is the block-oriented successor spike. It renders one serial
 M1(feedback)->C1->M2->C2 channel for 2048 codec frames in operator-major
-64-frame blocks, with per-frame feedback, modulation, envelope gain slopes,
-and interleaved stereo output. It owns `r0-r7`, `m0/m3/m5-m7`, and `n0/n6`
-while SSI is stopped, reuses both audio buffers as its stereo output block,
-and overlays exact-renderer scratch plus the persistent four-word operator map
-with its command-local coarse sine table. The map and address modes are
-restored before it replies with the block's deterministic checksum, which the
-smoke suite gates like command `10`'s.
+64-frame blocks, with per-frame feedback/modulation, block-held gains, and
+interleaved stereo output. It owns `r0-r7`, `m0/m3/m5-m7`, and `n0/n6` while
+SSI is stopped, reuses both audio buffers as its stereo output block, and
+temporarily maps the DSP56001's on-chip 256-step sine ROM over external
+`Y:$0100-$01ff`. Its 48-bit phase/residual words also overlay exact-renderer
+cache locations at `Y:$0054-$0058`. Command `$14` restores the external map
+and rebuilds those caches before replying with the block's deterministic
+checksum, which the smoke suite gates like command `10`'s.
+
+Command `15` reuses command `14`'s state, ROM mapping, DDA, output buffers, and
+cleanup but exercises an algorithm-7-shaped four-carrier topology. Operator 1
+keeps per-frame feedback and writes a half-amplitude carrier to the internal
+ring. Operators 2-4 preload that accumulation in parallel with their phase
+masks and use `MAC` rather than a separate multiply/add pair; operator 4 emits
+the interleaved stereo result. Its independent checksum and profile gate the
+carrier-specialized stage shape without weakening the serial-path test.
 
 The constants are duplicated in `src/m68k/protocol.i` and
 `src/dsp/protocol.inc` because the two assemblers do not share syntax. Keep the
@@ -125,7 +137,7 @@ protocol version in the ping reply whenever either side changes incompatibly.
    and the write-busy status bit are implemented.
 5. **Falcon audio (in progress):** the DSP converts 1280 native 62.5 kHz
    samples into 1007 frames at the Falcon's 25.175 MHz / 4 / 128 codec rate.
-   Protocol v11 feeds 16-bit, two-word SSI network frames from a fast transmit
+   Protocol v12 feeds 16-bit, two-word SSI network frames from a fast transmit
    interrupt using two aligned external-X buffers. The normal interrupt mutates
    only its dedicated `r6/m6` pair; a separate long exception path reads SSISR
    and writes TX to clear a transmit underrun. The 68030 can fill the inactive
@@ -138,9 +150,9 @@ protocol version in the ping reply whenever either side changes incompatibly.
    A reproducible Hatari DSP-cycle gate now supersedes the earlier VBL-derived
    throughput estimate. With four operators active on all eight channels and
    the cached no-PM path selected, rendering one 1280-sample period consumes
-   15,389,137 instruction cycles, or 12,022.76 per native sample. The Falcon
+   15,391,151 instruction cycles, or 12,024.34 per native sample. The Falcon
    budget is 256.68 cycles per sample, so the exact scalar kernel misses real
-   time by 46.84x before steady SSI and host-port overhead. Protocol v11 makes
+   time by 46.85x before steady SSI and host-port overhead. Protocol v12 makes
    that miss safe by repeating the last complete block, but it does not make
    playback temporally accurate. The exact kernel is retained as the
    conformance reference; the real-time output contract now requires an
@@ -156,7 +168,7 @@ protocol version in the ping reply whenever either side changes incompatibly.
    pan, voice start/stop and active masks, and signed 16-bit saturation. A
    generated oracle checks low-nibble-first decoding, predictor and step state,
    sample exhaustion, malformed bank ranges, and deterministic two-voice mixer
-   frames under Hatari. A protocol-v11 integration gate renders one 1007-frame
+   frames under Hatari. A protocol-v12 integration gate renders one 1007-frame
    PCM period on the host, uploads it, checks the DSP-mixed stereo sum, and sends
    the block through the Falcon SSI path. MDX PCM notes now bind tracks 8-15 to
    PDX voices 0-7 with encoded durations and default rate/gain/pan. Continuous
@@ -216,21 +228,17 @@ feed later operator state.
 
 ## Remaining roadmap
 
-1. Close the measured 1.23x block-spike gap. Command `14` now renders one
-   complete serial algorithm-0 channel — operator-1 feedback, per-frame
-   modulation, per-frame envelope gain slopes, and interleaved stereo — in
-   50.30 cycles per codec frame, a 1.28x surcharge over the 39.16-cycle four-
-   carrier floor. The linear eight-channel projection is 402.39 cycles against
-   the 326.27-cycle budget. Feedback state uses dual X:Y moves, modulated stages
-   pipeline their ring reads with MPY/store traffic, and the carrier overlaps
-   its left output store with the pan shift. A reusable internal-Y ramp derives
-   each operator's 64 per-frame gains at block rate, then supplies the next
-   gain in the synthesis MPY's parallel Y slot. A command-local 64-step
-   full-wave table now moves indexed sine traffic into internal X RAM; its
-   quantization must pass the comparison gates in step 2. Recover the remaining
-   difference with cheaper carrier-only stages for parallel algorithms,
-   accumulator-space phase addressing, shared ramp derivation, and SSI/event
-   service costs measured in place.
+1. Extend the measured carrier headroom across every algorithm stage shape.
+   Command `14` renders the fully serial algorithm-0 topology in 40.75 cycles
+   per channel/frame, projecting to 325.98 cycles for eight channels against
+   the 326.27-cycle budget: only 0.09% synthesis margin. Command `15` proves
+   the carrier-specialized algorithm-7 shape at 37.70 cycles per channel/frame,
+   or 301.61 projected cycles, by preloading its accumulation ring beside the
+   phase mask and replacing `MPY`+`ADD` with `MAC`. That leaves 24.66 cycles
+   (7.56%) for four-carrier channels. Both paths use the sine-ROM DDA and exact
+   profile-boundary correction. Add the mixed serial/parallel shapes for
+   algorithms 1-6, then measure envelope, LFO/noise, write-FIFO, SSI, and event
+   service in place; none of those costs is included yet.
 2. Add exact-to-perceptual comparison vectors for pitch, key/write timing,
    envelopes, LFO/noise rates, feedback spectra, and all eight algorithms.
 3. Integrate the selected real-time kernel with the rolling write FIFO and

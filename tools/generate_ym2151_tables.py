@@ -69,18 +69,6 @@ def pack_fixed(values: list[int], bits: int) -> list[int]:
     return packed
 
 
-def linear_sine_table(sine: list[int], power: list[int]) -> list[int]:
-    """Sample the exact log/power output at 256 evenly spaced full-wave phases."""
-    result: list[int] = []
-    for index in range(256):
-        phase = index << 2
-        sine_index = (~phase if phase & 0x100 else phase) & 0xFF
-        attenuation = sine[sine_index]
-        value = power[attenuation & 0xFF] >> (attenuation >> 8)
-        result.append(-value if phase & 0x200 else value)
-    return result
-
-
 def main() -> int:
     host_output = len(sys.argv) == 3 and sys.argv[1] == "--host"
     if len(sys.argv) != 2 and not host_output:
@@ -104,8 +92,6 @@ def main() -> int:
         for word in increment_words
         for index in range(8)
     ]
-    realtime_sine = linear_sine_table(sine, power)
-
     expected = {"phase": 768, "detune": 128, "sine": 256, "power": 256, "increments": 512}
     actual = {
         "phase": len(phase),
@@ -142,25 +128,11 @@ def main() -> int:
         ("opm_algorithm_ops", algorithm_ops),
         ("opm_dt2_delta", dt2_delta),
     ]
-    # Leave P:$0000-$0c1f available to the command kernel, then place the
-    # expanded exact tables and their packed upload source contiguously. Align
-    # the codec-rate full-wave table to a 256-word modulo boundary.
-    runtime_table_start = 0x0C20
-    runtime_table_words = sum(
-        (len(phase), len(increments), len(detune), len(sine), len(power))
-    )
-    uploaded_table_start = runtime_table_start + runtime_table_words
-    realtime_sine_start = 0x1500
-    uploaded_words = sum(len(values) for _, values in uploaded_tables)
-    realtime_padding_words = realtime_sine_start - (
-        uploaded_table_start + uploaded_words
-    )
-    if realtime_padding_words < 0:
-        raise RuntimeError("packed YM tables overlap the codec-rate sine table")
-    realtime_padding = [0] * realtime_padding_words
-    uploaded_tables.extend(
-        (("rt_table_padding", realtime_padding), ("rt_linear_sine", realtime_sine))
-    )
+    # Leave P:$0000-$0c7f available to the command kernel, then place the
+    # expanded exact tables and their packed upload source contiguously. The
+    # codec-rate kernels use the DSP56001's factory Y sine ROM, so no separate
+    # waveform is uploaded.
+    runtime_table_start = 0x0C80
     table_words = sum(len(values) for _, values in uploaded_tables)
 
     print("; Generated from third_party/mame/3rdparty/ymfm/src/ymfm_fm.ipp.")

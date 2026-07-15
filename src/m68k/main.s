@@ -963,6 +963,22 @@ run_conformance:
         cmp.l   #DSP_REPLY_HELLO,d0
         bne     protocol_failed
 
+        ; Run the carrier-specialized algorithm-7-shaped block spike. It
+        ; shares command $14's oscillator/ROM setup but uses direct carrier
+        ; phase masks and a four-carrier accumulation ring.
+        move.l  #DSP_CMD_PING+$c4c0,d0
+        bsr     dsp_exchange
+        cmp.l   #DSP_REPLY_HELLO,d0
+        bne     protocol_failed
+        move.l  #DSP_CMD_PROFILE_RT3,d0
+        bsr     dsp_exchange
+        cmpi.l  #DSP_RT3_PROFILE_CHECKSUM,d0
+        bne     protocol_failed
+        move.l  #DSP_CMD_PING+$c4de,d0
+        bsr     dsp_exchange
+        cmp.l   #DSP_REPLY_HELLO,d0
+        bne     protocol_failed
+
         ; Reload the valid bank after the malformed-bank checks, then prove
         ; that a host-rendered PDX period reaches the DSP-owned SSI path. Keep
         ; FM silent so the first nonzero stereo probe sums the exact second

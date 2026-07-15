@@ -106,7 +106,7 @@ channels, preloads the new block's first left word, and restores `$5a00`.
 Buffer pointers use `r6/r7`; the phase-cache loop owns `r4`, so sharing that
 register would displace the refill position during every YM sample.
 
-Protocol v11 implements the event shape with a rolling clock. A refillable
+Protocol v12 implements the event shape with a rolling clock. A refillable
 32-entry ring FIFO stores an absolute 16-bit native-sample time beside each
 packed register write. Entries must be in nondecreasing modular order and
 within the 32,767-sample future horizon; all writes due at a boundary are
@@ -126,9 +126,9 @@ resolved mechanically, and the generated report is written to
 
 The deterministic fixture enables a sustained four-operator algorithm-7 voice
 on all eight channels and deliberately uses the cached no-PM phase path. Hatari
-2.6.1 reports 30,778,274 oscillator clocks, or 15,389,137 instruction cycles,
-for the block. That is 12,022.76 instruction cycles per native sample and
-959.27 ms of modeled DSP time for audio consumed in 20.48 ms: a 46.84x
+2.6.1 reports 30,782,302 oscillator clocks, or 15,391,151 instruction cycles,
+for the block. That is 12,024.34 instruction cycles per native sample and
+959.40 ms of modeled DSP time for audio consumed in 20.48 ms: a 46.85x
 real-time miss. The profile window does not include steady SSI interrupt or
 host-port service overhead, and a PM-modulated workload can only be more
 expensive. This replaces the earlier 8.6x estimate derived indirectly from a
@@ -149,17 +149,18 @@ a nearly 47x gap.
 report to `build/dsp-profile-rt/report.txt`. The command clocks 2,048 frames of
 one four-operator channel at the 49,169.921875 Hz codec cadence. Each oscillator
 retains a 16-bit fractional phase in an aligned internal-X modulo-4 ring while
-`r0-r3` retain the integer positions in the aligned external-Y 256-entry sine
-table. Fractional carry advances each integer pointer without long-term pitch
-drift.
+`r0-r3` retain the integer positions in the DSP56001's on-chip 256-entry sine
+ROM at `Y:$0100-$01ff`. Fractional carry advances each integer pointer without
+long-term pitch drift.
 
-The optimized loop keeps the sine table at `Y:$1500` and four static gains in
-internal X, so each phase mask dual-fetches sine and gain while the following
-`MAC` overlaps its phase-ring store. Hatari reports 80,208 instruction cycles,
-or 39.16 cycles per channel/frame. A linear eight-channel pass is 313.31 cycles
-against the measured 326.27-cycle codec-frame budget, leaving only 12.96 cycles
-(4.0%). The four distinct gain multipliers exercise the algorithm-7 carrier
-path; the checksum is `$041ac9` and the normal smoke suite checks it.
+The optimized loop keeps four static gains in internal X, so each phase mask
+dual-fetches sine and gain while the following `MAC` overlaps its phase-ring
+store. Hatari reports 80,208 instruction cycles, or 39.16 cycles per
+channel/frame. A linear eight-channel pass is 313.31 cycles against the
+measured 326.27-cycle codec-frame budget, leaving only 12.96 cycles (4.0%).
+The four distinct gain multipliers exercise the carrier floor; the checksum is
+`$6c679b` and the normal smoke suite checks it. Command cleanup unmaps the ROM
+and rebuilds the exact-renderer phase cache outside the measured bracket.
 
 This is deliberately a strict floor: it omits envelope evolution,
 feedback, modulation routing, LFO/noise, write-event service, panning, SSI, and
@@ -167,8 +168,9 @@ PDX/FM saturation. Consequently the result does not establish that a complete
 scalar engine fits. It establishes that drift-free oscillator/table arithmetic
 is viable only when organized around DSP parallel moves. The next feasibility
 kernel must be block-oriented and specialized by YM algorithm, allowing gain,
-modulation, and buffer traffic to share those parallel memory slots; a generic
-feature-by-feature extension of this loop has no credible cycle margin.
+modulation, carrier accumulation, and buffer traffic to share those parallel
+memory slots; a generic feature-by-feature extension of this loop has no
+credible cycle margin.
 
 ### Algorithm-0 block spike
 
@@ -176,39 +178,59 @@ feature-by-feature extension of this loop has no credible cycle margin.
 `rt2_profile_loop_start` and `rt2_profile_loop_done` and writes its report to
 `build/dsp-profile-rt2/report.txt`. The command renders one serial
 M1(feedback)->C1->M2->C2 channel for 2048 codec frames in operator-major
-64-frame blocks: each stage keeps its 8.16 phase and fractional gain in
-registers, writes a 64-word internal-X modulator ring, and the next stage
-consumes that ring in place. Feedback and modulation are applied on every
-frame by adding the previous output into the phase word before a single MPY
-extracts the sine-table index. Each stage first derives a 64-word gain ramp in
-internal Y RAM, then consumes one gain per codec frame. The carrier writes
-interleaved stereo into the reused audio buffers, and the reply is that block's
-checksum (`$fef11f`), gated by the smoke suite.
+64-frame blocks: each stage keeps its phase in a 48-bit accumulator, writes a
+64-word internal-X modulator ring, and the next stage consumes that ring in
+place. Feedback and modulation are applied on every frame; operator gains are
+held for each block and envelope evolution is deliberately outside this
+synthesis-only spike. The carrier writes interleaved stereo into the reused
+audio buffers, and the reply is that block's checksum (`$27d93b`), gated by
+the smoke suite.
 
 The optimized loop splits feedback history across internal X/Y memory so it
 can fetch and update both words with the modulator ring, prefetches the next
 ring word beside each modulated-stage `MPY`, transfers that word into `A` while
 storing the previous result, and overlaps the carrier's left output store with
-its right-pan shift. The gain-ramp fetch occupies the remaining parallel Y slot
-on each synthesis `MPY`, so frame-accurate gain consumption adds no instruction
-to the operator loop itself; only block-rate ramp derivation remains visible.
-Command setup also copies every fourth entry of the external 256-step waveform
-into a complete signed 64-step table in internal X RAM. The hot indexed reads
-therefore avoid one external-memory instruction cycle each while oscillator
-pitch remains drift-free. Waveform phase is quantized to 64 steps, making this
-an explicit perceptual candidate rather than part of the exact kernel.
+its right-pan shift. A `$ff` address mask keeps every indexed read inside the
+DSP56001's factory 256-step signed sine ROM at `Y:$0100-$01ff`; the same value
+is the phase MAC operand. Its rounded `$9330` multiplicand is five parts per
+million low, so one `$60000` low-word correction after the 2,048-frame profile
+block restores exact boundary phase while the intermediate error stays below
+0.012 ROM step. Command setup temporarily enables that ROM, then restores the
+external map and rebuilds the cache words overlaid by the 48-bit spike state.
 
-Hatari measures 103,012 instruction cycles for the block, or 50.30 cycles
-per channel/frame — a 1.28x surcharge over the 39.16-cycle four-carrier
-floor for the full modulation topology. Per-frame ramps add 4.13 cycles to
-the optimized block-rate spike, while internal coarse-sine reads recover 4.00;
-the completed version remains 16.3% below the first 60.10-cycle
-implementation. The linear eight-channel projection is 402.39 cycles against
-the 326.27-cycle codec-frame budget: the worst-case all-algorithm-0 workload
-misses real time by 1.23x, compared to the exact kernel's 46.84x. Remaining
-headroom includes cheaper carrier-only stages for parallel algorithms,
-accumulator-space phase addressing, shared ramp derivation, and shared block
-overhead.
+Hatari measures 83,451 instruction cycles for the block, or 40.75 cycles per
+channel/frame — a 1.04x surcharge over the 39.16-cycle four-carrier floor for
+feedback, serial modulation, masking, stereo stores, and block overhead. This
+is 32.2% below the first 60.10-cycle implementation. The linear eight-channel
+projection is 325.98 cycles against the 326.27-cycle codec-frame budget, a
+bare 0.09% synthesis margin. Envelope evolution, LFO/noise, queued-write,
+SSI, and event-service costs are still absent, so this closes the arithmetic
+spike gap rather than proving an integrated real-time renderer.
+
+### Algorithm-7 carrier spike
+
+`make profile-dsp-rt3` brackets protocol command `$15` between
+`rt3_profile_loop_start` and `rt3_profile_loop_done` and writes
+`build/dsp-profile-rt3/report.txt`. It shares command `$14`'s ROM mapping,
+48-bit DDA, feedback history, block size, output buffers, correction, and
+cleanup, but routes all four operators as carriers. Operator 1 stores its
+feedback pre-scaled by 1/8, preserving the serial spike's feedback depth while
+placing a separate half-amplitude carrier in the accumulation ring.
+
+Operators 2-4 have no incoming modulation, so each masks `B` directly and
+preloads the current ring word beside that mask. A following `MAC` adds the
+sine/gain product in place, eliminating a separate `MPY` and `ADD` from each
+carrier stage; operator 4 overlaps the left output store with the right-pan
+shift. The four gains sum to 0.9375 at aligned phase, keeping the unsaturated
+test vector inside signed full scale. The deterministic reply is `$89eb00`.
+
+Hatari measures 77,211 instruction cycles, or 37.70 cycles per channel/frame.
+The linear eight-channel projection is 301.61 cycles per codec frame, leaving
+24.66 cycles (7.56%) of synthesis headroom. This is 7.48% cheaper than the
+fully serial algorithm-0 shape and establishes useful carrier-specialization
+headroom, but still excludes envelope, LFO/noise, queued-write, SSI, and event
+service. Algorithms 1-6 need their own mixtures of the measured serial and
+carrier stage shapes before integration.
 
 ## Embedded second-stage program loader
 
@@ -220,11 +242,11 @@ final YM program deliberately begins at `P:$0080`, leaving
 through `Dsp_BlkUnpacked`.
 
 The generated stream starts with magic `$4d584c`, followed by a section count
-and address/count/data records. The current program contains 2,952 initialized
+and address/count/data records. The current program contains 3,044 initialized
 words in five sparse P sections. After installing them, the loader replies
 `$4c4f41` and jumps through the replaced reset vector at `P:$0000`. The build
 generator rejects a bootstrap above the 512-word XBIOS limit, any overlap with
-the reserved loader gap or `P:$0c20` table boundary, non-P sections, and
+the reserved loader gap or `P:$0c80` table boundary, non-P sections, and
 sections outside 16-bit P memory.
 This removes the former 8 KiB converted-LOD ceiling from future specialized or
 unrolled kernels; the actual Falcon P-memory reservation is now the relevant

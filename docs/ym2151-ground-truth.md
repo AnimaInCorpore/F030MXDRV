@@ -81,12 +81,13 @@ integer domains as ymfm until the final DSP fixed-point conversion is defined.
 
 The build mechanically imports ymfm's phase-step, DT1, log-sine, power, and
 envelope-increment tables. Fixed-width and delta packing reduce host-transfer
-and DSP-memory cost. The packed source tables live in the 68030 executable, are
-329 words before alignment and the codec-rate waveform; command `$0a` uploads
-the complete 608-word block, which is expanded exactly on the DSP before
-conformance or audio work begins. DT1 continues to be read from its packed
-table. Program code is installed by the embedded second-stage loader,
-so TOS's former converted-LOD size ceiling no longer constrains specialization.
+and DSP-memory cost. The packed source tables live in the 68030 executable;
+command `$0a` uploads the complete 329-word block, which is expanded exactly
+on the DSP before conformance or audio work begins. Codec-rate kernels use the
+DSP56001's factory 256-step sine ROM instead of uploading a second waveform.
+DT1 continues to be read from its packed table. Program code is installed by
+the embedded second-stage loader, so TOS's former converted-LOD size ceiling
+no longer constrains specialization.
 The frequency path removes
 the gaps from OPM key codes, applies the DT2 deltas `[0, 384, 500, 608]`, handles
 octave overflow/clamping, adds signed DT1, and applies the x.1 multiplier
