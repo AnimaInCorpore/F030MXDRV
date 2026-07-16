@@ -284,9 +284,9 @@ run_conformance:
         bne     protocol_failed
         cmpi.b  #$a4,$12(a0)
         bne     protocol_failed
-        cmpi.b  #$14,$30(a0)
+        cmpi.b  #$14,$30(a0)           ; pitch 69*4: KF byte unchanged
         bne     protocol_failed
-        cmpi.b  #$00,$28(a0)
+        cmpi.b  #$01,$28(a0)           ; F3 detune lifted KC one semitone
         bne     protocol_failed
         cmpi.b  #$78,$08(a0)
         bne     protocol_failed
@@ -1493,6 +1493,9 @@ mdx_test_fm_track:
         dc.b    $fb,$0f                ; loudest normal volume: +2 carrier TL
         dc.b    $fe,$1b,$5a            ; raw OPM write
         dc.b    $ff,$a4                ; tempo
+        dc.b    $e8                    ; PCM8 enable is native here: a no-op
+        dc.b    $f3,$00,$40            ; detune one semitone up
+        dc.b    $f0,$00                ; explicit zero keyon delay
         dc.b    $80,$00                ; note 0 for one tick
         dc.b    $f1,$00
 mdx_test_repeat_track:
@@ -1515,12 +1518,13 @@ mdx_test_repeat_after_end:
 mdx_test_pcm_track:
         dc.b    $fc,$03                ; both outputs
         dc.b    $fb,$08                ; unity PCM8 gain
+        dc.b    $ed,$04                ; explicit default 15.625 kHz rate
         dc.b    $80,$01                ; PDX entry 0 for two ticks
         dc.b    $f1,$00
 mdx_test_end_track:
         dc.b    $f1,$00
 mdx_test_voice_table:
-        dc.b    1,$00,$00               ; ID, algorithm 0, PMS/AMS 0
+        dc.b    1,$00,$0f               ; ID, algorithm 0, all slots keyable
         dc.b    $01,$01,$01,$01         ; DT1/MUL
         dc.b    $01,$02,$03,$04         ; base TL (only C2 is a carrier)
         dc.b    $1f,$1f,$1f,$1f         ; KS/AR

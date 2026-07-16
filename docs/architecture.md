@@ -448,8 +448,23 @@ are implementation gaps against the contract, not relaxed acceptance criteria.
    frequency/output; and sub-block event splitting.
 5. Measure cycle count, SSI underruns, buffer switches, and host/DSP contention
    on a real Falcon before declaring the audio transport complete.
-6. Finish MDX software modulation, synchronization, legato, remaining command
-   behavior, and continuous mixed FM/PDX scheduling.
+6. **MML executor complete (second stage):** the tick executor now covers
+   the full MXDRV 2.06 command set from the mxdrv17.s reference: detune
+   and portamento feed a per-track 1/64-semitone pitch pipeline (target
+   plus portamento and pitch-LFO accumulator high words, clamped and
+   split into KC/KF exactly like SetOPMPitch), F0 keyon delay defers the
+   whole key sequence, F7 legato suppresses the gate keyoff so the next
+   note slurs through the OPM's edge-triggered keys, EF/EE synchronize
+   tracks through a flag array, ED writes the noise register or selects
+   the ADPCM rate, EC/EB run the four-waveform software LFOs with E9's
+   keyon delay and the original's centering and byte-carry attenuation
+   semantics, EA drives the hardware LFO with its keyon phase-reset
+   flag, E8 accepts PCM8 mode natively, nonzero F1 loop targets jump
+   backward bounded to the MDX copy, and voice records key their real
+   slot masks (the slot byte previously mis-decoded as PMS/AMS). The
+   release-corpus audit that previously counted 139 dead tracks across
+   16 files now parses every track to its end. Still open here:
+   continuous mixed FM/PDX scheduling beyond the block transport.
 7. Run a compatibility corpus of real MDX/PDX pairs and complete the public
    MXDRV call-table behavior, error handling, packaging, and hardware soak
    tests.
