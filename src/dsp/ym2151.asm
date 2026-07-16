@@ -317,6 +317,15 @@ rt5_noise_columns:
 rt5_mix_written:
         ds      1
 
+; Block-selected gain-array offsets. The AM selection publishes one output
+; pair and one modulation pair per block; the algorithm bodies load n7 from
+; whichever matches the next stage's role, so shared stage helpers stay
+; role-blind and the per-frame loops unchanged.
+rt5_gain_offset_out:
+        ds      1
+rt5_gain_offset_mod:
+        ds      1
+
 ; The PRE offsets apply before the operator-1 feedback stage advances r2 by
 ; one channel slot; the POST offsets compensate for that advance. The @cvs
 ; wrapper only strips the Y-memory attribute so the X-space feedback anchor
@@ -418,8 +427,22 @@ rt5_operator_gain_full:
 rt5_operator_gain_attenuated:
         ds      32
 
+; Modulation-scale gain pairs in the same channel-major order as the output
+; gains. A modulator stage's ring word is its ymfm output shifted into
+; 256-step sine-ROM index units (out>>1 in the logical 1024-step domain), so
+; these gains carry an extra 2^-13; an M1 with feedback instead folds the
+; exact ymfm history depth 2^-(22-FB) so the raw two-word sum matches
+; (out0+out1)>>(10-FB).
+        org     x:$24c0
+rt5_operator_gain_mod_full:
+        ds      32
+rt5_operator_gain_mod_attenuated:
+        ds      32
+
 RT5_FULL_GAIN_OFFSET equ rt5_operator_gain_full-rt5_phase
 RT5_ATTENUATED_GAIN_OFFSET equ rt5_operator_gain_attenuated-rt5_phase
+RT5_MOD_FULL_GAIN_OFFSET equ rt5_operator_gain_mod_full-rt5_phase
+RT5_MOD_ATTENUATED_GAIN_OFFSET equ rt5_operator_gain_mod_attenuated-rt5_phase
 
 ; The integrated profile groups channel carriers by their four hardware pan
 ; modes. Both-output carriers retain the internal-Y ring above. Left-only and
@@ -498,6 +521,7 @@ rt5_runtime_mode:
         ds      1
 rt5_runtime_output:
         ds      1
+
 
         org     y:$2700
 rt5_env_b:
@@ -605,7 +629,7 @@ rt5_env_cap_path:
         cmp     x1,a
         jlt     rt5_env_store_keep
 rt5_env_retire_capped:
-        ; full attenuation: pin the level, silence both gain words directly
+        ; full attenuation: pin the level, silence all four gain words
         move    x1,a
         move    a1,x:(r1+n1)
         move    n2,b
@@ -619,6 +643,12 @@ rt5_env_retire_capped:
         clr     a
         move    a1,x:(r1+n1)
         move    #rt5_operator_gain_attenuated,r1
+        nop
+        move    a1,x:(r1+n1)
+        move    #rt5_operator_gain_mod_full,r1
+        nop
+        move    a1,x:(r1+n1)
+        move    #rt5_operator_gain_mod_attenuated,r1
         nop
         move    a1,x:(r1+n1)
         jmp     rt5_env_remove
@@ -697,6 +727,20 @@ rt5_env_gain_shifted:
         asr     a
         asr     a
         sub     a,b                     ; attenuated gain = 0.75 * full
+        ; Derive the modulation-scale pair with one multiply per word: $400
+        ; is 2^-13, ymfm's out>>1 serial depth in 256-step ROM index units.
+        ; An M1's history pair therefore sums to (out0+out1)>>3 — the exact
+        ; ymfm depth for feedback level 7. Levels 1-6 saturate to that
+        ; strongest depth (level 0 dispatches feedback-less and stays exact):
+        ; the measured trade favors exact onward serial modulation, which
+        ; carries the whole downstream timbre, over per-level self-feedback.
+        move    #>$000400,x1
+        move    b1,x0
+        mpy     x0,x1,a
+        move    a1,n0                   ; modulation-scale attenuated gain
+        move    y0,x0
+        mpy     x0,x1,a
+        move    a1,x1                   ; modulation-scale full gain
 rt5_env_gain_store:
         move    n1,a                    ; operator to channel-major index
         move    #>rt5_env_gainmap,x0
@@ -711,10 +755,18 @@ rt5_env_gain_store:
         move    #rt5_operator_gain_attenuated,r1
         nop
         move    b1,x:(r1+n1)
+        move    #rt5_operator_gain_mod_full,r1
+        nop
+        move    x1,x:(r1+n1)
+        move    #rt5_operator_gain_mod_attenuated,r1
+        nop
+        move    n0,x:(r1+n1)
         rts
 rt5_env_gain_silent:
         clr     b
         move    b1,y0
+        move    #>0,x1
+        move    #0,n0
         jmp     rt5_env_gain_store
 
 ; Boundary transitions call the island's rate decode with the operator
@@ -1994,23 +2046,25 @@ rt5_initialize_events_done:
         move    a1,x:(r1)+
 rt5_initialize_event_commands_done:
 
-        ; Operator total-level amplitude bases in operator-major order keep
-        ; the audible spread the block gains previously seeded per channel:
-        ; M1 $000010, C1 $000060, M2 $000040, C2 $080000.
+        ; Operator total-level amplitude bases in operator-major order. The
+        ; gain helper now derives each stage's modulation-scale words, so
+        ; these are true 0.23 amplitudes: the old fixture pre-baked the
+        ; index-domain scale by hand (M1 $10, C1 $60, M2 $40) before the
+        ; decoded role gains existed.
         move    #rt5_tl_base,r1
-        move    #>$000010,a
+        move    #>$200000,a
         do      #8,rt5_initialize_tl_m1_done
         move    a1,x:(r1)+
 rt5_initialize_tl_m1_done:
-        move    #>$000060,a
+        move    #>$600000,a
         do      #8,rt5_initialize_tl_c1_done
         move    a1,x:(r1)+
 rt5_initialize_tl_c1_done:
-        move    #>$000040,a
+        move    #>$400000,a
         do      #8,rt5_initialize_tl_m2_done
         move    a1,x:(r1)+
 rt5_initialize_tl_m2_done:
-        move    #>$080000,a
+        move    #>$780000,a
         do      #8,rt5_initialize_tl_c2_done
         move    a1,x:(r1)+
 rt5_initialize_tl_c2_done:
@@ -2494,14 +2548,21 @@ rt5_runtime_clock_done:
 rt5_control_value_ready:
         move    a1,x:rt5_block_control
 
-        ; Select a deterministic 1.0/0.75 AM gain array once per block. All
-        ; four stages use the same n7-relative lookup, so AM remains outside
-        ; the per-frame synthesis loops while preserving per-operator gains.
+        ; Select a deterministic 1.0/0.75 AM gain generation once per block.
+        ; The published output/modulation offset pair lets each algorithm
+        ; body point n7 at the array matching the next stage's role, so AM
+        ; and role scaling both stay outside the per-frame synthesis loops.
         jclr    #16,b1,rt5_control_full_gain
-        move    #>RT5_ATTENUATED_GAIN_OFFSET,n7
+        move    #>RT5_ATTENUATED_GAIN_OFFSET,b
+        move    b1,y:rt5_gain_offset_out
+        move    #>RT5_MOD_ATTENUATED_GAIN_OFFSET,b
+        move    b1,y:rt5_gain_offset_mod
         jmp     rt5_am_selected
 rt5_control_full_gain:
-        move    #>RT5_FULL_GAIN_OFFSET,n7
+        move    #>RT5_FULL_GAIN_OFFSET,b
+        move    b1,y:rt5_gain_offset_out
+        move    #>RT5_MOD_FULL_GAIN_OFFSET,b
+        move    b1,y:rt5_gain_offset_mod
 rt5_am_selected:
 
         ; This block's PM offset scales the low eight control bits by the
@@ -2722,6 +2783,7 @@ rt5_render_algorithms01:
 
 ; Algorithm 0: O1 -> O2 -> O3 -> O4.
 rt5_render_algorithm0:
+        move    y:rt5_gain_offset_mod,n7
         move    y:(r2+n2),x1
         jsr     rt5_feedback_write_x
         move    #>RT5_INC_OP2_POST,n2
@@ -2732,6 +2794,7 @@ rt5_render_algorithm0:
         move    x:(r7+n7),y0
         move    y:(r2+n2),x1
         jsr     rt5_serial_transform_x
+        move    y:rt5_gain_offset_out,n7
         move    #>RT5_INC_OP4_POST,n2
         move    x:(r7+n7),y0
         move    y:(r2+n2),x1
@@ -2740,6 +2803,7 @@ rt5_render_algorithm0:
 
 ; Algorithm 1: (O1 + O2) -> O3 -> O4.
 rt5_render_algorithm1:
+        move    y:rt5_gain_offset_mod,n7
         move    y:(r2+n2),x1
         jsr     rt5_feedback_write_x
         move    #>RT5_INC_OP2_POST,n2
@@ -2750,6 +2814,7 @@ rt5_render_algorithm1:
         move    x:(r7+n7),y0
         move    y:(r2+n2),x1
         jsr     rt5_serial_transform_x
+        move    y:rt5_gain_offset_out,n7
         move    #>RT5_INC_OP4_POST,n2
         move    x:(r7+n7),y0
         move    y:(r2+n2),x1
@@ -2760,6 +2825,7 @@ rt5_render_algorithm1:
 ; first, then rewind to O1 and add feedback into the same modulation ring.
 ; The feedback stage has not yet advanced r2, so O2/O3 use PRE offsets.
 rt5_render_algorithm2:
+        move    y:rt5_gain_offset_mod,n7
         move    #>RT5_INC_OP2_PRE,n2
         move    r7,a
         move    #>1,x0
@@ -2780,6 +2846,7 @@ rt5_render_algorithm2:
         move    a1,r7
         move    y:(r2+n2),x1
         jsr     rt5_feedback_add_x
+        move    y:rt5_gain_offset_out,n7
         move    #>RT5_INC_OP4_POST,n2
         move    r7,a
         move    #>2,x0
@@ -2793,6 +2860,7 @@ rt5_render_algorithm2:
 
 ; Algorithm 3: (O1 -> O2 + O3) -> O4.
 rt5_render_algorithm3:
+        move    y:rt5_gain_offset_mod,n7
         move    y:(r2+n2),x1
         jsr     rt5_feedback_write_x
         move    #>RT5_INC_OP2_POST,n2
@@ -2803,6 +2871,7 @@ rt5_render_algorithm3:
         move    x:(r7+n7),y0
         move    y:(r2+n2),x1
         jsr     rt5_independent_add_x
+        move    y:rt5_gain_offset_out,n7
         move    #>RT5_INC_OP4_POST,n2
         move    x:(r7+n7),y0
         move    y:(r2+n2),x1
@@ -2812,16 +2881,20 @@ rt5_render_algorithm3:
 ; Algorithm 4: (O1 -> O2) + (O3 -> O4). Each branch routes its own carrier;
 ; the O1 and O3 modulation rings can therefore reuse the same internal X line.
 rt5_render_algorithm4:
+        move    y:rt5_gain_offset_mod,n7
         move    y:(r2+n2),x1
         jsr     rt5_feedback_write_x
+        move    y:rt5_gain_offset_out,n7
         move    #>RT5_INC_OP2_POST,n2
         move    x:(r7+n7),y0
         move    y:(r2+n2),x1
         jsr     rt5_route_carrier
+        move    y:rt5_gain_offset_mod,n7
         move    #>RT5_INC_OP3_POST,n2
         move    x:(r7+n7),y0
         move    y:(r2+n2),x1
         jsr     rt5_independent_write_x
+        move    y:rt5_gain_offset_out,n7
         move    #>RT5_INC_OP4_POST,n2
         move    x:(r7+n7),y0
         move    y:(r2+n2),x1
@@ -2831,8 +2904,10 @@ rt5_render_algorithm4:
 ; Algorithm 5: O1 modulates O2, O3, and O4 in parallel. Carrier routing only
 ; reads the shared X modulation ring, so all three branches consume it intact.
 rt5_render_algorithm5:
+        move    y:rt5_gain_offset_mod,n7
         move    y:(r2+n2),x1
         jsr     rt5_feedback_write_x
+        move    y:rt5_gain_offset_out,n7
         move    #>RT5_INC_OP2_POST,n2
         move    x:(r7+n7),y0
         move    y:(r2+n2),x1
@@ -2850,8 +2925,10 @@ rt5_render_algorithm5:
 ; Algorithm 6: (O1 -> O2) + O3 + O4. Accumulate all three carriers in X,
 ; then route the completed ring according to the decoded channel pan.
 rt5_render_algorithm6:
+        move    y:rt5_gain_offset_mod,n7
         move    y:(r2+n2),x1
         jsr     rt5_feedback_write_x
+        move    y:rt5_gain_offset_out,n7
         move    #>RT5_INC_OP2_POST,n2
         move    x:(r7+n7),y0
         move    y:(r2+n2),x1
@@ -2869,8 +2946,10 @@ rt5_render_algorithm6:
 ; Algorithm 7: O1 + O2 + O3 + O4. Route the completed four-carrier X ring
 ; after every operator and its feedback state have advanced.
 rt5_render_algorithm7:
+        move    y:rt5_gain_offset_out,n7
         move    y:(r2+n2),x1
-        jsr     rt5_feedback_write_x
+        move    x:(r7+n7),y0
+        jsr     rt5_feedback_write_bypass
         move    #>RT5_INC_OP2_POST,n2
         move    x:(r7+n7),y0
         move    y:(r2+n2),x1
@@ -2890,9 +2969,19 @@ rt5_render_algorithm7:
 ; interrupt. Callers preload each stage's decoded PM-adjusted increment into
 ; x1 and its block gain into y0 before the jsr.
 rt5_feedback_write_x:
+        ; Feedback level 0 must contribute zero self-modulation, exactly as
+        ; ymfm's (out0+out1)>>(10-FB) special-cases it, so dispatch to the
+        ; feedback-less stage instead of consuming the stale history pair.
+        ; The gain load comes first (the independent twins expect it in y0),
+        ; and the bypass still advances the channel's feedback pair: every
+        ; later stage and the next channel's control read anchor on r2/r4.
+        move    x:(r7+n7),y0
+        move    x:rt5_current_channel_control,a
+        move    #>$38,x0
+        and     x0,a
+        jeq     rt5_feedback_write_bypass
         move    #rt2_stage_ring,r3
         move    l:(r7),b10
-        move    x:(r7+n7),y0
         do      #DSP_RT2_BLOCK_FRAMES,rt5_feedback_write_x_done
         move    x:(r2),x0 y:(r4),a
         add     x0,a a1,x:(r2)
@@ -2911,10 +3000,25 @@ rt5_feedback_write_x_done:
 
 ; Add operator 1's feedback output to an existing X modulation ring. This is
 ; the reordered algorithm-2 fan-in used by the isolated command-$16 spike.
+rt5_feedback_write_bypass:
+        move    (r2)+
+        move    (r4)+
+        jmp     rt5_independent_write_x
+
+rt5_feedback_add_bypass:
+        move    (r2)+
+        move    (r4)+
+        jmp     rt5_independent_add_x
+
 rt5_feedback_add_x:
+        ; Same feedback-level-0 dispatch as the write variant.
+        move    x:(r7+n7),y0
+        move    x:rt5_current_channel_control,a
+        move    #>$38,x0
+        and     x0,a
+        jeq     rt5_feedback_add_bypass
         move    #rt2_stage_ring,r3
         move    l:(r7),b10
-        move    x:(r7+n7),y0
         do      #DSP_RT2_BLOCK_FRAMES,rt5_feedback_add_x_done
         move    x:(r2),x0 y:(r4),a
         add     x0,a a1,x:(r2)
@@ -5505,7 +5609,13 @@ ym_output_channel_done:
         ; Keep each initialized P record within TOS 4.02's converter limit.
         ds      1
 
-; Simulate the YM3012's 10.3-float encode/decode truncation.
+; Simulate the YM3012's 10.3-float encode/decode truncation. The exact-path
+; YM3012 and native clock helpers moved to the island window between the
+; exact LFO helpers (which end at P:$2617) and the exact timer clock at
+; P:$26d0: they run per native sample only in the ungated exact mode, and
+; the decoded role-gain support pushed the main stream past its P:$1400
+; ceiling.
+        org     p:$2618
 ym_roundtrip_fp:
         jsr     ym_clamp_channel
         move    a1,x:synth_result
@@ -5970,12 +6080,15 @@ rt5_initialize_mul_row_done:
 ; Fixture data consumed once at command-17 setup: eight initial channel
 ; control words and 32 ordered block-boundary writes covering every decoded
 ; register class.
+; One channel per feedback level 0-7 keeps the dispatched feedback loops
+; inside the measured bracket now that level 0 short-circuits to the
+; feedback-less stages.
 rt5_channel_control_fixture:
-        dc      $000040,$0000c1,$0000c2,$000003
-        dc      $000044,$000085,$000006,$000007
+        dc      $000060,$0000d9,$0000ea,$000003
+        dc      $00007c,$000095,$000036,$00000f
 rt5_event_fixture:
-        dc      $0220c1,$022182,$022203,$022344
-        dc      $0224c5,$022506,$022647,$021433
+        dc      $0220e1,$02219a,$02222b,$022344
+        dc      $0224fd,$022516,$022677,$021433
         dc      $026010,$026933,$027255,$027b7f,$026477
         dc      $02284a,$02295d,$022a3c,$022b65
         dc      $023080,$023144
@@ -5994,7 +6107,11 @@ rt5_event_decode_channel_control:
         move    #rt5_channel_control,r0
         nop
         move    y1,x:(r0+n0)
-        rts
+        ; A feedback change moves M1's exact history-depth scale, so rebuild
+        ; that operator's gain pair from its current level and total level.
+        move    n0,a
+        move    a1,n1                   ; M1's operator-major slot = channel
+        jmp     rt5_env_gain_op
 
         ; DT1/MUL writes update the live multiplier in operator-major order,
         ; then rebuild all four channel increments so a mid-song voice load

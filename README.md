@@ -113,10 +113,12 @@ why the project publishes its own profiler.
   on stop. `make capture-realtime` replays all 15 perceptual scenarios
   through that production stream in Hatari and gates the reconstructed
   vectors. The realtime pitch conversion is exact — **0.009 ppm drift,
-  at most 7 counts of phase error** — and pitch, timing, noise,
-  algorithms 0-1, and feedback-7 pass. The measured remaining kernel work:
-  serial-modulation depth (algorithms 2-5 spectral cosine 0.30-0.69),
-  true AM in place of the deterministic block selection, the swapped
+  at most 7 counts of phase error** — serial modulation runs at ymfm's
+  decoded out>>1 depth through role-scaled gains, and pitch, timing,
+  noise, algorithms 0-3, and feedback-7 pass at 313.15 cycles/frame.
+  The measured remaining kernel work: true AM in place of the
+  deterministic block selection (its AMS-blind 0.75 smear depresses
+  algorithms 4-7 and feedback-0), per-level feedback depth, the swapped
   stereo channel, DT1/DT2, noise-frequency/output substitution, and
   sub-block event splitting.
 - MDX synchronization/modulation, remaining command behavior, real-hardware
