@@ -40,6 +40,7 @@ SCENARIOS: dict[str, tuple[str, int, int | None, int | None]] = {
     "envelope": ("perceptual_envelope.trace", 8192, None, None),
     "lfo": ("perceptual_lfo.trace", 8192, None, None),
     "noise": ("noise_channel7.trace", 8192, None, None),
+    "noise-slow": ("noise_channel7_slow.trace", 8192, None, None),
     **{
         f"algorithm-{index}": ("perceptual_topology.trace", 4096, index, 4)
         for index in range(8)
@@ -52,6 +53,7 @@ SCENARIOS: dict[str, tuple[str, int, int | None, int | None]] = {
 # (memory space, first symbol, last symbol, extra words past the last symbol).
 STATE_RANGES: tuple[tuple[str, str, str, int], ...] = (
     ("x", "rt5_native_phase", "rt5_timer_status", 0),
+    ("x", "rt5_noise_threshold", "rt5_noise_gain", 0),
     ("x", "rt5_phase", "rt5_phase", 31),
     ("y", "rt5_phase", "rt5_phase", 31),
     ("y", "rt5_env_a", "rt5_operator_increment", 31),
@@ -355,6 +357,9 @@ class Boundary:
     env_states: list[int]  # operator-major raw DSP state bits
     env_a: list[int]  # operator-major 0.23 block multiplier
     env_b: list[int]  # operator-major signed 10.13 block addend
+    noise_threshold: int  # (ymfm frequency+1)*1007; zero while disabled
+    noise_counter: int  # 2560-per-frame latch DDA position
+    noise_snap: int  # LFSR snapshot at the last latch
 
 
 def read_boundary(record: Record, symbols: dict[tuple[str, str], int]) -> Boundary:
@@ -383,6 +388,9 @@ def read_boundary(record: Record, symbols: dict[tuple[str, str], int]) -> Bounda
         env_states=record.array("x", x_addr("rt5_env_state"), 32),
         env_a=record.array("y", y_addr("rt5_env_a"), 32),
         env_b=[signed24(v) for v in record.array("y", y_addr("rt5_env_b"), 32)],
+        noise_threshold=record.words[("x", x_addr("rt5_noise_threshold"))],
+        noise_counter=record.words[("x", x_addr("rt5_noise_counter"))],
+        noise_snap=record.words[("x", x_addr("rt5_noise_state_snap"))],
     )
 
 
@@ -603,12 +611,26 @@ def reconstruct_rows(
         native, event_count, event_hash = schedule[frame]
         left, right = audio[frame]
 
-        # Per-frame noise replays the same Galois steps the block jump
-        # composes; the DSP consumes bit 16 as its output/state bit.
+        # Per-frame noise replays the same Galois steps the block jump or
+        # the substitution pass composes; bit 16 is the output bit. With
+        # noise enabled the reported state is the bit resampled by the
+        # kernel's 2560-per-frame latch DDA against the decoded period,
+        # seeded from the dumped counter and snapshot at the block entry.
         lfsr = entry.lfsr
-        for _ in range(offset):
-            lfsr = lfsr_step(lfsr)
-        noise_state = (lfsr >> 16) & 1
+        if entry.noise_threshold:
+            counter = entry.noise_counter
+            snap = entry.noise_snap
+            for _ in range(offset):
+                lfsr = lfsr_step(lfsr)
+                counter += 2560
+                while counter >= entry.noise_threshold:
+                    counter -= entry.noise_threshold
+                    snap = lfsr
+            noise_state = (snap >> 16) & 1
+        else:
+            for _ in range(offset):
+                lfsr = lfsr_step(lfsr)
+            noise_state = (lfsr >> 16) & 1
 
         # The kernel publishes each block's true m_lfo_am; ymfm's channel
         # offset shifts it by the decoded AM sensitivity.

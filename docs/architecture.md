@@ -324,8 +324,8 @@ must state its relaxed boundary explicitly and retain the exact path for
 regression comparisons.
 
 The reference side of that comparison is now executable. `make check` creates
-16 codec-rate scenarios for pitch, per-operator DT1/DT2 detune, write/key
-timing, ADSR, AM/PM LFO, noise,
+17 codec-rate scenarios for pitch, per-operator DT1/DT2 detune, write/key
+timing, ADSR, AM/PM LFO, two-rate noise,
 feedback levels 0/7, and all eight algorithms. Every row records the exact
 1280:1007 native boundary, ordered-write count/hash, stereo output, and
 operator/control state. `tools/compare_ym2151_realtime.py` validates that
@@ -368,11 +368,16 @@ holding selected native outputs is not a valid shortcut because those outputs
 feed later operator state.
 
 Protocol v19 does not yet satisfy the sub-frame write-latency clause: the
-production kernel services ordered events only at 64-frame boundaries. It also
-does not yet apply channel-7 noise substitution. These are implementation gaps
-against the contract, not relaxed acceptance criteria. DT1/DT2 pitch offsets
-are decoded per operator since the channel pitch rebuild adopted the exact
-engine's position and detune semantics.
+production kernel services ordered events only at 64-frame boundaries; this is
+an implementation gap against the contract, not a relaxed acceptance criterion.
+DT1/DT2 pitch offsets are decoded per operator since the channel pitch rebuild
+adopted the exact engine's position and detune semantics, and register $0f is
+decoded into channel-7 noise substitution: operator 31's sine mutes while a
+once-per-block pass supplies ymfm's linear-attenuation noise volume, resampled
+at the decoded frequency. The substitution pass costs about 15 cycles per
+frame while noise is enabled — over the budget only in the all-channels-maxed
+profile fixture, which therefore clears $0f and leaves the noise-enabled cost
+to the capture scenarios and the hardware soak.
 
 ## Remaining roadmap
 
@@ -407,7 +412,7 @@ engine's position and detune semantics.
    The Hatari smoke gate checks FIFO and direct-write service, three buffers,
    clocks 1301/2603/3904, 3072 prepared frames, and checksum `f45044`.
 4. **Capture harness measuring (in progress):** `make capture-realtime` replays
-   all 16 perceptual scenarios through the production commands `18`/`19` in
+   all 17 perceptual scenarios through the production commands `18`/`19` in
    Hatari, dumps DSP state at every 64-frame block boundary plus each completed
    buffer, reconstructs per-frame vectors, and feeds them through the
    comparator. The DSP's native clock, LFSR jumps, and phase advances verify
@@ -447,8 +452,7 @@ engine's position and detune semantics.
    intermediates as quantization-chaos divergence at the fixture's
    maximal TL-0 depth rather than a kernel error (a comparator
    recalibration candidate); envelope attack-block reconstruction
-   (correlation 0.8902 vs 0.95); decoded noise
-   frequency/output; and sub-block event splitting.
+   (correlation 0.8902 vs 0.95); and sub-block event splitting.
 5. Measure cycle count, SSI underruns, buffer switches, and host/DSP contention
    on a real Falcon before declaring the audio transport complete.
 6. **MML executor complete (second stage):** the tick executor now covers

@@ -1,0 +1,18 @@
+# sample  register  data
+# Channel 7, algorithm 7, both outputs; only operator 4 is audible.
+0 27 c7
+0 2f 4c
+0 37 00
+0 5f 01
+0 7f 00
+0 9f 1c
+0 bf 00
+0 df 00
+0 ff 0f
+
+# Enable noise at a slow rate: field $10 decodes to ymfm frequency 15, a
+# 16-double-tick latch period (eight native samples), so the state holds
+# for several codec frames and the output turns into pitched noise. This
+# grades the frequency decode, which the fastest-rate fixture cannot.
+0 0f 90
+0 08 47

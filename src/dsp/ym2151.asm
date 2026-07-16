@@ -479,6 +479,20 @@ rt5_pitch_step:
 rt5_pitch_dt1:
         ds      1
 
+; Channel-7 noise substitution state. The threshold is the decoded latch
+; period (ymfm frequency+1, in 1007ths of a double-rate tick) and doubles
+; as the enable flag; the counter is the per-frame 2560-step DDA; the
+; snapshot holds the LFSR at the last latch so the sign survives block
+; boundaries; the gain is the block-held signed magnitude (1023-att)<<9.
+rt5_noise_threshold:
+        ds      1
+rt5_noise_counter:
+        ds      1
+rt5_noise_state_snap:
+        ds      1
+rt5_noise_gain:
+        ds      1
+
 RT5_OUT_GAIN_OFFSET equ rt5_operator_gain_out-rt5_phase
 RT5_MOD_GAIN_OFFSET equ rt5_operator_gain_mod-rt5_phase
 
@@ -526,8 +540,8 @@ rt5_pan_right_stream:
 ; 8,192-word external X/Y reservations. External P aliases external Y word
 ; for word on the Falcon (and external X aliases P at +$4000), so phys
 ; $2000-$28ff carries the cold-code island while these uninitialized arrays
-; own phys $2900 (Y) and $6400 (X); the stage-two island check keeps program
-; code below Y:$2900. Both base addresses are 64-aligned so (r5+n5)
+; own phys $2a00 (Y) and $6400 (X); the stage-two island check keeps program
+; code below Y:$2a00. Both base addresses are 64-aligned so (r5+n5)
 ; state reads stay inside one modulo block under the render's m5=63.
         org     x:$2400
 rt5_env_state:
@@ -562,7 +576,7 @@ rt5_runtime_output:
 
 
 ; Raised above the enlarged code island; only block-boundary code touches it.
-        org     y:$2900
+        org     y:$2a00
 rt5_env_b:
         ds      32                      ; signed 10.13 full-block addend
 
@@ -1938,6 +1952,11 @@ rt5_initialize_levels_done:
         move    a1,x:rt5_event_count
         move    #>$013579,a
         move    a1,x:rt5_noise_lfsr
+        clr     a
+        move    a1,x:rt5_noise_threshold
+        move    a1,x:rt5_noise_counter
+        move    a1,x:rt5_noise_state_snap
+        move    a1,x:rt5_noise_gain
         move    #>1024,a
         move    a1,x:rt5_timer_counter
         move    a1,x:rt5_timer_a_reload
@@ -2226,9 +2245,12 @@ rt5_profile_loop_start:
 
         ; Dynamic pan may produce no both-panned carrier. Instead of clearing
         ; the common ring every block, mark it unwritten: the first both-routed
-        ; carrier writes it and the emit pass skips a ring nothing wrote.
+        ; carrier writes it and the emit pass skips a ring nothing wrote. The
+        ; noise pass runs behind the flag clear because a both-panned noise
+        ; channel writes the ring first and owns the flag.
         clr     a
         move    a1,y:rt5_mix_written
+        jsr     rt5_noise_block
 
         move    #>$100,r0
         move    #rt5_feedback_1,r2
@@ -2414,6 +2436,7 @@ rt5_render_runtime_block:
         jsr     rt5_update_support_block
         clr     a
         move    a1,y:rt5_mix_written
+        jsr     rt5_noise_block
         move    #>$100,r0
         move    #rt5_feedback_1,r2
         move    #rt5_feedback_0,r4
@@ -2549,7 +2572,12 @@ rt5_runtime_clock_done:
         ; Galois LFSR. Linearity splits the old state into 6/6/5-bit slice
         ; contributions; the three lookup tables were derived at command
         ; setup from the step function itself, and the five-bit slice already
-        ; carries the bit-16 column.
+        ; carries the bit-16 column. With noise enabled the substitution
+        ; pass steps these 64 frames itself, keeping the dumped boundary
+        ; states exactly 64 Galois steps apart either way.
+        move    x:rt5_noise_threshold,b
+        tst     b
+        jne     rt5_noise_jump_skipped
         move    x:rt5_noise_lfsr,b
         move    #>$00003f,y0
         move    b,a
@@ -2573,6 +2601,7 @@ rt5_runtime_clock_done:
         move    x:(r3+n3),x0
         eor     x0,a
         move    a1,x:rt5_noise_lfsr
+rt5_noise_jump_skipped:
 
         ; Derive and apply this block's true AM in the island: waveform AM
         ; byte from the LFO index, m_lfo_am = am*AMD>>7 published through
@@ -2693,6 +2722,9 @@ rt5_event_below_28:
         move    #>$08,x0
         cmp     x0,a
         jeq     rt5_env_key_event
+        move    #>$0f,x0
+        cmp     x0,a
+        jeq     rt5_event_decode_noise
 rt5_decode_register_done:
         rts
 
@@ -6096,6 +6128,204 @@ rt5_start_checksum_done:
         movep   #$5a00,x:m_crb
         jmp     ssi_stream_loop
 
+; Channel-7 noise substitution, once per block between the write-first
+; flag clear and the channel renders. When register $0f enables noise,
+; operator 31's sine amplitude reads zero at decode time and this pass
+; supplies ymfm's linear-attenuation noise volume instead: the value is
+; ±(1023 - min(1023, TL*8 + level + AM))<<9 in 0.23 units — the exact
+; compute_noise_volume law under the kernel's 2^21 amplitude convention,
+; with the attenuation block-held like every other realtime control. The
+; sign resamples the LFSR output bit (bit 16 of the right-shifting
+; Galois form) at the decoded frequency through a 2560-per-frame DDA
+; against the (freq+1)*1007 latch period, and the pass steps the LFSR
+; through the 64 frames the support block skipped, so boundary dumps
+; stay exactly 64 Galois steps apart. The value lands in channel 7's
+; pan target: written to the common ring, whose write-first flag it
+; owns when panned both (or discarded by the unset flag when unpanned,
+; keeping the latch state advancing), or accumulated into a one-sided
+; planar stream.
+        org     p:$2900
+rt5_noise_block:
+        move    x:rt5_noise_threshold,a
+        tst     a
+        jeq     rt5_noise_block_done
+
+        ; block-held linear attenuation for operator 31
+        move    x:ym_regdata+$7f,a
+        move    #>$7f,x0
+        and     x0,a
+        rep     #3
+        asl     a
+        move    x:rt5_envelope_level+31,b
+        rep     #13
+        lsr     b
+        add     b,a
+        move    x:ym_regdata+$bf,b
+        jclr    #7,b1,rt5_noise_att_ready
+        move    x:ym_regdata+$3f,b
+        move    #>3,x0
+        and     x0,b
+        jeq     rt5_noise_att_ready
+        move    #>1,x0
+        sub     x0,b
+        move    x:rt5_block_control,x1  ; published block m_lfo_am
+        tst     b
+        jeq     rt5_noise_am_add
+        move    b1,y0
+        move    x1,b
+        rep     y0
+        asl     b
+        move    b1,x1
+rt5_noise_am_add:
+        add     x1,a
+rt5_noise_att_ready:
+        move    #>1023,x0
+        cmp     x0,a
+        jle     rt5_noise_att_clamped
+        move    x0,a
+rt5_noise_att_clamped:
+        move    a1,x1
+        move    x0,a
+        sub     x1,a
+        rep     #9
+        asl     a
+        move    a1,x:rt5_noise_gain
+
+        ; loop registers: y1 = LFSR, b = latch counter, x0 = threshold,
+        ; x1 = per-frame DDA step, y0 = current signed value
+        move    x:rt5_noise_gain,a
+        move    x:rt5_noise_state_snap,b
+        jclr    #16,b1,rt5_noise_sign_ready
+        neg     a
+rt5_noise_sign_ready:
+        move    a1,y0
+        move    x:rt5_noise_lfsr,y1
+        move    x:rt5_noise_counter,b
+        move    x:rt5_noise_threshold,x0
+        move    #>2560,x1
+
+        ; channel 7 pan bits pick the target: bit 6 is ymfm's first
+        ; output (reference left), bit 7 the second
+        move    x:ym_regdata+$27,a
+        jclr    #6,a1,rt5_noise_no_left
+        jclr    #7,a1,rt5_noise_left_only
+        move    #>1,a
+        move    a1,y:rt5_mix_written
+        move    #rt5_mix_ring,r1
+        jsr     rt5_noise_ring_pass
+        jmp     rt5_noise_state_store
+rt5_noise_left_only:
+        move    x:rt5_pan_left_base,r1
+        jsr     rt5_noise_stream_pass
+        jmp     rt5_noise_state_store
+rt5_noise_no_left:
+        jclr    #7,a1,rt5_noise_unpanned
+        move    x:rt5_pan_right_base,r1
+        jsr     rt5_noise_stream_pass
+        jmp     rt5_noise_state_store
+rt5_noise_unpanned:
+        move    #rt5_mix_ring,r1
+        jsr     rt5_noise_ring_pass
+rt5_noise_state_store:
+        move    y1,x:rt5_noise_lfsr
+        move    b1,x:rt5_noise_counter
+rt5_noise_block_done:
+        rts
+
+; Both passes advance one Galois step and the latch DDA per frame; the
+; ring form writes the fresh values, the stream form accumulates them.
+rt5_noise_ring_pass:
+        do      #DSP_RT2_BLOCK_FRAMES,rt5_noise_ring_done
+        add     x1,b
+        move    y1,a
+        lsr     a
+        jcc     rt5_noise_ring_stepped
+        move    #>$012000,x1
+        eor     x1,a
+        move    #>2560,x1
+rt5_noise_ring_stepped:
+        move    a1,y1
+rt5_noise_ring_drain:
+        cmp     x0,b
+        jlt     rt5_noise_ring_value
+        sub     x0,b
+        move    x:rt5_noise_gain,a
+        move    y1,x:rt5_noise_state_snap
+        jclr    #16,y1,rt5_noise_ring_pos
+        neg     a
+rt5_noise_ring_pos:
+        move    a1,y0
+        jmp     rt5_noise_ring_drain
+rt5_noise_ring_value:
+        move    y0,y:(r1)+
+rt5_noise_ring_done:
+        rts
+
+rt5_noise_stream_pass:
+        do      #DSP_RT2_BLOCK_FRAMES,rt5_noise_stream_done
+        add     x1,b
+        move    y1,a
+        lsr     a
+        jcc     rt5_noise_stream_stepped
+        move    #>$012000,x1
+        eor     x1,a
+        move    #>2560,x1
+rt5_noise_stream_stepped:
+        move    a1,y1
+rt5_noise_stream_drain:
+        cmp     x0,b
+        jlt     rt5_noise_stream_value
+        sub     x0,b
+        move    x:rt5_noise_gain,a
+        move    y1,x:rt5_noise_state_snap
+        jclr    #16,y1,rt5_noise_stream_pos
+        neg     a
+rt5_noise_stream_pos:
+        move    a1,y0
+        jmp     rt5_noise_stream_drain
+rt5_noise_stream_value:
+        move    x:(r1),a
+        add     y0,a
+        move    a,x:(r1)+
+rt5_noise_stream_done:
+        rts
+
+; Register $0f: noise enable in bit 7 plus the 5-bit frequency field,
+; decoded to the latch period (ymfm frequency = field^$1f; the period is
+; frequency+1 double-rate ticks, held in 1007ths so one codec frame adds
+; 2560). Enabling mutes operator 31's decoded sine base through the same
+; gain rebuild a TL write uses; disabling re-decodes the true TL.
+rt5_event_decode_noise:
+        move    y1,a
+        move    #>$1f,x0
+        and     x0,a
+        eor     x0,a
+        move    #>1,x0
+        add     x0,a
+        move    a1,x1
+        move    #>1007,x0
+        mpy     x0,x1,b
+        asr     b
+        move    b0,a
+        jclr    #7,y1,rt5_noise_decode_off
+        move    a1,x:rt5_noise_threshold
+        move    #>31,b
+        move    b1,x:rt5_env_current
+        move    b1,n1
+        clr     a
+        move    #rt5_tl_base,r1
+        nop
+        move    a1,x:(r1+n1)
+        jmp     rt5_env_gain_op
+rt5_noise_decode_off:
+        clr     a
+        move    a1,x:rt5_noise_threshold
+        move    #>$7f,a
+        move    a1,n0
+        move    #ym_regdata,r0
+        move    x:ym_regdata+$7f,y1
+        jmp     rt5_env_tl_event
+
 
 ; Clock the two OPM timers after the generated sample. Thus a period of N is
 ; visible in status after N clock commands, while CSM is consumed by the key
@@ -6218,6 +6448,11 @@ rt5_runtime_levels_done:
 rt5_runtime_ams_previous_done:
         move    #>1,a
         move    a1,x:rt5_noise_lfsr
+        clr     a
+        move    a1,x:rt5_noise_threshold
+        move    a1,x:rt5_noise_counter
+        move    a1,x:rt5_noise_state_snap
+        move    a1,x:rt5_noise_gain
         move    #>1024,a
         move    a1,x:rt5_timer_counter
         move    a1,x:rt5_timer_a_reload
@@ -6249,8 +6484,8 @@ rt5_runtime_env_arrays_done:
 rt5_runtime_env_state_done:
 
         ; Decode the four raw DT1/MUL rows into operator-major doubled
-        ; multipliers. DT1 remains a later compatibility refinement, but MUL
-        ; is live for every KC/KF rebuild from the first production block.
+        ; multipliers; the pitch rebuild below reads DT1 and DT2 straight
+        ; from the register image per operator.
         move    #ym_regdata+$40,r1
         move    #rt5_operator_mul,r2
         jsr     rt5_initialize_mul_row
@@ -6339,6 +6574,9 @@ rt5_runtime_tl_loop:
         jsr     rt5_decode_register
         move    #>$14,n0
         move    x:ym_regdata+$14,y1
+        jsr     rt5_decode_register
+        move    #>$0f,n0
+        move    x:ym_regdata+$0f,y1
         jsr     rt5_decode_register
 
         ; Recreate pending per-channel key masks from the exact live inputs.
@@ -7177,6 +7415,17 @@ rt5_env_tl_shifted:
         move    #rt5_tl_base,r1
         nop
         move    a1,x:(r1+n1)
+        ; while noise owns operator 31 its sine amplitude stays muted
+        move    n1,a
+        move    #>31,x0
+        cmp     x0,a
+        jne     rt5_env_tl_gain
+        move    x:rt5_noise_threshold,a
+        tst     a
+        jeq     rt5_env_tl_gain
+        clr     a
+        move    a1,x:(r1+n1)
+rt5_env_tl_gain:
         jsr     rt5_env_gain_op
         rts
 

@@ -7,12 +7,12 @@ gate turns that relaxed boundary into deterministic data and pass/fail rules.
 
 ## Reference corpus
 
-`make check` generates 16 TSV files under
+`make check` generates 17 TSV files under
 `build/reference/ym2151-perceptual/`:
 
 - sustained pitch, non-aligned key/register-write timing, a complete ADSR
-  contour, AM/PM LFO, channel-7 noise, and per-operator DT1/DT2
-  detune scenarios;
+  contour, AM/PM LFO, channel-7 noise at the fastest and a slow latch
+  rate, and per-operator DT1/DT2 detune scenarios;
 - algorithms 0-7 with operator-1 feedback level 4; and
 - algorithm 0 at feedback levels 0 and 7.
 
@@ -74,7 +74,7 @@ frame-boundary control state.
 
 ## Candidate contract
 
-A DSP capture directory must contain the same 16 filenames and columns. Run:
+A DSP capture directory must contain the same 17 filenames and columns. Run:
 
 ```sh
 make compare-realtime REALTIME_CANDIDATE_DIR=path/to/capture

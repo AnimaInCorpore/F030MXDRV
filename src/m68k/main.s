@@ -1032,6 +1032,15 @@ run_conformance:
         ; from the exact phase-step table, key on/off, all four
         ; envelope-rate groups, LFO rate/depth/waveform, and both timers,
         ; beside block-held AM/PM, planar PDX input, and final limiting.
+        ; The earlier exact-phase conformance runs left the channel-7 noise
+        ; register enabled; the realtime start now imports and decodes it,
+        ; so clear it first to keep this gate measuring the standard path.
+        ; The noise-enabled cost is measured by the capture noise scenarios.
+        moveq   #$0f,d1
+        moveq   #$00,d2
+        bsr     mxdrv_write_ym2151
+        tst.l   d0
+        bne     protocol_failed
         move.l  #DSP_CMD_PING+$c6c0,d0
         bsr     dsp_exchange
         cmp.l   #DSP_REPLY_HELLO,d0

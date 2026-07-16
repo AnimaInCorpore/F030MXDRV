@@ -19,7 +19,9 @@ from pathlib import Path
 
 CODEC_RATE = 25_175_000.0 / 4.0 / 128.0
 PHASE_MODULUS = 1 << 22
-BASE_SCENARIOS = ("pitch", "detune", "timing", "envelope", "lfo", "noise")
+BASE_SCENARIOS = (
+    "pitch", "detune", "timing", "envelope", "lfo", "noise", "noise-slow"
+)
 ALGORITHM_SCENARIOS = tuple(f"algorithm-{index}" for index in range(8))
 FEEDBACK_SCENARIOS = ("feedback-0", "feedback-7")
 SCENARIOS = BASE_SCENARIOS + ALGORITHM_SCENARIOS + FEEDBACK_SCENARIOS
@@ -271,6 +273,13 @@ def validate_reference(suite: dict[str, Vector]) -> tuple[list[str], list[str]]:
         errors.append("noise: insufficient LFSR output transitions")
     notes.append(f"noise transitions: {noise_transitions}")
 
+    slow_transitions = len(transitions(suite["noise-slow"].column("noise_state")))
+    if not 64 <= slow_transitions < noise_transitions // 2:
+        errors.append(
+            "noise-slow: the slow rate does not separate from the fast fixture"
+        )
+    notes.append(f"noise-slow transitions: {slow_transitions}")
+
     fingerprints: set[tuple[int, ...]] = set()
     for name in ALGORITHM_SCENARIOS:
         values = audio(suite[name])
@@ -401,19 +410,34 @@ def compare_suites(
         f"spectral_cosine={lfo_spectral_cosine:.4f}"
     )
 
-    noise_reference = reference["noise"].column("noise_state")
-    noise_candidate = candidate["noise"].column("noise_state")
-    reference_transitions = len(transitions(noise_reference))
-    candidate_transitions = len(transitions(noise_candidate))
-    noise_rate_error = abs(candidate_transitions - reference_transitions) / max(reference_transitions, 1)
-    noise_cosine, _, _ = spectral_metrics(noise_reference, noise_candidate)
-    if noise_rate_error > 0.03:
-        errors.append(f"noise: transition-rate error {noise_rate_error:.2%} exceeds 3%")
-    if noise_cosine < 0.70:
-        errors.append(f"noise: state spectrum cosine {noise_cosine:.4f} is below 0.70")
-    notes.append(
-        f"noise: transition_error={noise_rate_error:.2%}, spectral_cosine={noise_cosine:.4f}"
-    )
+    for scenario in ("noise", "noise-slow"):
+        noise_reference = reference[scenario].column("noise_state")
+        noise_candidate = candidate[scenario].column("noise_state")
+        reference_transitions = len(transitions(noise_reference))
+        candidate_transitions = len(transitions(noise_candidate))
+        noise_rate_error = abs(candidate_transitions - reference_transitions) / max(reference_transitions, 1)
+        noise_cosine, _, _ = spectral_metrics(noise_reference, noise_candidate)
+        # The substituted audio must carry the noise: without it channel 7
+        # emits a sine and the spectra separate immediately.
+        audio_cosine, _, _ = spectral_metrics(
+            audio(reference[scenario]), audio(candidate[scenario])
+        )
+        if noise_rate_error > 0.03:
+            errors.append(
+                f"{scenario}: transition-rate error {noise_rate_error:.2%} exceeds 3%"
+            )
+        if noise_cosine < 0.70:
+            errors.append(
+                f"{scenario}: state spectrum cosine {noise_cosine:.4f} is below 0.70"
+            )
+        if audio_cosine < 0.70:
+            errors.append(
+                f"{scenario}: audio spectrum cosine {audio_cosine:.4f} is below 0.70"
+            )
+        notes.append(
+            f"{scenario}: transition_error={noise_rate_error:.2%}, "
+            f"spectral_cosine={noise_cosine:.4f}, audio_cosine={audio_cosine:.4f}"
+        )
 
     for name in ALGORITHM_SCENARIOS + FEEDBACK_SCENARIOS:
         cosine, log_rmse, energy_ratio = spectral_metrics(

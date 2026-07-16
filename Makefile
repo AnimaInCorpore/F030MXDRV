@@ -137,6 +137,7 @@ $(YM2151_PERCEPTUAL_STAMP): $(YM2151_ORACLE) \
 		tools/compare_ym2151_realtime.py \
 		tests/traces/perceptual_topology.trace \
 		tests/traces/noise_channel7.trace \
+		tests/traces/noise_channel7_slow.trace \
 		tests/traces/perceptual_pitch.trace \
 		tests/traces/perceptual_detune.trace \
 		tests/traces/perceptual_timing.trace \
@@ -169,6 +170,8 @@ $(YM2151_PERCEPTUAL_STAMP): $(YM2151_ORACLE) \
 			> $$output_dir/lfo.tsv || exit 1; \
 		$(YM2151_ORACLE) $$mode tests/traces/noise_channel7.trace 8192 \
 			> $$output_dir/noise.tsv || exit 1; \
+		$(YM2151_ORACLE) $$mode tests/traces/noise_channel7_slow.trace 8192 \
+			> $$output_dir/noise-slow.tsv || exit 1; \
 		for algorithm in 0 1 2 3 4 5 6 7; do \
 			$(YM2151_ORACLE) $$mode tests/traces/perceptual_topology.trace 4096 \
 				--algorithm $$algorithm --feedback 4 \
@@ -238,7 +241,7 @@ $(DSP_STAGE2_IMAGE): tools/generate_dsp_stage2.py $(DSP_BUILD)/.assembled
 		--bootstrap $(DSP_BUILD)/YMBOOT.LOD \
 		--program $(DSP_BUILD)/YM2151.LOD \
 		--program-limit 0x1400 \
-		--island 0x2000 0x2900 > $@
+		--island 0x2000 0x2a00 > $@
 
 check: all reference
 	@test -s $(RELEASE_DIR)/f030mxdrv.tos
