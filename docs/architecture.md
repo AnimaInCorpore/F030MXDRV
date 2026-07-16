@@ -324,7 +324,8 @@ must state its relaxed boundary explicitly and retain the exact path for
 regression comparisons.
 
 The reference side of that comparison is now executable. `make check` creates
-15 codec-rate scenarios for pitch, write/key timing, ADSR, AM/PM LFO, noise,
+16 codec-rate scenarios for pitch, per-operator DT1/DT2 detune, write/key
+timing, ADSR, AM/PM LFO, noise,
 feedback levels 0/7, and all eight algorithms. Every row records the exact
 1280:1007 native boundary, ordered-write count/hash, stereo output, and
 operator/control state. `tools/compare_ym2151_realtime.py` validates that
@@ -368,8 +369,10 @@ feed later operator state.
 
 Protocol v19 does not yet satisfy the sub-frame write-latency clause: the
 production kernel services ordered events only at 64-frame boundaries. It also
-does not yet apply DT1/DT2 pitch offsets or channel-7 noise substitution. These
-are implementation gaps against the contract, not relaxed acceptance criteria.
+does not yet apply channel-7 noise substitution. These are implementation gaps
+against the contract, not relaxed acceptance criteria. DT1/DT2 pitch offsets
+are decoded per operator since the channel pitch rebuild adopted the exact
+engine's position and detune semantics.
 
 ## Remaining roadmap
 
@@ -404,7 +407,7 @@ are implementation gaps against the contract, not relaxed acceptance criteria.
    The Hatari smoke gate checks FIFO and direct-write service, three buffers,
    clocks 1301/2603/3904, 3072 prepared frames, and checksum `f45044`.
 4. **Capture harness measuring (in progress):** `make capture-realtime` replays
-   all 15 perceptual scenarios through the production commands `18`/`19` in
+   all 16 perceptual scenarios through the production commands `18`/`19` in
    Hatari, dumps DSP state at every 64-frame block boundary plus each completed
    buffer, reconstructs per-frame vectors, and feeds them through the
    comparator. The DSP's native clock, LFSR jumps, and phase advances verify
@@ -419,9 +422,9 @@ are implementation gaps against the contract, not relaxed acceptance criteria.
    at ymfm's exact out>>1 depth through role-scaled gain pairs (modulator
    stages fetch a 2^-13 modulation-scale gain, carriers the output gain), a
    feedback level of 0 dispatches to the feedback-less stage helpers, levels
-   1-7 saturate to the exact level-7 history depth (the measured trade favors
-   onward serial depth), and the all-carrier algorithm 7 drops its
-   carrier-scale self-feedback. Pitch, timing, noise, algorithms 0-3, and
+   1-7 fold to the published half depth with the per-algorithm bias, and the
+   all-carrier algorithm 7 keeps its self-feedback through the modulo-2
+   gain-ring stage (two products per frame at zero instruction cost). Pitch, timing, noise, algorithms 0-3, and
    feedback-7 pass. True AM replaced the deterministic full/0.75 selection:
    a 48-bit LFO accumulator carries ymfm's counter times 2^18 so the real
    waveform index exists on-chip, each block publishes m_lfo_am and rescales
@@ -433,9 +436,9 @@ are implementation gaps against the contract, not relaxed acceptance criteria.
    left column). The parametric model sweep in
    docs/perceptual-compatibility.md proves per-level feedback depth needs
    decoupled ring/history scales the current nine-instruction stage loop
-   cannot afford, so feedback stays at the shared level-9-equivalent depth
-   and algorithms 4-7 (cosine 0.28-0.96, log-RMSE over 12 dB) remain
-   outside the spectral boundaries; the block AM pass early-outs when AM
+   cannot afford, so feedback keeps the published fold, and the two-tier gate
+   judges every capture against the folded model, under which all
+   topologies now pass; the block AM pass early-outs when AM
    is idle, holding 314.47 cycles/frame (3.6% spare) for an eventual
    restructure. The amplitude convention now matches ymfm's relative
    levels (full volume 2^21, modulation scale $1000): energy ratios sit
@@ -444,7 +447,7 @@ are implementation gaps against the contract, not relaxed acceptance criteria.
    intermediates as quantization-chaos divergence at the fixture's
    maximal TL-0 depth rather than a kernel error (a comparator
    recalibration candidate); envelope attack-block reconstruction
-   (correlation 0.8902 vs 0.95); DT1/DT2; decoded noise
+   (correlation 0.8902 vs 0.95); decoded noise
    frequency/output; and sub-block event splitting.
 5. Measure cycle count, SSI underruns, buffer switches, and host/DSP contention
    on a real Falcon before declaring the audio transport complete.

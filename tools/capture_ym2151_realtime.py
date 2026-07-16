@@ -35,6 +35,7 @@ FNV_PRIME = 16_777_619
 # name -> (trace file, codec frames, algorithm override, feedback override)
 SCENARIOS: dict[str, tuple[str, int, int | None, int | None]] = {
     "pitch": ("perceptual_pitch.trace", 8192, None, None),
+    "detune": ("perceptual_detune.trace", 8192, None, None),
     "timing": ("perceptual_timing.trace", 2048, None, None),
     "envelope": ("perceptual_envelope.trace", 8192, None, None),
     "lfo": ("perceptual_lfo.trace", 8192, None, None),

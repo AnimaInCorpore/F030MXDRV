@@ -461,6 +461,24 @@ rt5_lfo_am_mult_ch:
 rt5_am_engaged:
         ds      1                       ; nonzero while any live gain is scaled
 
+; Channel pitch-rebuild scratch, decode-time only: the shared gap-removed
+; position, octave block, DT1 table row base, and channel index, plus the
+; per-operator loop counter and step/DT1 holds across the detune lookup.
+rt5_pitch_position:
+        ds      1
+rt5_pitch_block:
+        ds      1
+rt5_pitch_keycode4:
+        ds      1
+rt5_pitch_channel:
+        ds      1
+rt5_pitch_op:
+        ds      1
+rt5_pitch_step:
+        ds      1
+rt5_pitch_dt1:
+        ds      1
+
 RT5_OUT_GAIN_OFFSET equ rt5_operator_gain_out-rt5_phase
 RT5_MOD_GAIN_OFFSET equ rt5_operator_gain_mod-rt5_phase
 
@@ -2641,6 +2659,9 @@ rt5_decode_register:
         move    #>$60,x0
         cmp     x0,a
         jlt     rt5_event_below_60
+        move    #>$c0,x0
+        cmp     x0,a
+        jge     rt5_event_decode_dt2
         move    #>$80,x0
         cmp     x0,a
         jge     rt5_env_rate_event
@@ -5654,7 +5675,7 @@ ym_output_channel_done:
 ; sample only in the ungated exact mode, and
 ; the decoded role-gain support pushed the main stream past its P:$1400
 ; ceiling.
-        org     p:$2660
+        org     p:$26e0
 ym_roundtrip_fp:
         jsr     ym_clamp_channel
         move    a1,x:synth_result
@@ -5812,7 +5833,7 @@ ym_clock_channel_loop:
 ; operators (D1R register bit 7). The pass rescales live gain pairs from
 ; the AM-free base pairs, so a channel whose AMS returns to zero restores
 ; exactly; everything runs once per 64-frame block.
-        org     p:$2740
+        org     p:$27c0
 rt5_lfo_am_block:
         move    y:rt5_lfo_acc_hi,a
         rep     #16
@@ -6019,7 +6040,7 @@ rt5_fold_bias:
 
 ; The playback start handler runs once per stream, so it rides the
 ; island; the all-carrier feedback stage it displaced stays hot.
-        org     p:$2840
+        org     p:$28c0
 ; Start the production-shaped codec-rate path. Host PCM remains signed
 ; 16-bit on the wire and is expanded into planar 0.23 accumulators; sixteen
 ; 64-frame synthesis blocks fill one complete 1024-frame SSI buffer.
@@ -6079,7 +6100,7 @@ rt5_start_checksum_done:
 ; Clock the two OPM timers after the generated sample. Thus a period of N is
 ; visible in status after N clock commands, while CSM is consumed by the key
 ; preparation at the beginning of sample N.
-        org     p:$2710
+        org     p:$2790
 ym_clock_timers:
         move    x:ym_timer_b_phase,a
         move    #>1,x0
@@ -6124,7 +6145,7 @@ ym_clock_timers_done:
 
         ; Keep the cold exact global-clock helpers out of the bounded low-P
         ; region now shared with the production codec-rate control path.
-        org     p:$2540
+        org     p:$25e0
         ym_lfo_code
 
 ; -----------------------------------------------------------------------------
@@ -6511,21 +6532,62 @@ rt5_event_decode_kf:
         move    x:(r0+n0),b             ; b1 = stored key code
         jmp     rt5_rebuild_channel_pitch
 
-        ; Shared pitch rebuild: n1 = channel, b1 = KC, y0 = KF fraction.
-        ; The gap-removed note selects one of twelve 64-step table rows, the
-        ; octave shifts the exact 10.10 step, and each operator applies its
-        ; doubled multiplier before the bounded conversion into block DDA
-        ; increment units. DT1/DT2 remain fixture state in this gate.
+        ; DT2/D2R writes decode their envelope rate first, then rebuild the
+        ; channel's four increments from the stored KC/KF because the coarse
+        ; detune bits may have moved.
+rt5_event_decode_dt2:
+        move    n0,b
+        move    #>7,x0
+        and     x0,b
+        move    b1,x:rt5_pitch_channel
+        jsr     rt5_env_rate_event
+        move    x:rt5_pitch_channel,a
+        move    a1,n1                   ; channel
+        move    a1,b
+        move    #>$28,x0
+        add     x0,b
+        move    b1,n0
+        move    #ym_regdata,r0
+        nop
+        move    x:(r0+n0),b             ; stored key code
+        move    n1,a
+        move    #>$30,x0
+        add     x0,a
+        move    a1,n0
+        nop
+        move    x:(r0+n0),a
+        rep     #2
+        lsr     a
+        move    #>$3f,x0
+        and     x0,a
+        move    a1,y0                   ; stored key fraction
+
+        ; Shared pitch rebuild: n1 = channel, b1 = KC, y0 = KF fraction,
+        ; r0 = the register image. The gap-removed position (note row plus
+        ; fraction) is shared by the channel; each operator folds its DT2
+        ; coarse delta in 1/64-semitone units into that position with
+        ; ymfm's single-overflow block adjust and top-entry clamp, shifts
+        ; the exact 10.10 step by the octave, adds its signed DT1 delta
+        ; from the keycode-indexed table, and applies the doubled
+        ; multiplier before the bounded conversion into block DDA
+        ; increment units.
 rt5_rebuild_channel_pitch:
+        move    n1,a
+        move    a1,x:rt5_pitch_channel
+        move    b1,a
+        rep     #2
+        lsr     a
+        move    #>$1f,x0
+        and     x0,a                    ; 5-bit keycode
+        rep     #2
+        asl     a
+        move    a1,x:rt5_pitch_keycode4 ; DT1 table row base
         move    b1,a
         rep     #4
         lsr     a
         move    #>7,x0
-        and     x0,a                    ; octave block
-        move    a1,x1
-        move    #>7,a
-        sub     x1,a
-        move    a1,n0                   ; right-shift count = 7 - block
+        and     x0,a
+        move    a1,x:rt5_pitch_block    ; octave block
         move    b1,a
         move    #>15,x0
         and     x0,a
@@ -6538,17 +6600,10 @@ rt5_rebuild_channel_pitch:
         rep     #6
         asl     a
         add     y0,a                    ; 64-step row plus fraction
-        move    a1,n2
-        move    #opm_phase_step,r2
-        nop
-        move    y:(r2+n2),a             ; exact 10.10 base step
-        move    n0,b
-        tst     b
-        jeq     rt5_pitch_shift_done
-        rep     n0
-        lsr     a
-rt5_pitch_shift_done:
-        move    a1,y0                   ; channel step
+        move    a1,x:rt5_pitch_position
+        clr     a
+        move    a1,x:rt5_pitch_op
+
         move    #8,n2                   ; operator-major array stride
         move    #8,n3
         move    #>rt5_operator_mul,a
@@ -6559,6 +6614,96 @@ rt5_pitch_shift_done:
         add     x0,a
         move    a1,r3
         do      #4,rt5_pitch_ops_done
+        ; raw register offset for this logical operator: the M1,C1,M2,C2
+        ; walk maps to raw slots 0,2,1,3 as ((i&1)<<4)+((i>>1)<<3).
+        move    x:rt5_pitch_op,a
+        move    a1,b
+        move    #>1,x0
+        and     x0,a
+        rep     #4
+        asl     a
+        lsr     b
+        rep     #3
+        asl     b
+        add     b,a
+        move    x:rt5_pitch_channel,x0
+        add     x0,a
+        move    a1,x:rt5_pitch_dt1      ; raw slot+channel, reused below
+        move    #>$c0,x0
+        add     x0,a
+        move    a1,n0
+        nop
+        move    x:(r0+n0),a             ; DT2/D2R register
+        rep     #6
+        lsr     a
+        move    #>3,x0
+        and     x0,a
+        move    a1,n1
+        move    #opm_dt2_delta,r1
+        nop
+        move    y:(r1+n1),a             ; coarse delta, 1/64 semitone
+        move    x:rt5_pitch_position,x0
+        add     x0,a
+        move    x:rt5_pitch_block,b
+        ; With no PM in this path the position overflows at most once
+        ; (767 + 608); past block 7 the exact engine reads the top table
+        ; entry unshifted, which 767/7 reproduces here.
+        move    #>768,x0
+        cmp     x0,a
+        jlt     rt5_pitch_entry_ready
+        sub     x0,a
+        move    #>1,x0
+        add     x0,b
+        move    #>8,x0
+        cmp     x0,b
+        jlt     rt5_pitch_entry_ready
+        move    #>767,a
+        move    #>7,b
+rt5_pitch_entry_ready:
+        move    a1,n1
+        move    #opm_phase_step,r1
+        move    #>7,a
+        sub     b,a
+        move    a1,b                    ; right-shift count = 7 - block
+        move    y:(r1+n1),a             ; exact 10.10 base step
+        tst     b
+        jeq     rt5_pitch_step_shifted
+        move    b1,x0
+        rep     x0
+        lsr     a
+rt5_pitch_step_shifted:
+        move    a1,x:rt5_pitch_step
+        ; DT1: 5-bit magnitude from the packed table row keycode*4 plus the
+        ; low detune bits; bit 2 selects the negative direction. The delta
+        ; joins the already-shifted step, exactly like ym_step_shifted.
+        move    x:rt5_pitch_dt1,a
+        move    #>$40,x0
+        add     x0,a
+        move    a1,n0
+        nop
+        move    x:(r0+n0),a             ; DT1/MUL register
+        rep     #4
+        lsr     a
+        move    #>7,x0
+        and     x0,a
+        move    a1,x:rt5_pitch_dt1
+        move    #>3,x0
+        and     x0,a
+        move    x:rt5_pitch_keycode4,x0
+        add     x0,a
+        move    a1,n1
+        jsr     ym_lookup_detune        ; x0 = magnitude; keeps a, r0
+        move    x:rt5_pitch_dt1,a
+        jclr    #2,a1,rt5_pitch_dt1_ready
+        move    x0,a
+        neg     a
+        move    a1,x0
+rt5_pitch_dt1_ready:
+        move    x:rt5_pitch_channel,a
+        move    a1,n1                   ; the lookup consumed n1
+        move    x:rt5_pitch_step,a
+        add     x0,a
+        move    a1,y0
         move    x:(r2)+n2,x0            ; doubled multiplier
         mpy     x0,y0,b
         asr     b
@@ -6578,6 +6723,10 @@ rt5_pitch_shift_done:
         asr     b                       ; (step*MUL * scale) >> 19
         move    b0,a
         move    a1,x:(r3)+n3
+        move    x:rt5_pitch_op,a
+        move    #>1,x0
+        add     x0,a
+        move    a1,x:rt5_pitch_op
 rt5_pitch_ops_done:
         rts
 

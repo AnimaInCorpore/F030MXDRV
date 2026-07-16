@@ -138,6 +138,7 @@ $(YM2151_PERCEPTUAL_STAMP): $(YM2151_ORACLE) \
 		tests/traces/perceptual_topology.trace \
 		tests/traces/noise_channel7.trace \
 		tests/traces/perceptual_pitch.trace \
+		tests/traces/perceptual_detune.trace \
 		tests/traces/perceptual_timing.trace \
 		tests/traces/perceptual_envelope.trace \
 		tests/traces/perceptual_lfo.trace
@@ -158,6 +159,8 @@ $(YM2151_PERCEPTUAL_STAMP): $(YM2151_ORACLE) \
 		fi; \
 		$(YM2151_ORACLE) $$mode tests/traces/perceptual_pitch.trace 8192 \
 			> $$output_dir/pitch.tsv || exit 1; \
+		$(YM2151_ORACLE) $$mode tests/traces/perceptual_detune.trace 8192 \
+			> $$output_dir/detune.tsv || exit 1; \
 		$(YM2151_ORACLE) $$mode tests/traces/perceptual_timing.trace 2048 \
 			> $$output_dir/timing.tsv || exit 1; \
 		$(YM2151_ORACLE) $$mode tests/traces/perceptual_envelope.trace 8192 \
@@ -350,7 +353,7 @@ smoke: check
 	@rg -q "Direct Transfer 0x01c5de" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x01c6c0" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x170000" build/hatari-smoke.trace
-	@rg -q "Transfer 0x16f4c9" build/hatari-smoke.trace
+	@rg -q "Transfer 0xfaba95" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x01c6de" build/hatari-smoke.trace
 	@rg -q "XBIOS 0x80 Locksnd" build/hatari-smoke.trace
 	@rg -q "XBIOS 0x89 Dsptristate\\(0x1, 0x0\\)" build/hatari-smoke.trace

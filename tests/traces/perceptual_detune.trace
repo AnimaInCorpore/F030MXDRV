@@ -1,0 +1,39 @@
+# sample  register  data
+# Channel 0, all-carrier algorithm at feedback 0, one distinct DT1/DT2 pair
+# per operator so every fine-detune sign and coarse-detune value grades as a
+# separate phase rate. KC $44 (block 4, note 4) puts the gap-removed position
+# at 192: DT2 values 1 and 2 stay inside the 768-entry table row while
+# DT2 3 (+608) crosses it and exercises the single-overflow block adjust.
+# Raw slots: M1 DT1=+1 DT2=0, M2 DT1=-1 DT2=1, C1 DT1=+3 DT2=2,
+# C2 DT1=0 DT2=3; all multipliers 1.
+0 20 c7
+0 28 44
+0 30 00
+
+0 40 11
+0 48 51
+0 50 31
+0 58 01
+0 60 08
+0 68 0a
+0 70 0c
+0 78 02
+0 80 1c
+0 88 1c
+0 90 1c
+0 98 1c
+0 a0 00
+0 a8 00
+0 b0 00
+0 b8 00
+0 c0 00
+0 c8 40
+0 d0 80
+0 d8 c0
+0 e0 0f
+0 e8 0f
+0 f0 0f
+0 f8 0f
+
+# Key on all four operators on channel 0.
+0 08 78

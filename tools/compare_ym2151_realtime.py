@@ -19,7 +19,7 @@ from pathlib import Path
 
 CODEC_RATE = 25_175_000.0 / 4.0 / 128.0
 PHASE_MODULUS = 1 << 22
-BASE_SCENARIOS = ("pitch", "timing", "envelope", "lfo", "noise")
+BASE_SCENARIOS = ("pitch", "detune", "timing", "envelope", "lfo", "noise")
 ALGORITHM_SCENARIOS = tuple(f"algorithm-{index}" for index in range(8))
 FEEDBACK_SCENARIOS = ("feedback-0", "feedback-7")
 SCENARIOS = BASE_SCENARIOS + ALGORITHM_SCENARIOS + FEEDBACK_SCENARIOS
@@ -231,6 +231,14 @@ def validate_reference(suite: dict[str, Vector]) -> tuple[list[str], list[str]]:
         errors.append("pitch: carrier or phase does not advance")
     notes.append(f"pitch phase advance: {pitch_advance}")
 
+    detune = suite["detune"]
+    detune_rates = [phase_rate(unwrapped_phase(detune, op)) for op in range(4)]
+    if len({round(rate, 6) for rate in detune_rates}) != 4:
+        errors.append("detune: DT1/DT2 do not separate the four operator rates")
+    notes.append(
+        "detune op rates: " + ",".join(f"{rate:.2f}" for rate in detune_rates)
+    )
+
     timing_event_frames = [
         row["frame"] for row in suite["timing"].rows if row["event_count"] != 0
     ]
@@ -322,6 +330,24 @@ def compare_suites(
         errors.append("pitch: phase timing error exceeds one codec frame")
     notes.append(
         f"pitch: drift={pitch_ppm:.3f} ppm, max_phase_error={max(phase_errors, default=0)}"
+    )
+
+    # Each operator carries a different DT1/DT2 pair, so the same rate-fit
+    # drift boundary grades all four detuned tones independently.
+    detune_ppms: list[float] = []
+    for op in range(4):
+        detune_reference = phase_rate(unwrapped_phase(reference["detune"], op))
+        detune_candidate = phase_rate(unwrapped_phase(candidate["detune"], op))
+        detune_ppm = (
+            abs(detune_candidate - detune_reference) / max(detune_reference, 1e-9) * 1e6
+        )
+        detune_ppms.append(detune_ppm)
+        if detune_ppm > 20.0:
+            errors.append(
+                f"detune: op{op} long-term drift {detune_ppm:.3f} ppm exceeds 20 ppm"
+            )
+    notes.append(
+        "detune: drift=" + ",".join(f"{ppm:.3f}" for ppm in detune_ppms) + " ppm"
     )
 
     envelope_reference = reference["envelope"].column("op3_env")
