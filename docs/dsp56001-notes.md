@@ -374,7 +374,7 @@ fill — so no noise-table words occupy the bounded P-memory image. Cleanup
 disables SSI, reads SSISR and writes TX to clear a latched underrun,
 restores the external Y map, and rebuilds the exact phase cache, including
 the internal-Y frequency-cache words the decoded multiplier/increment arrays
-overlay. The deterministic reply is `$8c7df6`.
+overlay. The deterministic reply is `$377cc7`.
 
 Decoded envelope curvature runs as a block-boundary pass at `P:$0080` in
 internal P RAM, where instruction fetches avoid the external-memory penalty.

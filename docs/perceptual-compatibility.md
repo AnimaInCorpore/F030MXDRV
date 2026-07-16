@@ -104,9 +104,8 @@ The current report passes pitch (0.009 ppm least-squares drift, at most
 7 counts of phase error), timing, the complete LFO gate (range ratio
 0.984, dominant-bin error 0, spectral cosine 0.9973 with true block AM),
 noise (1.55% rate error, 0.78 spectral cosine), algorithms 0-3 (spectral
-cosine 0.72-0.76), and feedback-7. The measured open kernel work: FM
-output sits on the swapped stereo channel (the comparator's max-RMS
-channel pick tolerates this); feedback levels 1-6 saturate to the exact
+cosine 0.72-0.76), and feedback-7, with FM on the correct stereo
+channels. The measured open kernel work: feedback levels 1-6 saturate to the exact
 level-7 history depth — the measured trade that keeps onward serial
 modulation exact — so single-modulator topologies overdrive O1 against
 the level-4 reference (algorithms 4-5 at cosine 0.28-0.69, log-RMSE over

@@ -118,9 +118,9 @@ why the project publishes its own profiler.
   noise, algorithms 0-3, feedback-7, and — with true block AM from a
   48-bit LFO accumulator — **the complete LFO gate (spectral cosine
   0.9973)** pass at 320.63 cycles/frame. The measured remaining kernel
-  work: the swapped stereo channel, per-level feedback depth (algorithms
-  4-7 and feedback-0), DT1/DT2, noise-frequency/output substitution, and
-  sub-block event splitting.
+  work: per-level feedback depth (algorithms 4-7 and feedback-0),
+  DT1/DT2, noise-frequency/output substitution, and sub-block event
+  splitting.
 - MDX synchronization/modulation, remaining command behavior, real-hardware
   contention measurement, and the compatibility corpus remain. The exact
   boundary between implemented and pending work is kept in

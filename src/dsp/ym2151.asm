@@ -3153,12 +3153,12 @@ rt5_serial_accumulate_left_x_done:
 ; retaining the same decoded pan semantics as rt5_route_carrier.
 rt5_route_accumulated_carriers:
         move    x:rt5_current_channel_control,a
-        jclr    #7,a1,rt5_route_accumulated_no_left
-        jclr    #6,a1,rt5_route_accumulated_left
+        jclr    #6,a1,rt5_route_accumulated_no_left
+        jclr    #7,a1,rt5_route_accumulated_left
         move    #rt5_mix_ring,r5
         jmp     rt5_ring_mix_common
 rt5_route_accumulated_no_left:
-        jclr    #6,a1,rt5_route_accumulated_mute
+        jclr    #7,a1,rt5_route_accumulated_mute
         move    x:rt5_pan_right_base,r5
         jmp     rt5_accumulate_ring_y
 rt5_route_accumulated_left:
@@ -3208,15 +3208,17 @@ rt5_accumulate_ring_x_done:
 ; caller has already preloaded the carrier gain and increment. Muted channels
 ; still clock every operator and retain their carrier state, but do not add
 ; it to a mix ring.
+; Register $20 bit 6 enables ymfm's first output — the reference vectors'
+; left column — and bit 7 the second; the first routing had them swapped.
 rt5_route_carrier:
         move    x:rt5_current_channel_control,a
-        jclr    #7,a1,rt5_route_no_left
-        jclr    #6,a1,rt5_route_left
+        jclr    #6,a1,rt5_route_no_left
+        jclr    #7,a1,rt5_route_left
         move    #rt5_mix_ring,r1
         move    #rt5_mix_ring,r5
         jmp     rt5_serial_mix_common
 rt5_route_no_left:
-        jclr    #6,a1,rt5_route_mute
+        jclr    #7,a1,rt5_route_mute
 rt5_route_right:
         move    x:rt5_pan_right_base,r1
         move    x:rt5_pan_right_base,r5

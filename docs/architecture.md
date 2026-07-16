@@ -40,7 +40,7 @@ Every transport unit is one DSP/host 24-bit word. The upper byte is an opcode.
 | `14 00 00` | run the 2048-frame block-oriented algorithm-0 channel spike | deterministic checksum `0f 26 66` |
 | `15 00 00` | run the 2048-frame block-oriented algorithm-7 carrier spike | deterministic checksum `89 eb 00` |
 | `16 00 aa` | run the 2048-frame mixed-topology spike for algorithm `aa = 1..6` | per-algorithm deterministic checksum |
-| `17 00 00` | run the 128-block live-SSI decoded-control and envelope engine | deterministic checksum `8c 7d f6` |
+| `17 00 00` | run the 128-block live-SSI decoded-control and envelope engine | deterministic checksum `37 7c c7` |
 | `18 00 00`, then 2048 words after `52 44 59` | upload 1024 interleaved stereo PCM frames, render the realtime FM buffer, and start interrupt-fed SSI | ready token, then `00 00 00` before transmit starts |
 | `19 00 00`, then 2048 words after `52 44 59` | upload PCM to the inactive realtime buffer, render 16 64-frame FM blocks, and switch at a stereo boundary | ready token, then `00 00 00` after the switch |
 | anything else | unsupported command | `ff ff ff` |
@@ -188,7 +188,7 @@ output — and the command checksum — are bit-identical to the cleared-ring
 ordering. Algorithms 6/7 route their already-summed
 carrier rings through a separate decoded-pan path. The command explicitly
 clears a latched SSI underrun before restoring the external Y map and exact
-phase cache. Its checksum is `8c 7d f6`.
+phase cache. Its checksum is `37 7c c7`.
 
 Hatari measures 320.24 cycles per codec frame over the 8,192-frame,
 128-block profile against the 326.27-cycle budget, leaving 6.03 cycles
@@ -428,12 +428,14 @@ are implementation gaps against the contract, not relaxed acceptance criteria.
    AM-enabled operators' live gains from AM-free base pairs through one
    multiplier per sensitivity, and **every LFO check passes (range ratio
    0.984, dominant-bin error 0, spectral cosine 0.9973)** at 320.63
-   cycles/frame (1.7% spare). Still failing and next in line: FM on the
-   swapped stereo channel; the level-7-saturated feedback depth that
-   overdrives single-modulator topologies (algorithms 4-5 at cosine
-   0.28-0.69, log-RMSE over 12 dB on algorithms 4-7) and feedback-0 (0.55);
-   envelope attack-block reconstruction (correlation 0.8902 vs 0.95);
-   DT1/DT2; decoded noise frequency/output; and sub-block event splitting.
+   cycles/frame (1.7% spare), and FM output reaches the correct stereo
+   channels (register $20 bit 6 is ymfm's first output — the reference
+   left column). Still failing and next in line: the level-7-saturated
+   feedback depth that overdrives single-modulator topologies (algorithms
+   4-5 at cosine 0.28-0.69, log-RMSE over 12 dB on algorithms 4-7) and
+   feedback-0 (0.55); envelope attack-block reconstruction (correlation
+   0.8902 vs 0.95); DT1/DT2; decoded noise frequency/output; and sub-block
+   event splitting.
 5. Measure cycle count, SSI underruns, buffer switches, and host/DSP contention
    on a real Falcon before declaring the audio transport complete.
 6. Finish MDX software modulation, synchronization, legato, remaining command
