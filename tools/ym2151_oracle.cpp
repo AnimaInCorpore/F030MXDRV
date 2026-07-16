@@ -346,6 +346,16 @@ public:
             const char *value = std::getenv("YM_MODEL_FOLD_K");
             return value ? std::atoi(value) : 0;
         }();
+        // mode 3: half fold plus a per-algorithm bias, eight comma-free
+        // digits (value minus 5) in YM_MODEL_FOLD_BIAS, e.g. "56655525".
+        static const std::array<int, 8> fold_bias = [] {
+            std::array<int, 8> bias{};
+            const char *value = std::getenv("YM_MODEL_FOLD_BIAS");
+            if (value && std::strlen(value) == 8)
+                for (int i = 0; i < 8; ++i)
+                    bias[i] = value[i] - '0' - 5;
+            return bias;
+        }();
 
         for (uint32_t channel = 0; channel < 8; ++channel)
         {
@@ -367,6 +377,10 @@ public:
                 fold = feedback ? int(9 - feedback) : 0;
             else if (fold_mode == 2)
                 fold = feedback ? int(10 - feedback) / 2 : 0;
+            else if (fold_mode == 3)
+                fold = feedback
+                    ? std::max(0, int(10 - feedback) / 2 + fold_bias[algorithm])
+                    : 0;
             int32_t modulation;
             if (feedback == 0 || (fold_mode >= 0 && algorithm == 7))
                 modulation = 0;

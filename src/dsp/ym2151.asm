@@ -763,11 +763,28 @@ rt5_env_gain_shifted:
         lsr     a                       ; feedback level 1-7
         move    #>10,b
         sub     a,b
-        lsr     b                       ; k = (10-FB)>>1, always 1-4
+        lsr     b                       ; half fold (10-FB)>>1, always 1-4
+        ; per-algorithm bias: how much O1's onward serial depth matters
+        ; downstream varies by topology, so the honest-fixture sweep tuned
+        ; one signed offset per algorithm (clamped at the serial scale)
+        move    x:(r3),a
+        move    #>7,x0
+        and     x0,a
+        move    #>rt5_fold_bias,x0
+        add     x0,a
+        move    a1,r3
+        nop
+        movem   p:(r3),a
+        add     a,b
+        jgt     rt5_env_gain_fold_ready
+        move    #>$001000,a             ; k clamps to the plain serial scale
+        jmp     rt5_env_gain_mod_have
+rt5_env_gain_fold_ready:
         move    b1,n0
         move    #>$001000,a
         rep     n0
         lsr     a
+rt5_env_gain_mod_have:
         move    a1,x1
         jmp     rt5_env_gain_mod_scale
 rt5_env_gain_mod_serial:
@@ -6002,6 +6019,12 @@ rt5_am_apply_done:
 
 rt5_am_d1r_rows:
         dc      0,16,8,24               ; logical M1,C1,M2,C2 raw row * 8
+
+; Signed per-algorithm feedback-fold bias, tuned by the honest-fixture
+; model sweep: algorithms 1-2 trade more serial depth for feedback
+; accuracy, algorithm 6's carrier chain keeps its serial depth.
+rt5_fold_bias:
+        dc      0,1,1,0,0,0,$fffffd,0
 
 ; Clock the two OPM timers after the generated sample. Thus a period of N is
 ; visible in status after N clock commands, while CSM is consumed by the key

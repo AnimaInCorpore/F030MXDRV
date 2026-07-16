@@ -119,18 +119,23 @@ The current report passes pitch (0.009 ppm least-squares drift, at most
 7 counts of phase error), timing, the complete LFO gate (range ratio
 0.984, dominant-bin error 0, spectral cosine 0.9973 with true block AM),
 noise (1.55% rate error, 0.78 spectral cosine), algorithms 0-3 (spectral
-cosine measured against the recalibrated moderate-depth fixture), and
-feedback-7 (0.796), with FM on the correct stereo channels and RMS
-energy ratios of 0.90-1.06. On the honest fixture the half fold measures
-algorithm 4 at cosine 0.928 (log-RMSE 12.99 against the 12 bound),
-algorithms 0-3 at 0.67-0.69, feedback-0 at 0.61, algorithm 5 at 0.35,
-and algorithm 6 at 0.967 with log-RMSE 15.3 — a systematic 0.02-0.07
-below the model sweep's predictions, since the previous fixture's
-chaotic depth masked a residual the moderate fixture resolves: the
-kernel's stage products truncate where the model's arithmetic rounds,
-worth about 0.04 of spectral cosine in simulation. The all-carrier
-algorithm 7 still drops feedback and pays in log-RMSE. Envelope
-tracking is within
+cosine measured against the recalibrated moderate-depth fixture),
+algorithms 2 and 6 (0.706 and 0.951/11.8 with the per-algorithm fold
+bias), and feedback-7 (0.799), with FM on the correct stereo channels
+and RMS energy ratios of 0.90-1.07. The remaining spectral failures sit
+inside the bounded DSP-to-model residual of a re-quantized kernel:
+algorithm 0 fails by three thousandths (0.6970) and algorithm 3 by one
+(0.6992) at their sweep-optimal fold, algorithm 1 by twelve, algorithm 4
+passes cosine at 0.928 but carries 13.1 dB log-RMSE, and feedback-0
+(0.58) remains the most residual-sensitive chain. Algorithm 5 and the
+feedback-less algorithm 7 are the recorded structural limits. The open
+calibration question: the absolute 0.70 cosine boundary leaves about
+0.05 of headroom below the model's own floor (0.777 on algorithm 0)
+while the measured residual of any re-quantized implementation is the
+same size — a boundary relative to the gated model's score per scenario
+(for example, model minus 0.10) would separate kernel errors from
+quantization residual honestly. It is recorded here as a proposal, not
+applied. Envelope tracking is within
 one attenuation unit outside the attack block (MAE 4.44, both late
 transitions within 64 frames); its correlation shortfall (0.8902 vs 0.95)
 is the documented attack-block reconstruction limit above, not measured
