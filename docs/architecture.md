@@ -482,8 +482,12 @@ to the capture scenarios and the hardware soak.
    call both arm it, nonzero F1 jumps count completed full-song loops
    exposed in the playback flags' upper word, and the player fades out
    after its loop budget or on the first keypress (a second stops
-   immediately). Still open here: continuous mixed FM/PDX scheduling
-   beyond the block transport.
+   immediately). Continuous mixed FM/PDX scheduling is gated by `make
+   endurance`: an argument-less AUTOPLAY.INF launch plays a real corpus
+   MDX/PDX pair end to end under Hatari — sustained refills as the only
+   cadence, live ADPCM decoding, the natural song end, and the clean
+   CODEC/DSP shutdown — with the trace asserting the refill volume and
+   the absence of protocol error replies.
 7. Run a compatibility corpus of real MDX/PDX pairs and complete the public
    MXDRV call-table behavior, error handling, packaging, and hardware soak
    tests.

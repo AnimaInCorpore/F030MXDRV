@@ -31,6 +31,8 @@ PLAYER_FADE_SPEED      equ     8
 ; tokens. in: a0=basepage+$80; out: d0=0 empty, 1 valid, -1 malformed
 player_parse_tail:
         movem.l d1-d7/a0-a6,-(sp)
+        clr.b   player_autoplay_tried
+player_parse_restart:
         lea     player_mdx_filename,a1
         lea     player_pdx_filename,a2
         clr.b   (a1)
@@ -131,6 +133,38 @@ player_parse_two:
         moveq   #1,d0
         bra     player_parse_return
 player_parse_empty:
+        ; No command tail: an AUTOPLAY.INF beside the program supplies the
+        ; same two-token grammar, so desktop launches and unattended test
+        ; runs start playback without arguments. Control bytes and line
+        ; endings read as separators before the reparse.
+        tst.b   player_autoplay_tried
+        bne     player_parse_none
+        move.b  #1,player_autoplay_tried
+        Fopen   player_autoplay_name,#0
+        tst.l   d0
+        bmi     player_parse_none
+        move.w  d0,d3
+        Fread   d3,#127,player_autoplay_text
+        move.l  d0,d4
+        Fclose  d3
+        tst.l   d4
+        ble     player_parse_none
+        cmpi.l  #127,d4
+        bhi     player_parse_none
+        lea     player_autoplay_text,a3
+        move.l  d4,d0
+player_autoplay_sanitize:
+        cmpi.b  #33,(a3)
+        bcc     player_autoplay_keep
+        move.b  #' ',(a3)
+player_autoplay_keep:
+        addq.l  #1,a3
+        subq.l  #1,d0
+        bne     player_autoplay_sanitize
+        lea     player_autoplay_buffer,a0
+        move.b  d4,(a0)
+        bra     player_parse_restart
+player_parse_none:
         moveq   #0,d0
         bra     player_parse_return
 player_parse_error:
@@ -409,6 +443,9 @@ player_cleanup_return:
 
 player_loading_text:
         dc.b    'Loading MDX/PDX files...',13,10,0
+player_autoplay_name:
+        dc.b    'AUTOPLAY.INF',0
+        even
 player_playing_text:
         dc.b    'Playing ',0
 player_playing_suffix:
@@ -461,6 +498,12 @@ player_audio_started:
         ds.b    1
 player_fading:
         ds.b    1
+player_autoplay_tried:
+        ds.b    1
+player_autoplay_buffer:
+        ds.b    1                       ; length byte ahead of the text
+player_autoplay_text:
+        ds.b    128
 player_old_left_atten:
         ds.w    1
 player_old_right_atten:
