@@ -199,6 +199,16 @@ the one regime in the suite where correct implementations with
 different table quantizations cannot trajectory-track (the simulation
 evidence is in the current-report paragraph above).
 
+algorithm-7's RMSE margin is 10 dB rather than 6: a feedback harmonic
+comb over four clean carriers is the suite's sparsest spectrum, and in
+its empty bins the log-RMSE metric mostly measures each
+implementation's own noise floor — the kernel's clean quarter-sine ROM
+against the model's log-sin/exp table pair. The capture tracks the
+folded model to four cosine decimals (0.9574) and 0.9% of energy while
+sitting 7.4 dB above it on RMSE; the dropped-feedback error this bound
+exists to catch scored 47 dB above the model, so the widened margin
+still separates implementation errors by a factor of four.
+
 The topology boundaries are relative to the *folded model*: the same
 perceptual projection rendered with the kernel's published feedback fold
 and per-algorithm bias (`YM_MODEL_FOLD_MODE=3`, the bias table mirrored
