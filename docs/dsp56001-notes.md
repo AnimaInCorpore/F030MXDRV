@@ -153,6 +153,16 @@ whose AMS is (or just stopped being) nonzero from AM-free base pairs;
 operators opt in through D1R bit 7 exactly as on chip. The same index byte
 feeds the block PM offset.
 
+The amplitude convention matches ymfm's relative levels: a full-volume
+operator peaks at 2^21 of the 0.23 domain — one quarter of the signed
+output range, exactly ymfm's 8191 of 16 bits — so a four-carrier channel
+sums to full scale without invoking the accumulator limiter, PCM and FM
+share headroom correctly, and the modulation-scale multiplier ($1000,
+2^-11) lands ring words at ymfm's exact out>>1 serial depth. Getting
+either scale wrong shows up spectrally, not just in level: 4x-deep
+modulation buries fundamentals under high-order sidebands, and clipped
+carrier sums counterfeit harmonics that vanish once levels are right.
+
 The production block boundary drains the real 32-entry transport FIFO and uses
 the same register decoder for direct live writes. Algorithm/pan, TL, KC/KF,
 MUL, key edges, envelope rates, LFO, and timers update persistent state. The

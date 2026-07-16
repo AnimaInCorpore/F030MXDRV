@@ -737,15 +737,16 @@ rt5_env_gain_op:
         asr     a
 rt5_env_gain_shifted:
         move    a1,y0                   ; output-scale gain
-        ; The modulation scale is one multiply: $400 is 2^-13, ymfm's out>>1
-        ; serial depth in 256-step ROM index units. An M1's history pair
-        ; therefore sums to (out0+out1)>>1 in ymfm's 1024-step domain — a
-        ; level-9-equivalent feedback depth, 4x ymfm's strongest level 7
-        ; (level 0 dispatches feedback-less and stays exact). The parametric
-        ; model sweep shows no single-scale fold reaches the per-level
-        ; boundaries, and an exact split needs per-frame cycles the budget
-        ; does not have; see docs/perceptual-compatibility.md.
-        move    #>$000400,x1
+        ; The modulation scale is one multiply: $1000 is 2^-11, which under
+        ; the 2^21 full-volume amplitude convention lands the ring at ymfm's
+        ; exact out>>1 serial depth in 256-step ROM index units. An M1's
+        ; history pair therefore sums to (out0+out1)>>1 in ymfm's 1024-step
+        ; domain — a level-9-equivalent feedback depth (level 0 dispatches
+        ; feedback-less and stays exact). The parametric model sweep shows
+        ; no single-scale fold reaches the per-level boundaries, and an
+        ; exact split needs per-frame cycles the budget does not have; see
+        ; docs/perceptual-compatibility.md.
+        move    #>$001000,x1
         move    y0,x0
         mpy     x0,x1,a
         move    a1,x1                   ; modulation-scale gain
@@ -2063,25 +2064,24 @@ rt5_initialize_events_done:
         move    a1,x:(r1)+
 rt5_initialize_event_commands_done:
 
-        ; Operator total-level amplitude bases in operator-major order. The
-        ; gain helper now derives each stage's modulation-scale words, so
-        ; these are true 0.23 amplitudes: the old fixture pre-baked the
-        ; index-domain scale by hand (M1 $10, C1 $60, M2 $40) before the
-        ; decoded role gains existed.
+        ; Operator total-level amplitude bases in operator-major order, in
+        ; the ymfm-relative 0.23 convention whose full volume is 2^21 (an
+        ; operator peaks at 1/4 of the signed output range, like ymfm's
+        ; 8191 of 16 bits).
         move    #rt5_tl_base,r1
-        move    #>$200000,a
+        move    #>$080000,a
         do      #8,rt5_initialize_tl_m1_done
         move    a1,x:(r1)+
 rt5_initialize_tl_m1_done:
-        move    #>$600000,a
+        move    #>$180000,a
         do      #8,rt5_initialize_tl_c1_done
         move    a1,x:(r1)+
 rt5_initialize_tl_c1_done:
-        move    #>$400000,a
+        move    #>$100000,a
         do      #8,rt5_initialize_tl_m2_done
         move    a1,x:(r1)+
 rt5_initialize_tl_m2_done:
-        move    #>$780000,a
+        move    #>$1e0000,a
         do      #8,rt5_initialize_tl_c2_done
         move    a1,x:(r1)+
 rt5_initialize_tl_c2_done:

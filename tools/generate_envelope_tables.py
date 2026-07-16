@@ -79,8 +79,13 @@ def main() -> int:
     env_fraction = [
         min(int(round(2.0 ** (-frac / 64.0) * (1 << 23))), UNITY) for frac in range(64)
     ]
+    # ymfm's full-volume operator peaks at 8191 of the signed 16-bit output
+    # range, so the 0.23 amplitude convention carries that same 1/4 relative
+    # level. Everything the kernel derives from gains inherits it: serial
+    # modulation and feedback depth land at ymfm's scale, and a four-carrier
+    # sum peaks at exactly full scale instead of clipping the limiter.
     tl_fraction = [
-        min(int(round(2.0 ** (-frac / 8.0) * (1 << 23))), UNITY) for frac in range(8)
+        min(int(round(2.0 ** (-frac / 8.0) * (1 << 21))), UNITY) for frac in range(8)
     ]
     # operator-major index (logical*8 + channel) to raw register slot and to
     # the channel-major phase/gain index; logical order is M1,C1,M2,C2.

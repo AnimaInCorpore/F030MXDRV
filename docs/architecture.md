@@ -437,10 +437,15 @@ are implementation gaps against the contract, not relaxed acceptance criteria.
    and algorithms 4-7 (cosine 0.28-0.96, log-RMSE over 12 dB) remain
    outside the spectral boundaries; the block AM pass early-outs when AM
    is idle, holding 314.47 cycles/frame (3.6% spare) for an eventual
-   restructure. Also failing: feedback-0 at 0.55 where the model predicts
-   0.74 — an unexplained kernel discrepancy worth its own hunt; envelope
-   attack-block reconstruction (correlation 0.8902 vs 0.95); DT1/DT2;
-   decoded noise frequency/output; and sub-block event splitting.
+   restructure. The amplitude convention now matches ymfm's relative
+   levels (full volume 2^21, modulation scale $1000): energy ratios sit
+   at 0.99-1.09 and multi-carrier sums no longer clip the limiter.
+   Also failing: feedback-0 at 0.55, diagnosed via instrumented model
+   intermediates as quantization-chaos divergence at the fixture's
+   maximal TL-0 depth rather than a kernel error (a comparator
+   recalibration candidate); envelope attack-block reconstruction
+   (correlation 0.8902 vs 0.95); DT1/DT2; decoded noise
+   frequency/output; and sub-block event splitting.
 5. Measure cycle count, SSI underruns, buffer switches, and host/DSP contention
    on a real Falcon before declaring the audio transport complete.
 6. Finish MDX software modulation, synchronization, legato, remaining command

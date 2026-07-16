@@ -104,15 +104,23 @@ The current report passes pitch (0.009 ppm least-squares drift, at most
 7 counts of phase error), timing, the complete LFO gate (range ratio
 0.984, dominant-bin error 0, spectral cosine 0.9973 with true block AM),
 noise (1.55% rate error, 0.78 spectral cosine), algorithms 0-3 (spectral
-cosine 0.72-0.76), and feedback-7, with FM on the correct stereo
-channels. The measured open kernel work: feedback runs at one shared
-depth — the raw history-pair sum, a level-9 equivalent — so
+cosine 0.71-0.76 with RMS energy ratios of 0.99-1.09 under the
+ymfm-relative amplitude convention), and feedback-7, with FM on the
+correct stereo channels. The measured open kernel work: feedback runs at
+one shared depth — the raw history-pair sum, a level-9 equivalent — so
 single-modulator topologies overdrive O1 against the level-4 reference
-(algorithms 4-5 at cosine 0.28-0.69, log-RMSE over 12 dB on algorithms
-4-7); the all-carrier algorithm 7 drops feedback entirely and pays for it
-in log-RMSE; and feedback-0 measures 0.55 where the parametric model
-predicts 0.74 at identical semantics, an unexplained kernel discrepancy
-worth its own investigation. Envelope tracking is within
+(algorithm 4 at cosine 0.6989, one thousandth under the boundary, with
+log-RMSE 19.6; algorithm 5 at 0.29); the all-carrier algorithm 7 drops
+feedback entirely and pays for it in log-RMSE. feedback-0 measures 0.55
+where the model predicts 0.74 at identical semantics: instrumented C++
+intermediates show per-stage agreement within table quantization and
+chaotic divergence from stage 3 on — at the fixture's maximal TL-0
+modulation depth a fraction-of-a-percent stage difference moves the next
+sine index by dozens of steps, so the scenario compares quantization
+chaos flavors rather than kernel correctness, and only ymfm's own
+13-bit log tables (unaffordable in zero-wait internal memory) would
+track it. Recalibrating those scenarios to moderate modulator levels is
+the honest follow-up. Envelope tracking is within
 one attenuation unit outside the attack block (MAE 4.44, both late
 transitions within 64 frames); its correlation shortfall (0.8902 vs 0.95)
 is the documented attack-block reconstruction limit above, not measured
