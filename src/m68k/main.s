@@ -413,6 +413,50 @@ run_conformance:
         tst.b   mxdrv_mdx_error
         bne     protocol_failed
 
+        ; A nonzero F1 loops the performance and counts completed passes in
+        ; the playback flags' upper word; an armed fade then ramps the
+        ; carrier to saturation and retires playback like a song end.
+        moveq   #2,d0
+        move.l  #mdx_fade_song_end-mdx_fade_song,d1
+        lea     mdx_fade_song(pc),a1
+        bsr     mxdrv_call
+        tst.l   d0
+        bne     protocol_failed
+        moveq   #4,d0
+        bsr     mxdrv_call
+        tst.l   d0
+        bne     protocol_failed
+        moveq   #4,d3                  ; five ticks: one loop per tick after
+.fade_prime_ticks:                     ; the first for this one-note song
+        bsr     mxdrv_mdx_timer_service
+        dbra    d3,.fade_prime_ticks
+        moveq   #$12,d0
+        bsr     mxdrv_call
+        swap    d0
+        cmpi.w  #4,d0
+        bne     protocol_failed
+
+        moveq   #0,d1                  ; fastest wait: one step every tick
+        moveq   #$0c,d0
+        bsr     mxdrv_call
+        tst.l   d0
+        bne     protocol_failed
+        move.w  #69,d3                 ; 62 steps to full attenuation
+.fade_ticks:
+        bsr     mxdrv_mdx_timer_service
+        dbra    d3,.fade_ticks
+        moveq   #$12,d0                ; faded: paused=$01, playing=$00
+        bsr     mxdrv_call
+        cmpi.w  #$0100,d0
+        bne     protocol_failed
+        moveq   #$10,d0
+        bsr     mxdrv_call
+        move.l  d0,a0
+        cmpi.b  #$40,$78(a0)           ; the carrier TL ramped deep into the
+        bcs     protocol_failed        ; fade before the final keyoff muted it
+        tst.b   $08(a0)                ; keys are off after the fade retires
+        bne     protocol_failed
+
         ; A syntactically valid MDX whose F5 target leaves the copied image
         ; must retire safely instead of decrementing arbitrary host memory.
         moveq   #2,d0
@@ -1541,6 +1585,35 @@ mdx_test_voice_table:
         dc.b    $00,$00,$00,$00         ; DT2/D2R
         dc.b    $0f,$0f,$0f,$0f         ; D1L/RR
 mdx_test_song_end:
+        even
+
+; One looping FM note: F1 jumps back to the note every pass, so the loop
+; counter increments once per tick after the first.
+mdx_fade_song:
+        dc.b    'Fade loop',13,10,$1a,0
+mdx_fade_sequence:
+        dc.w    mdx_fade_voice-mdx_fade_sequence
+        dc.w    mdx_fade_track-mdx_fade_sequence
+        dcb.w   8,mdx_fade_end_track-mdx_fade_sequence
+mdx_fade_track:
+        dc.b    $fd,$01
+        dc.b    $fb,$0f
+mdx_fade_note:
+        dc.b    $80,$00
+        dc.b    $f1
+        dc.w    mdx_fade_note-mdx_fade_resume
+mdx_fade_resume:
+mdx_fade_end_track:
+        dc.b    $f1,$00
+mdx_fade_voice:
+        dc.b    1,$00,$0f               ; ID, algorithm 0, all slots keyable
+        dc.b    $01,$01,$01,$01         ; DT1/MUL
+        dc.b    $01,$02,$03,$04         ; base TL (only C2 is a carrier)
+        dc.b    $1f,$1f,$1f,$1f         ; KS/AR
+        dc.b    $00,$00,$00,$00         ; AMS/D1R
+        dc.b    $00,$00,$00,$00         ; DT2/D2R
+        dc.b    $0f,$0f,$0f,$0f         ; D1L/RR
+mdx_fade_song_end:
         even
 
 ; All structural offsets are valid, but track 0's F5 branch target is not.

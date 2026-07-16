@@ -20,6 +20,8 @@ PLAYER_SOUND_LTATTEN   equ     0
 PLAYER_SOUND_RTATTEN   equ     1
 PLAYER_SOUND_INQUIRE   equ     -1
 PLAYER_SOUND_FULL      equ     0
+PLAYER_LOOP_BUDGET     equ     2
+PLAYER_FADE_SPEED      equ     8
 
         text
 
@@ -256,6 +258,7 @@ player_run:
         movem.l d1-d7/a0-a6,-(sp)
         clr.b   player_sound_owned
         clr.b   player_audio_started
+        clr.b   player_fading
         Cconws  player_loading_text
 
         lea     player_mdx_filename,a0
@@ -323,17 +326,37 @@ player_loop:
         bsr     mxdrv_mdx_clock_pump
         tst.w   d0
         beq     player_finished
+        ; After the loop budget the song eases out instead of repeating
+        ; forever; the fade retires playback and the pump returns zero.
+        tst.b   player_fading
+        bne     player_check_key
+        moveq   #$12,d0
+        bsr     mxdrv_call             ; playback flags; loops in the top word
+        swap    d0
+        cmpi.w  #PLAYER_LOOP_BUDGET,d0
+        bcs     player_check_key
+        bsr     player_arm_fade
+player_check_key:
         Cconis
         tst.l   d0
         beq     player_refill
         Cconin
-        bra     player_stopped
+        tst.b   player_fading
+        bne     player_stopped         ; a second key stops immediately
+        bsr     player_arm_fade
+        bra     player_refill
 
 player_refill:
         bsr     dsp_refill_realtime_audio
         cmp.l   #DSP_REPLY_OK,d0
         bne     player_dsp_error
         bra     player_loop
+
+player_arm_fade:
+        move.b  #1,player_fading
+        moveq   #PLAYER_FADE_SPEED,d1
+        moveq   #$0c,d0
+        bra     mxdrv_call
 
 player_finished:
         Cconws  player_finished_text
@@ -435,6 +458,8 @@ player_pdx_filename:
 player_sound_owned:
         ds.b    1
 player_audio_started:
+        ds.b    1
+player_fading:
         ds.b    1
 player_old_left_atten:
         ds.w    1

@@ -473,8 +473,17 @@ to the capture scenarios and the hardware soak.
    backward bounded to the MDX copy, and voice records key their real
    slot masks (the slot byte previously mis-decoded as PMS/AMS). The
    release-corpus audit that previously counted 139 dead tracks across
-   16 files now parses every track to its end. Still open here:
-   continuous mixed FM/PDX scheduling beyond the block transport.
+   16 files now parses every track to its end. The fade machinery is
+   live: the MDX tick steps an armed fade's global attenuation (two
+   counts per tick, finishing at step 62 like the original), the offset
+   joins every carrier-TL rewrite ahead of the software volume LFO and
+   derates PCM gains, completion silences the voices and retires the
+   performance like a song end, E7 sub-command 1 and the public fadeout
+   call both arm it, nonzero F1 jumps count completed full-song loops
+   exposed in the playback flags' upper word, and the player fades out
+   after its loop budget or on the first keypress (a second stops
+   immediately). Still open here: continuous mixed FM/PDX scheduling
+   beyond the block transport.
 7. Run a compatibility corpus of real MDX/PDX pairs and complete the public
    MXDRV call-table behavior, error handling, packaging, and hardware soak
    tests.

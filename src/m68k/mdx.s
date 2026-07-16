@@ -7,6 +7,7 @@
         global  mxdrv_mdx_timer_ticks
         global  mxdrv_mdx_tempo
         global  mxdrv_mdx_error
+        global  mxdrv_mdx_loops
 
 MDX_TRACK_POINTER       equ     0
 MDX_TRACK_WAIT          equ     4
@@ -93,6 +94,8 @@ mxdrv_mdx_reset:
         clr.l   (a0)+
         clr.l   (a0)+
         move.w  #$1234,mxdrv_mdx_random ; MXDRV's noise-wave LFO seed
+        clr.w   mxdrv_mdx_loops
+        clr.w   mxdrv_mdx_looped
         rts
 
 mxdrv_mdx_active_mask:
@@ -849,6 +852,8 @@ mdx_command_extension:
         moveq   #0,d0
         move.b  (a4)+,d0
         beq     mdx_track_end
+        cmpi.b  #1,d0
+        beq     .fade
         cmpi.b  #3,d0
         bne     mdx_track_invalid
         cmpa.l  a3,a4
@@ -859,6 +864,13 @@ mdx_command_extension:
         bra     mdx_command_more
 .damp_off:
         bclr    #MDX_FLAG_DAMP,MDX_TRACK_FLAGS(a6)
+        bra     mdx_command_more
+.fade:
+        cmpa.l  a3,a4
+        bcc     mdx_track_invalid
+        move.b  (a4)+,mxdrv_fade_wait
+        clr.w   mxdrv_fade_counter
+        move.b  #1,mxdrv_fade_active
         bra     mdx_command_more
 
 ; F6 count,work copies count into the following mutable work byte. MDX data is
@@ -945,6 +957,17 @@ mdx_command_performance_end:
         bls     mdx_track_invalid
         cmpa.l  a3,a4
         bcc     mdx_track_invalid
+        ; count completed full-song loops: when every still-active track
+        ; has taken its loop jump, the performance wrapped once
+        move.w  mxdrv_mdx_looped,d0
+        bset    d7,d0
+        move.w  d0,mxdrv_mdx_looped
+        move.w  mxdrv_mdx_active,d1
+        and.w   d1,d0
+        cmp.w   d1,d0
+        bne     mdx_command_more
+        addq.w  #1,mxdrv_mdx_loops
+        clr.w   mxdrv_mdx_looped
         bra     mdx_command_more
 
 mdx_command_more:
@@ -1102,6 +1125,65 @@ mdx_tick_next:
         lea     MDX_TRACK_BYTES(a6),a6
         cmpi.w  #MDX_TRACK_COUNT,d7
         bcs     mdx_tick_track
+
+        ; Fade service: an armed fade steps the global attenuation every
+        ; wait period (two counts per tick like the original) and reapplies
+        ; every voice's volume through the cached paths; full attenuation
+        ; silences the voices and retires the performance like a normal
+        ; song end.
+        tst.b   mxdrv_fade_active
+        beq     mdx_fade_done
+        move.w  mxdrv_fade_counter,d0
+        subq.w  #2,d0
+        move.w  d0,mxdrv_fade_counter
+        bpl     mdx_fade_done
+        moveq   #0,d0
+        move.b  mxdrv_fade_wait,d0
+        move.w  d0,mxdrv_fade_counter
+        addq.b  #1,mxdrv_fade_offset
+        cmpi.b  #$3e,mxdrv_fade_offset
+        bcs     mdx_fade_apply
+        clr.b   mxdrv_fade_active
+        move.b  #$7f,mxdrv_fade_offset
+        lea     mxdrv_mdx_tracks,a6
+        moveq   #0,d7
+mdx_fade_stop_all:
+        bsr     mdx_stop_voice
+        clr.b   MDX_TRACK_ACTIVE(a6)
+        addq.w  #1,d7
+        lea     MDX_TRACK_BYTES(a6),a6
+        cmpi.w  #MDX_TRACK_COUNT,d7
+        bcs     mdx_fade_stop_all
+        clr.w   mxdrv_mdx_active
+        bra     mdx_fade_done
+mdx_fade_apply:
+        lea     mxdrv_mdx_tracks,a6
+        moveq   #0,d7
+mdx_fade_apply_track:
+        cmpi.w  #8,d7
+        bcc     mdx_fade_apply_pcm
+        bsr     mdx_apply_fm_volume
+        bra     mdx_fade_apply_next
+mdx_fade_apply_pcm:
+        tst.b   MDX_TRACK_SOUNDING(a6)
+        beq     mdx_fade_apply_next
+        move.w  d7,d0
+        subi.w  #8,d0
+        moveq   #0,d1
+        move.b  MDX_TRACK_VOLUME(a6),d1
+        move.b  mxdrv_fade_offset,d2
+        lsr.b   #2,d2
+        sub.b   d2,d1
+        bpl     mdx_fade_apply_volume
+        moveq   #0,d1
+mdx_fade_apply_volume:
+        bsr     mxdrv_pdx_voice_set_volume
+mdx_fade_apply_next:
+        addq.w  #1,d7
+        lea     MDX_TRACK_BYTES(a6),a6
+        cmpi.w  #MDX_TRACK_COUNT,d7
+        bcs     mdx_fade_apply_track
+mdx_fade_done:
 
         tst.w   mxdrv_mdx_active
         bne     mdx_tick_return
@@ -1404,6 +1486,9 @@ mdx_apply_fm_volume:
         lea     mdx_volume_table(pc),a1
         move.b  (a1,d5.w),d5
 mdx_apply_fm_volume_lfo:
+        add.b   mxdrv_fade_offset,d5
+        bcs     mdx_apply_fm_volume_clamp
+        bmi     mdx_apply_fm_volume_clamp
         add.b   MDX_TRACK_ALFO_OFFS(a6),d5
         bcs     mdx_apply_fm_volume_clamp
         bpl     mdx_apply_fm_volume_ready
@@ -1477,6 +1562,10 @@ mxdrv_mdx_timer_busy:
 mxdrv_mdx_service_count:
         ds.l    1
 mxdrv_mdx_random:
+        ds.w    1
+mxdrv_mdx_loops:
+        ds.w    1
+mxdrv_mdx_looped:
         ds.w    1
 mxdrv_mdx_sync_flags:
         ds.b    MDX_TRACK_COUNT

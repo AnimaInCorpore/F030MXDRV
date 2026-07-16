@@ -6,6 +6,10 @@
         global  mxdrv_channel_mask
         global  mxdrv_playing
         global  mxdrv_paused
+        global  mxdrv_fade_offset
+        global  mxdrv_fade_wait
+        global  mxdrv_fade_active
+        global  mxdrv_fade_counter
 
 MXDRV_MDX_CAPACITY      equ     65536
 MXDRV_PDX_CAPACITY      equ     319488
@@ -128,6 +132,10 @@ mxdrv_api_play:
         beq     mxdrv_api_error
 mxdrv_start_play:
         bsr     mxdrv_api_stop
+        ; a new performance always starts at full volume
+        clr.b   mxdrv_fade_offset
+        clr.b   mxdrv_fade_active
+        clr.w   mxdrv_fade_counter
         bsr     mxdrv_mdx_start
         tst.l   d0
         bne     mxdrv_api_error
@@ -229,8 +237,11 @@ mxdrv_api_set_fade_wait:
         moveq   #0,d0
         rts
 
+; Arm the fade with d1 as its wait reload; the MDX tick's fade service
+; steps the global attenuation from there and stops playback at silence.
 mxdrv_api_fadeout:
         move.b  d1,mxdrv_fade_wait
+        clr.w   mxdrv_fade_counter
         move.b  #1,mxdrv_fade_active
         moveq   #0,d0
         rts
@@ -256,8 +267,12 @@ mxdrv_option_11_get:
         move.b  mxdrv_option_11,d0
         rts
 
+; Playback flags plus the completed full-song loop count in the upper
+; word, so a player can budget loops without parsing track state.
 mxdrv_api_get_flags:
-        moveq   #0,d0
+        move.w  mxdrv_mdx_loops,d0
+        swap    d0
+        clr.w   d0
         move.b  mxdrv_paused,d0
         lsl.w   #8,d0
         move.b  mxdrv_playing,d0
@@ -323,6 +338,9 @@ mxdrv_fade_wait:
         ds.b    1
 mxdrv_fade_active:
         ds.b    1
+        even
+mxdrv_fade_counter:
+        ds.w    1
 mxdrv_ignore_keys:
         ds.b    1
 mxdrv_option_11:
