@@ -3019,7 +3019,7 @@ rt5_feedback_write_x:
         move    a1,n0
         mac     x1,y1,b
         move    y:(r0+n0),x0
-        mpy     x0,y0,a
+        mpyr    x0,y0,a
         move    a,x:(r3)+ a,y:(r4)
 rt5_feedback_write_x_done:
         move    b10,l:(r7)+
@@ -3056,7 +3056,7 @@ rt5_feedback_add_x:
         move    a1,n0
         mac     x1,y1,b x:(r3),x0
         move    y:(r0+n0),x0
-        mpy     x0,y0,a x:(r3),x0
+        mpyr    x0,y0,a x:(r3),x0
         add     x0,a a1,y:(r4)
         move    a,x:(r3)+
 rt5_feedback_add_x_done:
@@ -3074,7 +3074,7 @@ rt5_independent_write_x:
         move    b1,n0
         mac     x1,y1,b
         move    y:(r0+n0),x0
-        mpy     x0,y0,a
+        mpyr    x0,y0,a
         move    a,x:(r3)+
 rt5_independent_write_x_done:
         move    b10,l:(r7)+
@@ -3089,7 +3089,7 @@ rt5_independent_add_x:
         move    b1,n0
         mac     x1,y1,b
         move    y:(r0+n0),x0
-        mac     x0,y0,a
+        macr    x0,y0,a
         move    a,x:(r5)+
 rt5_independent_add_x_done:
         move    b10,l:(r7)+
@@ -3106,7 +3106,7 @@ rt5_serial_transform_x:
         move    a1,n0
         mac     x1,y1,b
         move    y:(r0+n0),x0
-        mpy     x0,y0,a x:(r3)+,x0
+        mpyr    x0,y0,a x:(r3)+,x0
         move    a,x:(r5)+ x0,a
 rt5_serial_transform_x_done:
         move    b10,l:(r7)+
@@ -3122,7 +3122,7 @@ rt5_serial_accumulate_x:
         move    a1,n0
         mac     x1,y1,b
         move    y:(r0+n0),x0
-        mpy     x0,y0,a y:(r1)+,x0
+        mpyr    x0,y0,a y:(r1)+,x0
         add     x0,a x:(r3)+,x0
         move    a,y:(r5)+
         move    x0,a
@@ -3151,7 +3151,7 @@ rt5_serial_write_y:
         move    a1,n0
         mac     x1,y1,b
         move    y:(r0+n0),x0
-        mpy     x0,y0,a x:(r3)+,x0
+        mpyr    x0,y0,a x:(r3)+,x0
         move    a,y:(r5)+
         move    x0,a
 rt5_serial_write_y_done:
@@ -3170,7 +3170,7 @@ rt5_serial_accumulate_left_x:
         move    a1,n0
         mac     x1,y1,b
         move    y:(r0+n0),x0
-        mpy     x0,y0,a x:(r1)+,x0
+        mpyr    x0,y0,a x:(r1)+,x0
         add     x0,a x:(r3)+,x0
         move    a,x:(r5)+
         move    x0,a
