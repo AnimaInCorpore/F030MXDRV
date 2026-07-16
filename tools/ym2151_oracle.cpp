@@ -336,8 +336,9 @@ public:
 
         // Experimental sweep hook: YM_MODEL_FOLD_MODE simulates the DSP
         // kernel's coupled M1 gain fold k (serial-from-O1 and the raw
-        // feedback-pair sum both shift by 1+k; O1 as a carrier and the
-        // all-carrier algorithm 7 are unaffected). Unset = exact ymfm.
+        // feedback-pair sum both shift by 1+k; O1 as a carrier is
+        // unaffected, and the all-carrier algorithm 7 keeps feedback at the
+        // fold depth through its two-product stage). Unset = exact ymfm.
         static const int fold_mode = [] {
             const char *value = std::getenv("YM_MODEL_FOLD_MODE");
             return value ? std::atoi(value) : -1;
@@ -382,7 +383,7 @@ public:
                     ? std::max(0, int(10 - feedback) / 2 + fold_bias[algorithm])
                     : 0;
             int32_t modulation;
-            if (feedback == 0 || (fold_mode >= 0 && algorithm == 7))
+            if (feedback == 0)
                 modulation = 0;
             else if (fold_mode < 0)
                 modulation = (m_feedback_0[channel] + m_feedback_1[channel])

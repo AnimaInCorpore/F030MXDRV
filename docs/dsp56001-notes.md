@@ -163,6 +163,17 @@ either scale wrong shows up spectrally, not just in level: 4x-deep
 modulation buries fundamentals under high-order sidebands, and clipped
 carrier sums counterfeit harmonics that vanish once levels are right.
 
+The all-carrier algorithm's first operator needs two products per frame —
+its ring word is the audible carrier while its feedback history wants the
+fold scale — and the data ALU has exactly two Y registers, both taken by
+the block gain and the ring mask. The dedicated stage escapes the register
+wall with a modulo-2 address ring: r5 walks a two-word internal gain pair
+under m5 = 1, and each of the loop's two `mpyr` instructions consumes the
+previous y0 while its parallel Y load fetches the other gain, so the gains
+alternate at zero instruction cost. The stage costs two instructions per
+frame over the standard loop with every access internal, and only
+algorithm-7 channels with nonzero feedback pay it.
+
 The production block boundary drains the real 32-entry transport FIFO and uses
 the same register decoder for direct live writes. Algorithm/pan, TL, KC/KF,
 MUL, key edges, envelope rates, LFO, and timers update persistent state. The

@@ -218,6 +218,13 @@ rt5_feedback_1:
 rt5_feedback_0:
         ds      8
 
+; Modulo-2 gain pair for the all-carrier O1 helper: entry 0 holds the
+; fold-scale history gain and entry 1 the carrier gain, each parallel-
+; reloading y0 inside the two-product loop. Overlays the exact detune
+; cache tail exactly like the phases above; stop rebuilds it.
+rt5_alg7_gain_ring:
+        ds      2
+
 ; One operator stage writes this ring while the next consumes its quantized
 ; table-index modulation. Modulo-64 addressing requires 64-word alignment.
         org     x:$80
@@ -2349,61 +2356,6 @@ rt5_checksum_state_done:
         jsr     send_reply
         jmp     command_loop
 
-; Start the production-shaped codec-rate path. Host PCM remains signed
-; 16-bit on the wire and is expanded into planar 0.23 accumulators; sixteen
-; 64-frame synthesis blocks fill one complete 1024-frame SSI buffer.
-command_start_realtime_mixed:
-        movep   #0,x:m_crb
-        movep   #$4100,x:m_cra
-        clr     a
-        move    a1,x:ssi_frame_count
-        move    a1,x:ssi_mix_probe_left
-        move    a1,x:ssi_mix_probe_sum
-        move    a1,x:ssi_active_buffer
-        jsr     rt5_initialize_runtime
-        move    #>1,a
-        move    a1,x:rt5_runtime_mode
-
-        move    #rt5_pan_left_stream,r1
-        move    #rt5_pan_right_stream,r7
-        jsr     rt5_receive_runtime_pcm
-        move    #>rt5_pan_left_stream,a
-        move    a1,x:rt5_pan_left_base
-        move    #>rt5_pan_right_stream,a
-        move    a1,x:rt5_pan_right_base
-        move    #>ssi_buffer_a,a
-        move    a1,x:rt5_runtime_output
-        jsr     rt5_enter_runtime_map
-        do      #DSP_RT_MIX_BLOCK_COUNT,rt5_start_blocks_done
-        jsr     rt5_render_runtime_block
-        nop
-rt5_start_blocks_done:
-
-        ; Retain a deterministic first-buffer checksum for the existing mix
-        ; query after stop; this proves the production path rendered FM data,
-        ; rather than only exercising its transport and clock state.
-        move    #ssi_buffer_a,r1
-        clr     a
-        do      #DSP_RT_MIX_FRAME_COUNT,rt5_start_checksum_done
-        move    x:(r1)+,x0
-        add     x0,a
-        move    x:(r1)+,x0
-        add     x0,a
-rt5_start_checksum_done:
-        move    a1,x:ssi_mix_probe_sum
-
-        move    #ssi_buffer_a,r6
-        move    #>2047,m6
-        nop
-        move    x:(r6)+,a
-        movep   a1,x:m_tx
-        move    #>DSP_RT_MIX_FRAME_COUNT,a
-        move    a1,x:ssi_frame_count
-        move    #>DSP_REPLY_OK,a
-        jsr     send_reply
-        movep   #$5a00,x:m_crb
-        jmp     ssi_stream_loop
-
 ; The READY token parks the DSP in this tight receive loop before TOS releases
 ; its blind block transfer. Expanding each signed PCM word by eight bits puts
 ; it in the same 0.23 accumulator domain as the codec-rate FM carriers.
@@ -2994,8 +2946,7 @@ rt5_render_algorithm6:
 rt5_render_algorithm7:
         move    #>RT5_OUT_GAIN_OFFSET,n7
         move    y:(r2+n2),x1
-        move    x:(r7+n7),y0
-        jsr     rt5_feedback_write_bypass
+        jsr     rt5_feedback_write_carrier
         move    #>RT5_INC_OP2_POST,n2
         move    x:(r7+n7),y0
         move    y:(r2+n2),x1
@@ -3009,6 +2960,46 @@ rt5_render_algorithm7:
         move    y:(r2+n2),x1
         jsr     rt5_independent_add_x
         jmp     rt5_route_accumulated_carriers
+
+; O1 for the all-carrier algorithm: its ring word is the audible carrier
+; while its feedback history needs the fold scale, so the loop computes two
+; products per frame. The gain pair alternates through a modulo-2 internal
+; ring on the mpyr parallel loads — the multiply consumes the previous y0
+; while the same instruction fetches the other gain — costing two
+; instructions per frame over the standard stage with every access internal.
+rt5_feedback_write_carrier:
+        move    x:(r7+n7),y0            ; carrier gain; n7 is the OUT offset
+        move    x:rt5_current_channel_control,a
+        move    #>$38,x0
+        and     x0,a
+        jeq     rt5_feedback_write_bypass
+        move    #>RT5_MOD_GAIN_OFFSET,n7
+        move    y0,y:rt5_alg7_gain_ring+1
+        move    x:(r7+n7),a             ; fold-scale gain from the mod array
+        move    a1,y:rt5_alg7_gain_ring
+        move    #>RT5_OUT_GAIN_OFFSET,n7
+        move    #rt5_alg7_gain_ring,r5
+        move    #>1,m5
+        move    #rt2_stage_ring,r3
+        move    l:(r7),b10
+        do      #DSP_RT2_BLOCK_FRAMES,rt5_feedback_write_carrier_done
+        move    x:(r2),x0 y:(r4),a
+        add     x0,a a1,x:(r2)
+        add     b,a
+        and     y1,a1
+        move    a1,n0
+        mac     x1,y1,b
+        move    y:(r0+n0),x0
+        mpyr    x0,y0,a y:(r5)+,y0      ; carrier product; y0 becomes fold
+        move    a,x:(r3)+
+        mpyr    x0,y0,a y:(r5)+,y0      ; history product; y0 becomes carrier
+        move    a,y:(r4)
+rt5_feedback_write_carrier_done:
+        move    b10,l:(r7)+
+        move    (r2)+
+        move    (r4)+
+        move    #>-1,m5
+        rts
 
 ; All-topology stages for the live-SSI profile. r0 is the sine-ROM base and r7
 ; walks 32 overlaid internal long phases, leaving r6/m6 untouched for the
@@ -6025,6 +6016,65 @@ rt5_am_d1r_rows:
 ; accuracy, algorithm 6's carrier chain keeps its serial depth.
 rt5_fold_bias:
         dc      0,1,1,0,0,0,$fffffd,0
+
+; The playback start handler runs once per stream, so it rides the
+; island; the all-carrier feedback stage it displaced stays hot.
+        org     p:$2840
+; Start the production-shaped codec-rate path. Host PCM remains signed
+; 16-bit on the wire and is expanded into planar 0.23 accumulators; sixteen
+; 64-frame synthesis blocks fill one complete 1024-frame SSI buffer.
+command_start_realtime_mixed:
+        movep   #0,x:m_crb
+        movep   #$4100,x:m_cra
+        clr     a
+        move    a1,x:ssi_frame_count
+        move    a1,x:ssi_mix_probe_left
+        move    a1,x:ssi_mix_probe_sum
+        move    a1,x:ssi_active_buffer
+        jsr     rt5_initialize_runtime
+        move    #>1,a
+        move    a1,x:rt5_runtime_mode
+
+        move    #rt5_pan_left_stream,r1
+        move    #rt5_pan_right_stream,r7
+        jsr     rt5_receive_runtime_pcm
+        move    #>rt5_pan_left_stream,a
+        move    a1,x:rt5_pan_left_base
+        move    #>rt5_pan_right_stream,a
+        move    a1,x:rt5_pan_right_base
+        move    #>ssi_buffer_a,a
+        move    a1,x:rt5_runtime_output
+        jsr     rt5_enter_runtime_map
+        do      #DSP_RT_MIX_BLOCK_COUNT,rt5_start_blocks_done
+        jsr     rt5_render_runtime_block
+        nop
+rt5_start_blocks_done:
+
+        ; Retain a deterministic first-buffer checksum for the existing mix
+        ; query after stop; this proves the production path rendered FM data,
+        ; rather than only exercising its transport and clock state.
+        move    #ssi_buffer_a,r1
+        clr     a
+        do      #DSP_RT_MIX_FRAME_COUNT,rt5_start_checksum_done
+        move    x:(r1)+,x0
+        add     x0,a
+        move    x:(r1)+,x0
+        add     x0,a
+rt5_start_checksum_done:
+        move    a1,x:ssi_mix_probe_sum
+
+        move    #ssi_buffer_a,r6
+        move    #>2047,m6
+        nop
+        move    x:(r6)+,a
+        movep   a1,x:m_tx
+        move    #>DSP_RT_MIX_FRAME_COUNT,a
+        move    a1,x:ssi_frame_count
+        move    #>DSP_REPLY_OK,a
+        jsr     send_reply
+        movep   #$5a00,x:m_crb
+        jmp     ssi_stream_loop
+
 
 ; Clock the two OPM timers after the generated sample. Thus a period of N is
 ; visible in status after N clock commands, while CSM is consumed by the key
