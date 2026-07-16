@@ -123,6 +123,18 @@ def make_program_stream(
     if len(sections) > 0xFFFF:
         raise SystemExit("error: stage-two stream has too many sections")
 
+    # The assembler accepts a section grown past the next hardcoded org
+    # without complaint, and the loader would then silently clobber the
+    # later section's words; fail the build with both ranges instead.
+    ordered = sorted(sections, key=lambda section: section.address)
+    for lower, upper in zip(ordered, ordered[1:]):
+        if lower.limit > upper.address:
+            raise SystemExit(
+                f"error: P sections ${lower.address:04x}-${lower.limit - 1:04x} "
+                f"and ${upper.address:04x}-${upper.limit - 1:04x} overlap; the "
+                "loader would silently clobber the overlapping words"
+            )
+
     for section in sections:
         if section.address > 0xFFFF or section.limit > 0x10000:
             raise SystemExit("error: stage-two section lies outside 16-bit P memory")
