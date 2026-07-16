@@ -15,6 +15,21 @@ gate turns that relaxed boundary into deterministic data and pass/fail rules.
 - algorithms 0-7 with operator-1 feedback level 4; and
 - algorithm 0 at feedback levels 0 and 7.
 
+The algorithm and feedback scenarios drive `perceptual_topology.trace`,
+whose modulators sit 6-9 dB below full volume. The earlier all-carrier
+fixture ran every operator at total level zero, and at that maximal
+modulation depth a four-stage cascade is chaotic: instrumented model
+intermediates agree with independent recomputation within table
+quantization on early stages and then diverge by dozens of sine-index
+steps from a fraction of a percent of difference, so two correct
+implementations with different table quantization (ymfm's 13-bit log
+tables against the DSP's 24-bit linear ROM) separate trajectory-wise and
+the spectral comparison graded chaos flavor. At moderate depth the
+cascades stay in the regime where quantization differences remain small,
+and the gate discriminates real pitch, depth, routing, and envelope
+errors — which is its purpose. No requantized implementation can track
+the maximal-depth trajectories.
+
 The oracle advances exact ymfm native samples with the same 1280:1007
 zero-order schedule as `ssi_render_frame`. Writes are applied before their
 exact native sample. Each output row therefore describes the first codec frame
@@ -104,23 +119,18 @@ The current report passes pitch (0.009 ppm least-squares drift, at most
 7 counts of phase error), timing, the complete LFO gate (range ratio
 0.984, dominant-bin error 0, spectral cosine 0.9973 with true block AM),
 noise (1.55% rate error, 0.78 spectral cosine), algorithms 0-3 (spectral
-cosine 0.71-0.76 with RMS energy ratios of 0.99-1.09 under the
-ymfm-relative amplitude convention), and feedback-7, with FM on the
-correct stereo channels. The measured open kernel work: feedback runs at
-one shared depth — the raw history-pair sum, a level-9 equivalent — so
-single-modulator topologies overdrive O1 against the level-4 reference
-(algorithm 4 at cosine 0.6989, one thousandth under the boundary, with
-log-RMSE 19.6; algorithm 5 at 0.29); the all-carrier algorithm 7 drops
-feedback entirely and pays for it in log-RMSE. feedback-0 measures 0.55
-where the model predicts 0.74 at identical semantics: instrumented C++
-intermediates show per-stage agreement within table quantization and
-chaotic divergence from stage 3 on — at the fixture's maximal TL-0
-modulation depth a fraction-of-a-percent stage difference moves the next
-sine index by dozens of steps, so the scenario compares quantization
-chaos flavors rather than kernel correctness, and only ymfm's own
-13-bit log tables (unaffordable in zero-wait internal memory) would
-track it. Recalibrating those scenarios to moderate modulator levels is
-the honest follow-up. Envelope tracking is within
+cosine measured against the recalibrated moderate-depth fixture), and
+feedback-7 (0.796), with FM on the correct stereo channels and RMS
+energy ratios of 0.90-1.06. On the honest fixture the half fold measures
+algorithm 4 at cosine 0.928 (log-RMSE 12.99 against the 12 bound),
+algorithms 0-3 at 0.67-0.69, feedback-0 at 0.61, algorithm 5 at 0.35,
+and algorithm 6 at 0.967 with log-RMSE 15.3 — a systematic 0.02-0.07
+below the model sweep's predictions, since the previous fixture's
+chaotic depth masked a residual the moderate fixture resolves: the
+kernel's stage products truncate where the model's arithmetic rounds,
+worth about 0.04 of spectral cosine in simulation. The all-carrier
+algorithm 7 still drops feedback and pays in log-RMSE. Envelope
+tracking is within
 one attenuation unit outside the attack block (MAE 4.44, both late
 transitions within 64 frames); its correlation shortfall (0.8902 vs 0.95)
 is the documented attack-block reconstruction limit above, not measured
@@ -135,28 +145,28 @@ block recurrence itself scores mean attenuation error 2.99/1023, correlation
 0.977, and 61-frame transition lag against the exact ADSR reference under
 this reconstruction, inside every boundary below.
 
-## Feedback-depth impossibility record
+## Feedback-depth record
 
 M1 produces one product per frame that feeds both the serial-modulation
 ring and the two-word feedback history, and the nine-instruction stage
 loop has no free data register, so ring and history scales are coupled:
 any per-level depth must fold into M1's single gain, shifting its onward
-serial modulation by the same factor. The oracle's perceptual model takes
+serial modulation by the same factor. Exact per-level depth needs
+decoupled scales — roughly two more instructions in the feedback stage
+loop, about 28 cycles/frame at the fixture's seven feedback-active
+channels against a present margin of twelve — so the kernel picks the
+best coupled fold instead. The oracle's perceptual model takes
 `YM_MODEL_FOLD_MODE`/`YM_MODEL_FOLD_K` to simulate exactly that coupled
-fold (exact ymfm when unset), and the comparator scores each variant
-offline; the k0 column reproduces the captured DSP scores, validating the
-predictor. Across fixed folds 0-3, the full per-level fold, and the half
-fold, no variant brings algorithms 4-5 above spectral cosine 0.35 —
-serial starvation and feedback overdrive trade against each other without
-ever meeting the 0.70 boundary — while the exact-semantics model passes
-everything (algorithm 4 at 0.943, 5 at 0.888, 6 at 0.979, 7 at 1.000
-with feedback restored). Per-level depth therefore requires decoupled
-scales: roughly two more instructions in the feedback stage loop, about
-28 cycles/frame at the fixture's seven feedback-active channels against a
-present margin of twelve. The block AM pass already early-outs when AM is
-idle to preserve that margin. Until the render loop is restructured or
-comparable headroom is found, feedback stays at the shared depth and
-algorithms 4-7 remain outside the spectral boundaries.
+fold (exact ymfm when unset), the comparator scores each variant offline,
+and the captured DSP tracks the predictions to a few hundredths. On the
+moderate-depth fixture the half fold k = (10-FB)>>1 wins decisively:
+M1's history sum and its onward serial depth each give up the square
+root of the per-level error instead of one of them taking it all.
+Algorithm 5 remains outside the cosine boundary — its whole timbre is
+the single O1 depth split, the pathological case for the coupling — and
+the all-carrier algorithm 7 still drops feedback (its ring carries
+carrier-scale words that cannot double as history), paying in log-RMSE.
+Both wait on the render-loop restructure.
 
 The comparator enforces these boundaries:
 

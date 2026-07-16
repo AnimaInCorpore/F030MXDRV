@@ -739,14 +739,40 @@ rt5_env_gain_shifted:
         move    a1,y0                   ; output-scale gain
         ; The modulation scale is one multiply: $1000 is 2^-11, which under
         ; the 2^21 full-volume amplitude convention lands the ring at ymfm's
-        ; exact out>>1 serial depth in 256-step ROM index units. An M1's
-        ; history pair therefore sums to (out0+out1)>>1 in ymfm's 1024-step
-        ; domain — a level-9-equivalent feedback depth (level 0 dispatches
-        ; feedback-less and stays exact). The parametric model sweep shows
-        ; no single-scale fold reaches the per-level boundaries, and an
-        ; exact split needs per-frame cycles the budget does not have; see
-        ; docs/perceptual-compatibility.md.
+        ; exact out>>1 serial depth in 256-step ROM index units. Ring and
+        ; history scales are coupled (one product per frame), so an M1 with
+        ; feedback splits the error: the half fold k = (10-FB)>>1 shifts its
+        ; gain so the history sum lands 2^(k-... within a factor 2^((10-FB)
+        ; -1-k) of ymfm's (out0+out1)>>(10-FB) while its onward serial depth
+        ; gives up the same factor. The honest-fixture model sweep in
+        ; docs/perceptual-compatibility.md picked this rule; level 0
+        ; dispatches feedback-less and stays exact everywhere.
+        move    n1,a
+        move    #>8,x0
+        cmp     x0,a
+        jge     rt5_env_gain_mod_serial
+        move    #>rt5_channel_control,x0
+        add     x0,a
+        move    a1,r3
+        nop
+        move    x:(r3),a
+        move    #>$38,x0
+        and     x0,a                    ; feedback level << 3
+        jeq     rt5_env_gain_mod_serial
+        rep     #3
+        lsr     a                       ; feedback level 1-7
+        move    #>10,b
+        sub     a,b
+        lsr     b                       ; k = (10-FB)>>1, always 1-4
+        move    b1,n0
+        move    #>$001000,a
+        rep     n0
+        lsr     a
+        move    a1,x1
+        jmp     rt5_env_gain_mod_scale
+rt5_env_gain_mod_serial:
         move    #>$001000,x1
+rt5_env_gain_mod_scale:
         move    y0,x0
         mpy     x0,x1,a
         move    a1,x1                   ; modulation-scale gain

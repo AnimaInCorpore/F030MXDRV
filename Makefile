@@ -131,7 +131,7 @@ $(YM2151_VECTORS): $(YM2151_ORACLE) tests/traces/attack_all_carriers.trace
 
 $(YM2151_PERCEPTUAL_STAMP): $(YM2151_ORACLE) \
 		tools/compare_ym2151_realtime.py \
-		tests/traces/attack_all_carriers.trace \
+		tests/traces/perceptual_topology.trace \
 		tests/traces/noise_channel7.trace \
 		tests/traces/perceptual_pitch.trace \
 		tests/traces/perceptual_timing.trace \
@@ -154,12 +154,12 @@ $(YM2151_PERCEPTUAL_STAMP): $(YM2151_ORACLE) \
 		$(YM2151_ORACLE) $$mode tests/traces/noise_channel7.trace 8192 \
 			> $$output_dir/noise.tsv || exit 1; \
 		for algorithm in 0 1 2 3 4 5 6 7; do \
-			$(YM2151_ORACLE) $$mode tests/traces/attack_all_carriers.trace 4096 \
+			$(YM2151_ORACLE) $$mode tests/traces/perceptual_topology.trace 4096 \
 				--algorithm $$algorithm --feedback 4 \
 				> $$output_dir/algorithm-$$algorithm.tsv || exit 1; \
 		done; \
 		for feedback in 0 7; do \
-			$(YM2151_ORACLE) $$mode tests/traces/attack_all_carriers.trace 4096 \
+			$(YM2151_ORACLE) $$mode tests/traces/perceptual_topology.trace 4096 \
 				--algorithm 0 --feedback $$feedback \
 				> $$output_dir/feedback-$$feedback.tsv || exit 1; \
 		done; \
@@ -336,7 +336,7 @@ smoke: check
 	@rg -q "Direct Transfer 0x01c5de" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x01c6c0" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x170000" build/hatari-smoke.trace
-	@rg -q "Transfer 0x0b22ef" build/hatari-smoke.trace
+	@rg -q "Transfer 0x2acbc2" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x01c6de" build/hatari-smoke.trace
 	@rg -q "XBIOS 0x80 Locksnd" build/hatari-smoke.trace
 	@rg -q "XBIOS 0x89 Dsptristate\\(0x1, 0x0\\)" build/hatari-smoke.trace

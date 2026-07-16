@@ -40,11 +40,11 @@ SCENARIOS: dict[str, tuple[str, int, int | None, int | None]] = {
     "lfo": ("perceptual_lfo.trace", 8192, None, None),
     "noise": ("noise_channel7.trace", 8192, None, None),
     **{
-        f"algorithm-{index}": ("attack_all_carriers.trace", 4096, index, 4)
+        f"algorithm-{index}": ("perceptual_topology.trace", 4096, index, 4)
         for index in range(8)
     },
-    "feedback-0": ("attack_all_carriers.trace", 4096, 0, 0),
-    "feedback-7": ("attack_all_carriers.trace", 4096, 0, 7),
+    "feedback-0": ("perceptual_topology.trace", 4096, 0, 0),
+    "feedback-7": ("perceptual_topology.trace", 4096, 0, 7),
 }
 
 # Symbol-anchored dump ranges shared by both breakpoint scripts. Each entry is

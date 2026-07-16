@@ -1,0 +1,46 @@
+# sample  register  data
+# Channel 0 at moderate operator levels for the algorithm/feedback
+# perceptual scenarios. attack_all_carriers drives every operator at total
+# level zero, and at that maximal modulation depth a four-stage cascade is
+# chaotic: a fraction of a percent of table-quantization difference in one
+# stage moves the next sine index by dozens of steps, so any two correct
+# implementations with different table quantization diverge trajectory-wise
+# and the spectral comparison measures chaos flavor instead of kernel
+# correctness. Moderate modulator levels (6-9 dB down) keep every cascade
+# in the regime where quantization differences stay small and the gate
+# discriminates real pitch/depth/routing/envelope errors. Raw rows are
+# M1 $40/$60/..., M2 $48/$68/..., C1 $50/$70/..., C2 $58/$78/...; an
+# operator's role varies with the overridden algorithm, so the levels rise
+# gently from M1 to C2 and the last slot stays prominent as the most
+# common carrier.
+0 20 c7
+0 28 4c
+0 30 00
+
+0 40 01
+0 48 01
+0 50 01
+0 58 01
+0 60 08
+0 68 0a
+0 70 0c
+0 78 02
+0 80 1c
+0 88 1c
+0 90 1c
+0 98 1c
+0 a0 00
+0 a8 00
+0 b0 00
+0 b8 00
+0 c0 00
+0 c8 00
+0 d0 00
+0 d8 00
+0 e0 0f
+0 e8 0f
+0 f0 0f
+0 f8 0f
+
+# Key on all four operators on channel 0.
+0 08 78
