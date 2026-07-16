@@ -451,6 +451,8 @@ rt5_lfo_am_op:
         ds      1                       ; and the channel's multiplier
 rt5_lfo_am_mult_ch:
         ds      1
+rt5_am_engaged:
+        ds      1                       ; nonzero while any live gain is scaled
 
 RT5_OUT_GAIN_OFFSET equ rt5_operator_gain_out-rt5_phase
 RT5_MOD_GAIN_OFFSET equ rt5_operator_gain_mod-rt5_phase
@@ -737,11 +739,12 @@ rt5_env_gain_shifted:
         move    a1,y0                   ; output-scale gain
         ; The modulation scale is one multiply: $400 is 2^-13, ymfm's out>>1
         ; serial depth in 256-step ROM index units. An M1's history pair
-        ; therefore sums to (out0+out1)>>3 — the exact ymfm depth for
-        ; feedback level 7. Levels 1-6 saturate to that strongest depth
-        ; (level 0 dispatches feedback-less and stays exact): the measured
-        ; trade favors exact onward serial modulation, which carries the
-        ; whole downstream timbre, over per-level self-feedback.
+        ; therefore sums to (out0+out1)>>1 in ymfm's 1024-step domain — a
+        ; level-9-equivalent feedback depth, 4x ymfm's strongest level 7
+        ; (level 0 dispatches feedback-less and stays exact). The parametric
+        ; model sweep shows no single-scale fold reaches the per-level
+        ; boundaries, and an exact split needs per-frame cycles the budget
+        ; does not have; see docs/perceptual-compatibility.md.
         move    #>$000400,x1
         move    y0,x0
         mpy     x0,x1,a
@@ -1877,6 +1880,7 @@ rt5_initialize_levels_done:
         clr     a
         move    a1,y:rt5_lfo_acc_hi
         move    a1,y:rt5_lfo_acc_lo
+        move    a1,x:rt5_am_engaged
         move    #rt5_ams_previous,r0
         do      #8,rt5_profile_ams_previous_done
         move    a1,x:(r0)+
@@ -5782,6 +5786,18 @@ rt5_lfo_am_block:
         move    #>$ff,x1
         and     x1,a1
         move    a1,x:rt5_lfo_phase      ; published block index byte
+        ; With zero AM depth and no channel still scaled, the block's AM is
+        ; identically idle: publish a zero m_lfo_am and skip the waveform,
+        ; multiplier, and walk work entirely.
+        move    x:rt5_lfo_amd,b
+        move    x:rt5_am_engaged,x0
+        or      x0,b
+        tst     b
+        jne     rt5_lfo_am_engaged_path
+        clr     b
+        move    b1,x:rt5_block_control
+        rts
+rt5_lfo_am_engaged_path:
         move    x:rt5_lfo_waveform,b
         move    #>2,x0
         cmp     x0,b
@@ -5858,9 +5874,11 @@ rt5_am_mult_store:
 rt5_am_mult_done:
 
         ; rescale the live gain pairs of every channel whose AM sensitivity
-        ; is, or last block was, nonzero
+        ; is, or last block was, nonzero, and remember whether any channel
+        ; remains scaled for the idle early-out
         clr     b
         move    b1,x:rt5_lfo_am_channel
+        move    b1,x:rt5_am_engaged
         do      #8,rt5_am_walk_done
         move    x:rt5_lfo_am_channel,b
         move    #>ym_regdata+$38,a
@@ -5873,11 +5891,15 @@ rt5_am_mult_done:
         move    x:(r2),a
         move    #>3,x0
         and     x0,a
-        move    x:(r1),b
-        move    a1,x:(r1)
         move    a1,y1                   ; ams
+        move    a1,x0
+        move    x:rt5_am_engaged,b
+        or      x0,b
+        move    b1,x:rt5_am_engaged
+        move    x:(r1),b                ; previous ams, then update it
+        move    a1,x:(r1)
         move    b1,x0
-        or      x0,a
+        or      x0,a                    ; ams | previous
         tst     a
         jeq     rt5_am_walk_next
         jsr     rt5_am_apply_channel
@@ -6069,6 +6091,7 @@ rt5_runtime_levels_done:
         move    a1,x:rt5_lfo_amd
         move    a1,x:rt5_lfo_waveform
         move    a1,x:rt5_timer_status
+        move    a1,x:rt5_am_engaged
         move    #rt5_ams_previous,r4
         do      #8,rt5_runtime_ams_previous_done
         move    a1,x:(r4)+

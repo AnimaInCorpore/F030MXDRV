@@ -334,6 +334,19 @@ public:
         auto &regs = engine.regs();
         output.clear();
 
+        // Experimental sweep hook: YM_MODEL_FOLD_MODE simulates the DSP
+        // kernel's coupled M1 gain fold k (serial-from-O1 and the raw
+        // feedback-pair sum both shift by 1+k; O1 as a carrier and the
+        // all-carrier algorithm 7 are unaffected). Unset = exact ymfm.
+        static const int fold_mode = [] {
+            const char *value = std::getenv("YM_MODEL_FOLD_MODE");
+            return value ? std::atoi(value) : -1;
+        }();
+        static const int fold_fixed = [] {
+            const char *value = std::getenv("YM_MODEL_FOLD_K");
+            return value ? std::atoi(value) : 0;
+        }();
+
         for (uint32_t channel = 0; channel < 8; ++channel)
         {
             // The perceptual kernel advances feedback once per produced codec
@@ -346,14 +359,34 @@ public:
             };
             const uint32_t am_offset = regs.lfo_am_offset(channel);
             const uint32_t feedback = regs.ch_feedback(channel);
-            int32_t modulation = feedback == 0 ? 0
-                : (m_feedback_0[channel] + m_feedback_1[channel]) >> (10 - feedback);
+            const uint32_t algorithm = regs.ch_algorithm(channel);
+            int fold = 0;
+            if (fold_mode == 0)
+                fold = fold_fixed;
+            else if (fold_mode == 1)
+                fold = feedback ? int(9 - feedback) : 0;
+            else if (fold_mode == 2)
+                fold = feedback ? int(10 - feedback) / 2 : 0;
+            int32_t modulation;
+            if (feedback == 0 || (fold_mode >= 0 && algorithm == 7))
+                modulation = 0;
+            else if (fold_mode < 0)
+                modulation = (m_feedback_0[channel] + m_feedback_1[channel])
+                    >> (10 - feedback);
+            else
+                modulation = (m_feedback_0[channel] + m_feedback_1[channel])
+                    >> (1 + fold);
 
             std::array<int32_t, 8> operator_output{};
-            operator_output[1] = m_feedback_in[channel] = quantized_volume(
+            const int32_t out1_carrier = m_feedback_in[channel] = quantized_volume(
                 *engine.debug_operator(raw[0]), modulation, am_offset);
+            // Every modulation lookup sees O1 at the folded gain; only the
+            // all-carrier algorithm 7 consumes the unfolded value below.
+            operator_output[1] = fold_mode < 0
+                ? out1_carrier
+                : (out1_carrier >> fold);
 
-            const uint16_t topology = kAlgorithmOps[regs.ch_algorithm(channel)];
+            const uint16_t topology = kAlgorithmOps[algorithm];
             modulation = operator_output[(topology >> 0) & 1] >> 1;
             operator_output[2] = quantized_volume(
                 *engine.debug_operator(raw[1]), modulation, am_offset);
@@ -376,7 +409,7 @@ public:
             }
 
             if ((topology & 0x080) != 0)
-                result = std::clamp(result + operator_output[1], -32768, 32767);
+                result = std::clamp(result + out1_carrier, -32768, 32767);
             if ((topology & 0x100) != 0)
                 result = std::clamp(result + operator_output[2], -32768, 32767);
             if ((topology & 0x200) != 0)

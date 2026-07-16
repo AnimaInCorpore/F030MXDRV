@@ -430,12 +430,17 @@ are implementation gaps against the contract, not relaxed acceptance criteria.
    0.984, dominant-bin error 0, spectral cosine 0.9973)** at 320.63
    cycles/frame (1.7% spare), and FM output reaches the correct stereo
    channels (register $20 bit 6 is ymfm's first output — the reference
-   left column). Still failing and next in line: the level-7-saturated
-   feedback depth that overdrives single-modulator topologies (algorithms
-   4-5 at cosine 0.28-0.69, log-RMSE over 12 dB on algorithms 4-7) and
-   feedback-0 (0.55); envelope attack-block reconstruction (correlation
-   0.8902 vs 0.95); DT1/DT2; decoded noise frequency/output; and sub-block
-   event splitting.
+   left column). The parametric model sweep in
+   docs/perceptual-compatibility.md proves per-level feedback depth needs
+   decoupled ring/history scales the current nine-instruction stage loop
+   cannot afford, so feedback stays at the shared level-9-equivalent depth
+   and algorithms 4-7 (cosine 0.28-0.96, log-RMSE over 12 dB) remain
+   outside the spectral boundaries; the block AM pass early-outs when AM
+   is idle, holding 314.47 cycles/frame (3.6% spare) for an eventual
+   restructure. Also failing: feedback-0 at 0.55 where the model predicts
+   0.74 — an unexplained kernel discrepancy worth its own hunt; envelope
+   attack-block reconstruction (correlation 0.8902 vs 0.95); DT1/DT2;
+   decoded noise frequency/output; and sub-block event splitting.
 5. Measure cycle count, SSI underruns, buffer switches, and host/DSP contention
    on a real Falcon before declaring the audio transport complete.
 6. Finish MDX software modulation, synchronization, legato, remaining command
