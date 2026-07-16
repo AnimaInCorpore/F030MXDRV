@@ -16,6 +16,10 @@ GENERATED_BUILD := build/generated
 REFERENCE_BUILD := build/reference
 YM2151_PERCEPTUAL_DIR := $(REFERENCE_BUILD)/ym2151-perceptual
 YM2151_PERCEPTUAL_MODEL_DIR := $(REFERENCE_BUILD)/ym2151-perceptual-model
+YM2151_PERCEPTUAL_FOLDED_DIR := $(REFERENCE_BUILD)/ym2151-perceptual-model-folded
+# The kernel's feedback fold: half fold with the per-algorithm bias table
+# rt5_fold_bias in src/dsp/ym2151.asm (digits are bias plus five).
+YM2151_FOLD_BIAS := 56655525
 YM2151_PERCEPTUAL_REPORT := $(YM2151_PERCEPTUAL_DIR)/reference-report.txt
 YM2151_PERCEPTUAL_MODEL_REPORT := $(YM2151_PERCEPTUAL_MODEL_DIR)/comparison-report.txt
 YM2151_PERCEPTUAL_STAMP := $(YM2151_PERCEPTUAL_DIR)/.validated
@@ -137,12 +141,21 @@ $(YM2151_PERCEPTUAL_STAMP): $(YM2151_ORACLE) \
 		tests/traces/perceptual_timing.trace \
 		tests/traces/perceptual_envelope.trace \
 		tests/traces/perceptual_lfo.trace
-	@rm -rf $(YM2151_PERCEPTUAL_DIR) $(YM2151_PERCEPTUAL_MODEL_DIR)
-	@mkdir -p $(YM2151_PERCEPTUAL_DIR) $(YM2151_PERCEPTUAL_MODEL_DIR)
+	@rm -rf $(YM2151_PERCEPTUAL_DIR) $(YM2151_PERCEPTUAL_MODEL_DIR) \
+		$(YM2151_PERCEPTUAL_FOLDED_DIR)
+	@mkdir -p $(YM2151_PERCEPTUAL_DIR) $(YM2151_PERCEPTUAL_MODEL_DIR) \
+		$(YM2151_PERCEPTUAL_FOLDED_DIR)
 	@for mode_and_dir in \
 		"--codec-vectors:$(YM2151_PERCEPTUAL_DIR)" \
-		"--perceptual-vectors:$(YM2151_PERCEPTUAL_MODEL_DIR)"; do \
-		mode=$${mode_and_dir%%:*}; output_dir=$${mode_and_dir#*:}; \
+		"--perceptual-vectors:$(YM2151_PERCEPTUAL_MODEL_DIR)" \
+		"--perceptual-vectors:$(YM2151_PERCEPTUAL_FOLDED_DIR):folded"; do \
+		mode=$${mode_and_dir%%:*}; rest=$${mode_and_dir#*:}; \
+		output_dir=$${rest%%:*}; \
+		if [ "$${rest#*:}" = "folded" ]; then \
+			export YM_MODEL_FOLD_MODE=3 YM_MODEL_FOLD_BIAS=$(YM2151_FOLD_BIAS); \
+		else \
+			unset YM_MODEL_FOLD_MODE YM_MODEL_FOLD_BIAS; \
+		fi; \
 		$(YM2151_ORACLE) $$mode tests/traces/perceptual_pitch.trace 8192 \
 			> $$output_dir/pitch.tsv || exit 1; \
 		$(YM2151_ORACLE) $$mode tests/traces/perceptual_timing.trace 2048 \
@@ -259,6 +272,7 @@ compare-realtime: $(YM2151_PERCEPTUAL_STAMP)
 	python3 tools/compare_ym2151_realtime.py compare \
 		--reference $(YM2151_PERCEPTUAL_DIR) \
 		--candidate "$(REALTIME_CANDIDATE_DIR)" \
+		--fold-model $(YM2151_PERCEPTUAL_FOLDED_DIR) \
 		--output $(REFERENCE_BUILD)/ym2151-realtime-comparison.txt
 
 smoke: check

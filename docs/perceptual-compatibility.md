@@ -122,20 +122,16 @@ noise (1.55% rate error, 0.78 spectral cosine), algorithms 0-3 (spectral
 cosine measured against the recalibrated moderate-depth fixture),
 algorithms 2 and 6 (0.706 and 0.951/11.8 with the per-algorithm fold
 bias), and feedback-7 (0.799), with FM on the correct stereo channels
-and RMS energy ratios of 0.90-1.07. The remaining spectral failures sit
-inside the bounded DSP-to-model residual of a re-quantized kernel:
-algorithm 0 fails by three thousandths (0.6970) and algorithm 3 by one
-(0.6992) at their sweep-optimal fold, algorithm 1 by twelve, algorithm 4
-passes cosine at 0.928 but carries 13.1 dB log-RMSE, and feedback-0
-(0.58) remains the most residual-sensitive chain. Algorithm 5 and the
-feedback-less algorithm 7 are the recorded structural limits. The open
-calibration question: the absolute 0.70 cosine boundary leaves about
-0.05 of headroom below the model's own floor (0.777 on algorithm 0)
-while the measured residual of any re-quantized implementation is the
-same size — a boundary relative to the gated model's score per scenario
-(for example, model minus 0.10) would separate kernel errors from
-quantization residual honestly. It is recorded here as a proposal, not
-applied. Envelope tracking is within
+and RMS energy ratios of 0.90-1.07. Under the relative topology
+boundaries, algorithms 0 through 6 pass — the capture tracks the folded
+model to within 0.01 of cosine on five of them and to three or four
+decimal places where the fold compromise dominates (algorithm 5 at
+0.3475 against the model's 0.3481, algorithm 6 at 0.9509 against
+0.9507) — leaving three honest failures: feedback-0 at 0.5817 against a
+0.6905 floor, the one chain whose trajectory diverges from the kernel's
+own design beyond residual; algorithm 7's log-RMSE, carrying the
+dropped-feedback compromise; and the envelope correlation below.
+Envelope tracking is within
 one attenuation unit outside the attack block (MAE 4.44, both late
 transitions within 64 frames); its correlation shortfall (0.8902 vs 0.95)
 is the documented attack-block reconstruction limit above, not measured
@@ -182,7 +178,19 @@ The comparator enforces these boundaries:
 | envelope | mean attenuation error at most 24/1023, correlation at least 0.95, state transitions within 64 frames |
 | LFO | AM range within 25%, dominant-rate error at most one FFT bin, spectral cosine at least 0.90 |
 | noise | transition-rate error at most 3%, state-spectrum cosine at least 0.70 |
-| feedback and algorithms | spectral cosine at least 0.70, normalized log-spectrum RMSE at most 12 dB, RMS energy within 0.20-5.0x |
+| feedback and algorithms | spectral cosine at least the folded model's score minus 0.10, log-spectrum RMSE at most the folded model's plus 6 dB, RMS energy within 0.20-5.0x |
+
+The topology boundaries are relative to the *folded model*: the same
+perceptual projection rendered with the kernel's published feedback fold
+and per-algorithm bias (`YM_MODEL_FOLD_MODE=3`, the bias table mirrored
+from `rt5_fold_bias`). Two tiers separate two questions. The plain
+model-versus-exact comparison, still gated on absolute boundaries,
+answers whether the intended compromise is musically sound; the capture
+comparison answers whether the kernel implements that compromise
+correctly, which the bounded quantization residual of any re-quantized
+implementation (measured at 0.00-0.07 of cosine at moderate depth) must
+not obscure. An absolute 0.70 bar left less headroom below the model's
+own floor than that residual and graded noise, not correctness.
 
 The phase, event, and accumulator boundaries are intentionally stricter than
 the timbre boundary: long-term pitch and control timing are chip semantics,

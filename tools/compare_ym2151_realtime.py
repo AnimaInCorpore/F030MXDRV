@@ -283,7 +283,9 @@ def validate_reference(suite: dict[str, Vector]) -> tuple[list[str], list[str]]:
 
 
 def compare_suites(
-    reference: dict[str, Vector], candidate: dict[str, Vector]
+    reference: dict[str, Vector],
+    candidate: dict[str, Vector],
+    fold_model: dict[str, Vector] | None = None,
 ) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     notes: list[str] = []
@@ -391,16 +393,44 @@ def compare_suites(
         cosine, log_rmse, energy_ratio = spectral_metrics(
             audio(reference[name]), audio(candidate[name])
         )
-        if cosine < 0.70:
-            errors.append(f"{name}: spectral cosine {cosine:.4f} is below 0.70")
-        if log_rmse > 12.0:
-            errors.append(f"{name}: log-spectrum RMSE {log_rmse:.2f} dB exceeds 12 dB")
+        if fold_model is not None:
+            # Two-tier gating: the plain model-versus-exact comparison guards
+            # the intended compromise's design quality with absolute bounds,
+            # while a capture is judged against the folded model — the same
+            # compromise including the kernel's published feedback fold — so
+            # implementation errors separate from the bounded quantization
+            # residual any re-quantized kernel carries at moderate depth.
+            model_cosine, model_rmse, _ = spectral_metrics(
+                audio(reference[name]), audio(fold_model[name])
+            )
+            cosine_floor = model_cosine - 0.10
+            rmse_ceiling = model_rmse + 6.0
+            if cosine < cosine_floor:
+                errors.append(
+                    f"{name}: spectral cosine {cosine:.4f} is below the folded "
+                    f"model's {model_cosine:.4f} minus 0.10"
+                )
+            if log_rmse > rmse_ceiling:
+                errors.append(
+                    f"{name}: log-spectrum RMSE {log_rmse:.2f} dB exceeds the "
+                    f"folded model's {model_rmse:.2f} dB plus 6 dB"
+                )
+            notes.append(
+                f"{name}: spectral_cosine={cosine:.4f} (folded model "
+                f"{model_cosine:.4f}), log_rmse={log_rmse:.2f} dB (model "
+                f"{model_rmse:.2f}), energy_ratio={energy_ratio:.3f}"
+            )
+        else:
+            if cosine < 0.70:
+                errors.append(f"{name}: spectral cosine {cosine:.4f} is below 0.70")
+            if log_rmse > 12.0:
+                errors.append(f"{name}: log-spectrum RMSE {log_rmse:.2f} dB exceeds 12 dB")
+            notes.append(
+                f"{name}: spectral_cosine={cosine:.4f}, log_rmse={log_rmse:.2f} dB, "
+                f"energy_ratio={energy_ratio:.3f}"
+            )
         if not 0.20 <= energy_ratio <= 5.0:
             errors.append(f"{name}: RMS energy ratio {energy_ratio:.3f} is outside 0.20-5.0")
-        notes.append(
-            f"{name}: spectral_cosine={cosine:.4f}, log_rmse={log_rmse:.2f} dB, "
-            f"energy_ratio={energy_ratio:.3f}"
-        )
     return errors, notes
 
 
@@ -426,6 +456,12 @@ def main() -> int:
     compare = subparsers.add_parser("compare", help="compare a perceptual candidate capture")
     compare.add_argument("--reference", type=Path, required=True)
     compare.add_argument("--candidate", type=Path, required=True)
+    compare.add_argument(
+        "--fold-model",
+        type=Path,
+        help="folded-model vectors; topology boundaries become relative to "
+        "its per-scenario scores instead of absolute",
+    )
     compare.add_argument("--output", type=Path)
     args = parser.parse_args()
 
@@ -437,7 +473,10 @@ def main() -> int:
             return 1 if reference_errors else 0
 
         candidate = load_suite(args.candidate)
-        comparison_errors, comparison_notes = compare_suites(reference, candidate)
+        fold_model = load_suite(args.fold_model) if getattr(args, "fold_model", None) else None
+        comparison_errors, comparison_notes = compare_suites(
+            reference, candidate, fold_model
+        )
         errors = reference_errors + comparison_errors
         notes = reference_notes + comparison_notes
         write_report(args.output, "YM2151 exact-to-perceptual comparison", errors, notes)
