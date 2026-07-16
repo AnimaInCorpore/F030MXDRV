@@ -347,6 +347,7 @@ class Boundary:
     native_count: int
     lfsr: int
     lfo_phase: int
+    lfo_am: int  # the kernel's published block m_lfo_am
     phases48: list[int]  # channel-major ch*4+op 48-bit accumulators
     increments: list[int]  # operator-major signed per-frame DDA increments
     levels: list[int]  # operator-major op*8+ch 10.13 attenuation
@@ -371,6 +372,7 @@ def read_boundary(record: Record, symbols: dict[tuple[str, str], int]) -> Bounda
         native_count=record.words[("x", x_addr("ssi_native_sample_count"))],
         lfsr=record.words[("x", x_addr("rt5_noise_lfsr"))],
         lfo_phase=record.words[("x", x_addr("rt5_lfo_phase"))],
+        lfo_am=record.words[("x", x_addr("rt5_block_control"))],
         phases48=[(h << 24) | l for h, l in zip(high, low)],
         increments=[
             signed24(v)
@@ -459,6 +461,22 @@ def reconstruct_rows(
                 f"error: boundary {index} native clock {boundary.native_count}, "
                 f"DDA expects {expected}"
             )
+    # Channel-0 AM sensitivity per block, from the same boundary-drain
+    # schedule the kernel uses; the emitted lfo_am column is the kernel's
+    # published block m_lfo_am shifted by it, exactly ymfm's channel offset.
+    boundary_clocks_all = [0] + [
+        natives[k * BLOCK_FRAMES - 1] for k in range(1, blocks + 1)
+    ]
+    ams_events = [
+        (event.sample, event.data & 3) for event in events if event.reg == 0x38
+    ]
+    ams_by_block: list[int] = []
+    ams = 0
+    for block in range(blocks):
+        while ams_events and ams_events[0][0] <= boundary_clocks_all[block]:
+            ams = ams_events.pop(0)[1]
+        ams_by_block.append(ams)
+
     # A key-on edge zeroes the operator's phase when the FIFO drain applies
     # it at a block boundary; mirror that (the exact reference does the same
     # at the precise native sample). KON bits 3-6 key raw rows M1,M2,C1,C2,
@@ -539,9 +557,10 @@ def reconstruct_rows(
             lfsr = lfsr_step(lfsr)
         noise_state = (lfsr >> 16) & 1
 
-        # The block's AM is the deterministic full/0.75 gain selection made
-        # from the post-jump LFSR; report it in ymfm's offset domain.
-        lfo_am = 27 if (exit_.lfsr >> 16) & 1 else 0
+        # The kernel publishes each block's true m_lfo_am; ymfm's channel
+        # offset shifts it by the decoded AM sensitivity.
+        ams = ams_by_block[block]
+        lfo_am = (exit_.lfo_am << (ams - 1)) if ams else 0
 
         row = [frame, native, event_count, event_hash, left >> 8, right >> 8,
                lfo_am, noise_state]

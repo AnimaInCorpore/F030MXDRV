@@ -142,6 +142,17 @@ buffer loops, and switches only at a stereo boundary. Stop restores the packed
 tables, exact expanded tables and caches, external Y mapping, SSI state, and
 linear address modifiers.
 
+The realtime LFO is a 48-bit accumulator holding ymfm's 32-bit counter times
+2^18, advanced by decoded 81/82-tick pairs, so the true waveform index —
+counter bits 22-29 — is the high word's top byte. Each block derives ymfm's
+waveform AM byte from it (the noise waveform samples the Galois LFSR's low
+byte as a documented approximation), publishes `m_lfo_am = am*AMD>>7`, turns
+it into one `2^(-(am<<(AMS-1))/64)` multiplier per sensitivity through the
+envelope fraction table, and rescales the live gain pairs of every channel
+whose AMS is (or just stopped being) nonzero from AM-free base pairs;
+operators opt in through D1R bit 7 exactly as on chip. The same index byte
+feeds the block PM offset.
+
 The production block boundary drains the real 32-entry transport FIFO and uses
 the same register decoder for direct live writes. Algorithm/pan, TL, KC/KF,
 MUL, key edges, envelope rates, LFO, and timers update persistent state. The
@@ -151,7 +162,7 @@ MUL, key edges, envelope rates, LFO, and timers update persistent state. The
 is not yet met. DT1/DT2 pitch offsets and channel-7 noise-frequency/output
 substitution also remain to be integrated. The Hatari smoke gate renders three
 buffers, checks 3072 prepared frames, and pins the first attack buffer checksum
-to `$9450a4`.
+to `$f45044`.
 
 ## Cycle feasibility gate
 
@@ -363,7 +374,7 @@ fill — so no noise-table words occupy the bounded P-memory image. Cleanup
 disables SSI, reads SSISR and writes TX to clear a latched underrun,
 restores the external Y map, and rebuilds the exact phase cache, including
 the internal-Y frequency-cache words the decoded multiplier/increment arrays
-overlay. The deterministic reply is `$24201d`.
+overlay. The deterministic reply is `$8c7df6`.
 
 Decoded envelope curvature runs as a block-boundary pass at `P:$0080` in
 internal P RAM, where instruction fetches avoid the external-memory penalty.

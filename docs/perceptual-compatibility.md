@@ -93,28 +93,28 @@ above with the addend derived from the realized step, per-frame noise
 replays the same right-shifting x^17+x^14+1 Galois LFSR, and the schedule
 columns replicate the oracle's event policy bit for bit.
 
-Two reconstruction limits are documented rather than hidden: an attack that
+One reconstruction limit is documented rather than hidden: an attack that
 key-ons and converges inside one block never exposes its true multiplier or
 an attack-state boundary, so that block falls back to a linear mid and the
-attack state is invisible; and the reported `lfo_am` is the kernel's actual
-deterministic full/0.75 block gain selection, not a modeled LFO.
+attack state is invisible. The reported `lfo_am` is the kernel's own
+published block `m_lfo_am` shifted by the decoded channel sensitivity,
+block-held like every other realtime control.
 
 The current report passes pitch (0.009 ppm least-squares drift, at most
-7 counts of phase error), timing, noise (1.55% rate error, 0.78 spectral
-cosine), algorithms 0-3 (spectral cosine 0.71-0.75 with decoded
-serial-modulation depth), and feedback-7. The measured open kernel work:
-the deterministic full/0.75 block AM applies to every operator regardless
-of AMS, smearing noise-keyed amplitude across all scenarios — it fails
-every LFO check and depresses algorithms 4-7 (cosine 0.31-0.96 with
-log-RMSE 13-30 dB) and feedback-0 (0.665); FM output sits on the swapped
-stereo channel (the comparator's max-RMS channel pick tolerates this).
-Feedback levels 1-6 saturate to the exact level-7 history depth — the
-measured trade that keeps onward serial modulation exact — so
-single-modulator topologies (algorithms 4-5) overdrive O1 against a
-level-4 reference. Envelope tracking is within one attenuation unit
-outside the attack block (MAE 4.44, both late transitions within 64
-frames); its correlation shortfall (0.8902 vs 0.95) is the documented
-attack-block reconstruction limit above, not measured kernel behavior.
+7 counts of phase error), timing, the complete LFO gate (range ratio
+0.984, dominant-bin error 0, spectral cosine 0.9973 with true block AM),
+noise (1.55% rate error, 0.78 spectral cosine), algorithms 0-3 (spectral
+cosine 0.72-0.76), and feedback-7. The measured open kernel work: FM
+output sits on the swapped stereo channel (the comparator's max-RMS
+channel pick tolerates this); feedback levels 1-6 saturate to the exact
+level-7 history depth — the measured trade that keeps onward serial
+modulation exact — so single-modulator topologies overdrive O1 against
+the level-4 reference (algorithms 4-5 at cosine 0.28-0.69, log-RMSE over
+12 dB on algorithms 4-7, feedback-0 at 0.55). Envelope tracking is within
+one attenuation unit outside the attack block (MAE 4.44, both late
+transitions within 64 frames); its correlation shortfall (0.8902 vs 0.95)
+is the documented attack-block reconstruction limit above, not measured
+kernel behavior.
 
 The realtime engine advances envelope state once per 64-frame block with a
 published per-rate affine recurrence, so a capture reconstructs each

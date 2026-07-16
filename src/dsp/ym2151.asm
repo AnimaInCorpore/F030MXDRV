@@ -317,13 +317,13 @@ rt5_noise_columns:
 rt5_mix_written:
         ds      1
 
-; Block-selected gain-array offsets. The AM selection publishes one output
-; pair and one modulation pair per block; the algorithm bodies load n7 from
-; whichever matches the next stage's role, so shared stage helpers stay
-; role-blind and the per-frame loops unchanged.
-rt5_gain_offset_out:
+; 48-bit LFO accumulator holding ymfm's 32-bit counter times 2^18, so the
+; true waveform index (counter bits 22-29) is the top byte of the high word.
+; The exact per-tick and per-81-tick advances are decoded into matching
+; high/low pairs when register $18 is written.
+rt5_lfo_acc_hi:
         ds      1
-rt5_gain_offset_mod:
+rt5_lfo_acc_lo:
         ds      1
 
 ; The PRE offsets apply before the operator-1 feedback stage advances r2 by
@@ -418,31 +418,42 @@ rt5_event_times:
 rt5_event_commands:
         ds      32
 
-; Per-operator block gains use the same channel-major M1/C1/M2/C2 order as
-; rt5_phase. The event decoder updates both AM variants, and n7 selects one
-; complete array at each block boundary without a per-frame conditional.
+; Live per-operator block gains in the same channel-major M1/C1/M2/C2 order
+; as rt5_phase: the output-scale array feeds carrier stages and the
+; modulation-scale array (2^-13: ymfm's out>>1 serial depth in 256-step
+; sine-ROM index units) feeds modulator stages, each algorithm body pointing
+; n7 at the constant offset matching the stage's role. The live words carry
+; this block's AM; the base pairs below hold the AM-free decoded gains.
         org     x:$540
-rt5_operator_gain_full:
+rt5_operator_gain_out:
         ds      32
-rt5_operator_gain_attenuated:
+rt5_operator_gain_mod:
         ds      32
 
-; Modulation-scale gain pairs in the same channel-major order as the output
-; gains. A modulator stage's ring word is its ymfm output shifted into
-; 256-step sine-ROM index units (out>>1 in the logical 1024-step domain), so
-; these gains carry an extra 2^-13; an M1 with feedback instead folds the
-; exact ymfm history depth 2^-(22-FB) so the raw two-word sum matches
-; (out0+out1)>>(10-FB).
+; AM-free base gains plus the block AM state, all touched only at block
+; boundaries or decode time.
         org     x:$24c0
-rt5_operator_gain_mod_full:
+rt5_operator_gain_base_out:
         ds      32
-rt5_operator_gain_mod_attenuated:
+rt5_operator_gain_base_mod:
         ds      32
+rt5_lfo_step_block_lo:
+        ds      1                       ; low pair words of the scaled steps
+rt5_lfo_step_tick_lo:
+        ds      1
+rt5_am_mult:
+        ds      4                       ; 2^(-(am<<(AMS-1))/64); [0] is unity
+rt5_ams_previous:
+        ds      8                       ; per-channel AMS for turn-off restore
+rt5_lfo_am_channel:
+        ds      1                       ; AM walk scratch: channel, operator,
+rt5_lfo_am_op:
+        ds      1                       ; and the channel's multiplier
+rt5_lfo_am_mult_ch:
+        ds      1
 
-RT5_FULL_GAIN_OFFSET equ rt5_operator_gain_full-rt5_phase
-RT5_ATTENUATED_GAIN_OFFSET equ rt5_operator_gain_attenuated-rt5_phase
-RT5_MOD_FULL_GAIN_OFFSET equ rt5_operator_gain_mod_full-rt5_phase
-RT5_MOD_ATTENUATED_GAIN_OFFSET equ rt5_operator_gain_mod_attenuated-rt5_phase
+RT5_OUT_GAIN_OFFSET equ rt5_operator_gain_out-rt5_phase
+RT5_MOD_GAIN_OFFSET equ rt5_operator_gain_mod-rt5_phase
 
 ; The integrated profile groups channel carriers by their four hardware pan
 ; modes. Both-output carriers retain the internal-Y ring above. Left-only and
@@ -487,9 +498,9 @@ rt5_pan_right_stream:
 ; Envelope-active bookkeeping lives in the physically free window above the
 ; 8,192-word external X/Y reservations. External P aliases external Y word
 ; for word on the Falcon (and external X aliases P at +$4000), so phys
-; $2000-$26ff carries the cold-code island while these uninitialized arrays
-; own phys $2700 (Y) and $6400 (X); the stage-two island check keeps program
-; code below Y:$2700. Both base addresses are 64-aligned so (r5+n5)
+; $2000-$28ff carries the cold-code island while these uninitialized arrays
+; own phys $2900 (Y) and $6400 (X); the stage-two island check keeps program
+; code below Y:$2900. Both base addresses are 64-aligned so (r5+n5)
 ; state reads stay inside one modulo block under the render's m5=63.
         org     x:$2400
 rt5_env_state:
@@ -523,7 +534,8 @@ rt5_runtime_output:
         ds      1
 
 
-        org     y:$2700
+; Raised above the enlarged code island; only block-boundary code touches it.
+        org     y:$2900
 rt5_env_b:
         ds      32                      ; signed 10.13 full-block addend
 
@@ -639,16 +651,16 @@ rt5_env_retire_capped:
         nop
         movem   p:(r3),b
         move    b1,n1
-        move    #rt5_operator_gain_full,r1
+        move    #rt5_operator_gain_out,r1
         clr     a
         move    a1,x:(r1+n1)
-        move    #rt5_operator_gain_attenuated,r1
+        move    #rt5_operator_gain_mod,r1
         nop
         move    a1,x:(r1+n1)
-        move    #rt5_operator_gain_mod_full,r1
+        move    #rt5_operator_gain_base_out,r1
         nop
         move    a1,x:(r1+n1)
-        move    #rt5_operator_gain_mod_attenuated,r1
+        move    #rt5_operator_gain_base_mod,r1
         nop
         move    a1,x:(r1+n1)
         jmp     rt5_env_remove
@@ -722,25 +734,18 @@ rt5_env_gain_op:
         rep     x0
         asr     a
 rt5_env_gain_shifted:
-        move    a1,y0                   ; full gain
-        move    a,b
-        asr     a
-        asr     a
-        sub     a,b                     ; attenuated gain = 0.75 * full
-        ; Derive the modulation-scale pair with one multiply per word: $400
-        ; is 2^-13, ymfm's out>>1 serial depth in 256-step ROM index units.
-        ; An M1's history pair therefore sums to (out0+out1)>>3 — the exact
-        ; ymfm depth for feedback level 7. Levels 1-6 saturate to that
-        ; strongest depth (level 0 dispatches feedback-less and stays exact):
-        ; the measured trade favors exact onward serial modulation, which
-        ; carries the whole downstream timbre, over per-level self-feedback.
+        move    a1,y0                   ; output-scale gain
+        ; The modulation scale is one multiply: $400 is 2^-13, ymfm's out>>1
+        ; serial depth in 256-step ROM index units. An M1's history pair
+        ; therefore sums to (out0+out1)>>3 — the exact ymfm depth for
+        ; feedback level 7. Levels 1-6 saturate to that strongest depth
+        ; (level 0 dispatches feedback-less and stays exact): the measured
+        ; trade favors exact onward serial modulation, which carries the
+        ; whole downstream timbre, over per-level self-feedback.
         move    #>$000400,x1
-        move    b1,x0
-        mpy     x0,x1,a
-        move    a1,n0                   ; modulation-scale attenuated gain
         move    y0,x0
         mpy     x0,x1,a
-        move    a1,x1                   ; modulation-scale full gain
+        move    a1,x1                   ; modulation-scale gain
 rt5_env_gain_store:
         move    n1,a                    ; operator to channel-major index
         move    #>rt5_env_gainmap,x0
@@ -749,24 +754,25 @@ rt5_env_gain_store:
         nop
         movem   p:(r3),a
         move    a1,n1
-        move    #rt5_operator_gain_full,r1
+        move    #rt5_operator_gain_base_out,r1
         nop
         move    y0,x:(r1+n1)
-        move    #rt5_operator_gain_attenuated,r1
-        nop
-        move    b1,x:(r1+n1)
-        move    #rt5_operator_gain_mod_full,r1
+        move    #rt5_operator_gain_base_mod,r1
         nop
         move    x1,x:(r1+n1)
-        move    #rt5_operator_gain_mod_attenuated,r1
+        ; the live pairs start AM-free; the next block's AM pass rescales
+        ; any AM-active channel from the base pairs
+        move    #rt5_operator_gain_out,r1
         nop
-        move    n0,x:(r1+n1)
+        move    y0,x:(r1+n1)
+        move    #rt5_operator_gain_mod,r1
+        nop
+        move    x1,x:(r1+n1)
         rts
 rt5_env_gain_silent:
         clr     b
         move    b1,y0
         move    #>0,x1
-        move    #0,n0
         jmp     rt5_env_gain_store
 
 ; Boundary transitions call the island's rate decode with the operator
@@ -1868,10 +1874,17 @@ rt5_initialize_levels_done:
         move    a1,x:rt5_timer_b_counter
         move    #>3,a
         move    a1,x:rt5_timer_control
-        move    #>17,a
-        move    a1,x:rt5_lfo_step_tick
-        move    #>1377,a
-        move    a1,x:rt5_lfo_step_block
+        clr     a
+        move    a1,y:rt5_lfo_acc_hi
+        move    a1,y:rt5_lfo_acc_lo
+        move    #rt5_ams_previous,r0
+        do      #8,rt5_profile_ams_previous_done
+        move    a1,x:(r0)+
+rt5_profile_ams_previous_done:
+        ; rate byte $01 decodes to the old fixture's per-tick step 17 with
+        ; both scaled step pairs derived by the shared handler
+        move    #>$01,y1
+        jsr     rt5_lfo_rate_decode
         move    #>$400000,a             ; $19 depth $40 is unity after MPY+ASL
         move    a1,x:rt5_pm_scale
 
@@ -2451,21 +2464,24 @@ rt5_update_support_block:
 rt5_native_phase_ready:
         move    a1,x:rt5_native_phase
 
-        ; The LFO advances by the decoded per-tick rate: the 81-tick product
-        ; is precomputed at write time and the possible 82nd tick adds one
-        ; more rate step.
-        move    x:rt5_lfo_phase,a
-        move    x:rt5_lfo_step_block,x0
-        add     x0,a
+        ; The 48-bit LFO accumulator (ymfm counter times 2^18) advances by
+        ; the decoded 81-tick pair, plus the per-tick pair when the native
+        ; DDA consumed an 82nd tick; the true waveform index is then the
+        ; high word's top byte.
+        move    y:rt5_lfo_acc_lo,a0
+        move    y:rt5_lfo_acc_hi,a1
+        move    x:rt5_lfo_step_block_lo,b0
+        move    x:rt5_lfo_step_block,b1
+        add     b,a
         move    #>81,b
         cmp     y0,b
-        jeq     rt5_lfo_phase_ready
-        move    x:rt5_lfo_step_tick,x0
-        add     x0,a
-rt5_lfo_phase_ready:
-        move    #>$00ffff,y1
-        and     y1,a1
-        move    a1,x:rt5_lfo_phase
+        jeq     rt5_lfo_acc_ready
+        move    x:rt5_lfo_step_tick_lo,b0
+        move    x:rt5_lfo_step_tick,b1
+        add     b,a
+rt5_lfo_acc_ready:
+        move    a0,y:rt5_lfo_acc_lo
+        move    a1,y:rt5_lfo_acc_hi
 
         ; Timer A runs from its decoded reload while control bit 0 holds it
         ; loaded; expiry sets the status flag and reloads exactly.
@@ -2541,33 +2557,16 @@ rt5_runtime_clock_done:
         eor     x0,a
         move    a1,x:rt5_noise_lfsr
 
-        move    x:rt5_noise_lfsr,b
-        move    x:rt5_lfo_phase,a
-        jclr    #16,b1,rt5_control_value_ready
-        bset    #16,a1
-rt5_control_value_ready:
-        move    a1,x:rt5_block_control
+        ; Derive and apply this block's true AM in the island: waveform AM
+        ; byte from the LFO index, m_lfo_am = am*AMD>>7 published through
+        ; rt5_block_control, one multiplier per AM sensitivity, and a
+        ; rescale of every AM-affected channel's live gain pairs.
+        jsr     rt5_lfo_am_block
 
-        ; Select a deterministic 1.0/0.75 AM gain generation once per block.
-        ; The published output/modulation offset pair lets each algorithm
-        ; body point n7 at the array matching the next stage's role, so AM
-        ; and role scaling both stay outside the per-frame synthesis loops.
-        jclr    #16,b1,rt5_control_full_gain
-        move    #>RT5_ATTENUATED_GAIN_OFFSET,b
-        move    b1,y:rt5_gain_offset_out
-        move    #>RT5_MOD_ATTENUATED_GAIN_OFFSET,b
-        move    b1,y:rt5_gain_offset_mod
-        jmp     rt5_am_selected
-rt5_control_full_gain:
-        move    #>RT5_FULL_GAIN_OFFSET,b
-        move    b1,y:rt5_gain_offset_out
-        move    #>RT5_MOD_FULL_GAIN_OFFSET,b
-        move    b1,y:rt5_gain_offset_mod
-rt5_am_selected:
-
-        ; This block's PM offset scales the low eight control bits by the
+        ; This block's PM offset scales the published LFO index byte by the
         ; decoded $19 depth: the doubling MPY plus one ASL make depth $40
         ; exactly unity. LFO waveform bit 0 selects the offset sign.
+        move    x:rt5_lfo_phase,a
         move    #>$ff,y1
         and     y1,a1
         move    a1,x0
@@ -2783,7 +2782,7 @@ rt5_render_algorithms01:
 
 ; Algorithm 0: O1 -> O2 -> O3 -> O4.
 rt5_render_algorithm0:
-        move    y:rt5_gain_offset_mod,n7
+        move    #>RT5_MOD_GAIN_OFFSET,n7
         move    y:(r2+n2),x1
         jsr     rt5_feedback_write_x
         move    #>RT5_INC_OP2_POST,n2
@@ -2794,7 +2793,7 @@ rt5_render_algorithm0:
         move    x:(r7+n7),y0
         move    y:(r2+n2),x1
         jsr     rt5_serial_transform_x
-        move    y:rt5_gain_offset_out,n7
+        move    #>RT5_OUT_GAIN_OFFSET,n7
         move    #>RT5_INC_OP4_POST,n2
         move    x:(r7+n7),y0
         move    y:(r2+n2),x1
@@ -2803,7 +2802,7 @@ rt5_render_algorithm0:
 
 ; Algorithm 1: (O1 + O2) -> O3 -> O4.
 rt5_render_algorithm1:
-        move    y:rt5_gain_offset_mod,n7
+        move    #>RT5_MOD_GAIN_OFFSET,n7
         move    y:(r2+n2),x1
         jsr     rt5_feedback_write_x
         move    #>RT5_INC_OP2_POST,n2
@@ -2814,7 +2813,7 @@ rt5_render_algorithm1:
         move    x:(r7+n7),y0
         move    y:(r2+n2),x1
         jsr     rt5_serial_transform_x
-        move    y:rt5_gain_offset_out,n7
+        move    #>RT5_OUT_GAIN_OFFSET,n7
         move    #>RT5_INC_OP4_POST,n2
         move    x:(r7+n7),y0
         move    y:(r2+n2),x1
@@ -2825,7 +2824,7 @@ rt5_render_algorithm1:
 ; first, then rewind to O1 and add feedback into the same modulation ring.
 ; The feedback stage has not yet advanced r2, so O2/O3 use PRE offsets.
 rt5_render_algorithm2:
-        move    y:rt5_gain_offset_mod,n7
+        move    #>RT5_MOD_GAIN_OFFSET,n7
         move    #>RT5_INC_OP2_PRE,n2
         move    r7,a
         move    #>1,x0
@@ -2846,7 +2845,7 @@ rt5_render_algorithm2:
         move    a1,r7
         move    y:(r2+n2),x1
         jsr     rt5_feedback_add_x
-        move    y:rt5_gain_offset_out,n7
+        move    #>RT5_OUT_GAIN_OFFSET,n7
         move    #>RT5_INC_OP4_POST,n2
         move    r7,a
         move    #>2,x0
@@ -2860,7 +2859,7 @@ rt5_render_algorithm2:
 
 ; Algorithm 3: (O1 -> O2 + O3) -> O4.
 rt5_render_algorithm3:
-        move    y:rt5_gain_offset_mod,n7
+        move    #>RT5_MOD_GAIN_OFFSET,n7
         move    y:(r2+n2),x1
         jsr     rt5_feedback_write_x
         move    #>RT5_INC_OP2_POST,n2
@@ -2871,7 +2870,7 @@ rt5_render_algorithm3:
         move    x:(r7+n7),y0
         move    y:(r2+n2),x1
         jsr     rt5_independent_add_x
-        move    y:rt5_gain_offset_out,n7
+        move    #>RT5_OUT_GAIN_OFFSET,n7
         move    #>RT5_INC_OP4_POST,n2
         move    x:(r7+n7),y0
         move    y:(r2+n2),x1
@@ -2881,20 +2880,20 @@ rt5_render_algorithm3:
 ; Algorithm 4: (O1 -> O2) + (O3 -> O4). Each branch routes its own carrier;
 ; the O1 and O3 modulation rings can therefore reuse the same internal X line.
 rt5_render_algorithm4:
-        move    y:rt5_gain_offset_mod,n7
+        move    #>RT5_MOD_GAIN_OFFSET,n7
         move    y:(r2+n2),x1
         jsr     rt5_feedback_write_x
-        move    y:rt5_gain_offset_out,n7
+        move    #>RT5_OUT_GAIN_OFFSET,n7
         move    #>RT5_INC_OP2_POST,n2
         move    x:(r7+n7),y0
         move    y:(r2+n2),x1
         jsr     rt5_route_carrier
-        move    y:rt5_gain_offset_mod,n7
+        move    #>RT5_MOD_GAIN_OFFSET,n7
         move    #>RT5_INC_OP3_POST,n2
         move    x:(r7+n7),y0
         move    y:(r2+n2),x1
         jsr     rt5_independent_write_x
-        move    y:rt5_gain_offset_out,n7
+        move    #>RT5_OUT_GAIN_OFFSET,n7
         move    #>RT5_INC_OP4_POST,n2
         move    x:(r7+n7),y0
         move    y:(r2+n2),x1
@@ -2904,10 +2903,10 @@ rt5_render_algorithm4:
 ; Algorithm 5: O1 modulates O2, O3, and O4 in parallel. Carrier routing only
 ; reads the shared X modulation ring, so all three branches consume it intact.
 rt5_render_algorithm5:
-        move    y:rt5_gain_offset_mod,n7
+        move    #>RT5_MOD_GAIN_OFFSET,n7
         move    y:(r2+n2),x1
         jsr     rt5_feedback_write_x
-        move    y:rt5_gain_offset_out,n7
+        move    #>RT5_OUT_GAIN_OFFSET,n7
         move    #>RT5_INC_OP2_POST,n2
         move    x:(r7+n7),y0
         move    y:(r2+n2),x1
@@ -2925,10 +2924,10 @@ rt5_render_algorithm5:
 ; Algorithm 6: (O1 -> O2) + O3 + O4. Accumulate all three carriers in X,
 ; then route the completed ring according to the decoded channel pan.
 rt5_render_algorithm6:
-        move    y:rt5_gain_offset_mod,n7
+        move    #>RT5_MOD_GAIN_OFFSET,n7
         move    y:(r2+n2),x1
         jsr     rt5_feedback_write_x
-        move    y:rt5_gain_offset_out,n7
+        move    #>RT5_OUT_GAIN_OFFSET,n7
         move    #>RT5_INC_OP2_POST,n2
         move    x:(r7+n7),y0
         move    y:(r2+n2),x1
@@ -2946,7 +2945,7 @@ rt5_render_algorithm6:
 ; Algorithm 7: O1 + O2 + O3 + O4. Route the completed four-carrier X ring
 ; after every operator and its feedback state have advanced.
 rt5_render_algorithm7:
-        move    y:rt5_gain_offset_out,n7
+        move    #>RT5_OUT_GAIN_OFFSET,n7
         move    y:(r2+n2),x1
         move    x:(r7+n7),y0
         jsr     rt5_feedback_write_bypass
@@ -5611,11 +5610,11 @@ ym_output_channel_done:
 
 ; Simulate the YM3012's 10.3-float encode/decode truncation. The exact-path
 ; YM3012 and native clock helpers moved to the island window between the
-; exact LFO helpers (which end at P:$2617) and the exact timer clock at
-; P:$26d0: they run per native sample only in the ungated exact mode, and
+; exact LFO helpers and the exact timer clock: they run per native
+; sample only in the ungated exact mode, and
 ; the decoded role-gain support pushed the main stream past its P:$1400
 ; ceiling.
-        org     p:$2618
+        org     p:$2660
 ym_roundtrip_fp:
         jsr     ym_clamp_channel
         move    a1,x:synth_result
@@ -5767,10 +5766,197 @@ ym_clock_channel_loop:
         move    a1,x:ym_last_right
         jmp     ym_clock_timers
 
+; True block AM. ymfm's waveform AM byte comes from the LFO index (counter
+; bits 22-29), m_lfo_am is (am * AMD) >> 7, and each channel with AM
+; sensitivity k applies 2^(-(m_lfo_am << (k-1))/64) to its AM-enabled
+; operators (D1R register bit 7). The pass rescales live gain pairs from
+; the AM-free base pairs, so a channel whose AMS returns to zero restores
+; exactly; everything runs once per 64-frame block.
+        org     p:$2740
+rt5_lfo_am_block:
+        move    y:rt5_lfo_acc_hi,a
+        rep     #16
+        lsr     a
+        move    #>$ff,x1
+        and     x1,a1
+        move    a1,x:rt5_lfo_phase      ; published block index byte
+        move    x:rt5_lfo_waveform,b
+        move    #>2,x0
+        cmp     x0,b
+        jeq     rt5_lfo_am_triangle
+        jgt     rt5_lfo_am_noise
+        move    #>1,x0
+        cmp     x0,b
+        jeq     rt5_lfo_am_square
+        eor     x1,a1                   ; sawtooth: index ^ $ff
+        jmp     rt5_lfo_am_ready
+rt5_lfo_am_square:
+        jset    #7,a1,rt5_lfo_am_zero
+        move    #>$ff,a
+        jmp     rt5_lfo_am_ready
+rt5_lfo_am_zero:
+        clr     a
+        jmp     rt5_lfo_am_ready
+rt5_lfo_am_triangle:
+        jset    #7,a1,rt5_lfo_am_tri_fold
+        eor     x1,a1
+rt5_lfo_am_tri_fold:
+        asl     a
+        and     x1,a1
+        jmp     rt5_lfo_am_ready
+rt5_lfo_am_noise:
+        ; approximation: the low byte of the block-jumped Galois LFSR
+        ; stands in for ymfm's shift-history byte
+        move    x:rt5_noise_lfsr,a
+        and     x1,a1
+rt5_lfo_am_ready:
+        move    a1,x0
+        move    x:rt5_lfo_amd,y1
+        mpy     x0,y1,a                 ; am*AMD*2, entirely in a0
+        rep     #8
+        asr     a
+        move    a0,x0
+        move    x0,a
+        move    a1,x:rt5_block_control  ; published m_lfo_am
+
+        ; one gain multiplier per AM sensitivity; entry 0 stays unity so a
+        ; zero-AMS lookup needs no branch
+        move    a1,x1                   ; offset for sensitivity 1
+        move    #>$7fffff,a
+        move    a1,x:rt5_am_mult
+        move    #rt5_am_mult+1,r1
+        do      #3,rt5_am_mult_done
+        move    #>1023,x0
+        move    x1,a
+        cmp     x0,a
+        jle     rt5_am_mult_in_range
+        clr     a
+        jmp     rt5_am_mult_store
+rt5_am_mult_in_range:
+        move    #>$3f,x0
+        and     x0,a
+        move    #>rt5_env_fraction,x0
+        add     x0,a
+        move    a1,r2
+        move    x1,a
+        rep     #6
+        lsr     a
+        move    a1,n2
+        movem   p:(r2),a
+        move    n2,b
+        tst     b
+        jeq     rt5_am_mult_store
+        rep     n2
+        asr     a
+rt5_am_mult_store:
+        move    a1,x:(r1)+
+        move    x1,b
+        asl     b
+        move    b1,x1                   ; double the offset per sensitivity
+rt5_am_mult_done:
+
+        ; rescale the live gain pairs of every channel whose AM sensitivity
+        ; is, or last block was, nonzero
+        clr     b
+        move    b1,x:rt5_lfo_am_channel
+        do      #8,rt5_am_walk_done
+        move    x:rt5_lfo_am_channel,b
+        move    #>ym_regdata+$38,a
+        add     b,a
+        move    a1,r2
+        move    #>rt5_ams_previous,a
+        add     b,a
+        move    a1,r1
+        nop
+        move    x:(r2),a
+        move    #>3,x0
+        and     x0,a
+        move    x:(r1),b
+        move    a1,x:(r1)
+        move    a1,y1                   ; ams
+        move    b1,x0
+        or      x0,a
+        tst     a
+        jeq     rt5_am_walk_next
+        jsr     rt5_am_apply_channel
+rt5_am_walk_next:
+        move    x:rt5_lfo_am_channel,b
+        move    #>1,x0
+        add     x0,b
+        move    b1,x:rt5_lfo_am_channel
+        nop
+rt5_am_walk_done:
+        rts
+
+; Apply one channel's AM multiplier (sensitivity in y1, channel number in
+; x:rt5_lfo_am_channel) to its four live gain pairs. Logical operators
+; M1,C1,M2,C2 read their AM-enable bits from raw D1R rows 0,2,1,3.
+rt5_am_apply_channel:
+        move    #>rt5_am_mult,a
+        add     y1,a
+        move    a1,r1
+        nop
+        move    x:(r1),a
+        move    a1,x:rt5_lfo_am_mult_ch ; channel multiplier
+        clr     b
+        move    b1,x:rt5_lfo_am_op
+        do      #4,rt5_am_apply_done
+        ; raw D1R row for this logical operator
+        move    x:rt5_lfo_am_op,b
+        move    #>rt5_am_d1r_rows,a
+        add     b,a
+        move    a1,r1
+        nop
+        movem   p:(r1),a                ; raw row * 8
+        move    x:rt5_lfo_am_channel,b
+        move    b1,x0
+        add     x0,a
+        move    #>ym_regdata+$a0,x0
+        add     x0,a
+        move    a1,r2
+        move    #>$7fffff,x1            ; unity unless AM-enabled
+        move    y1,b
+        tst     b
+        jeq     rt5_am_apply_scale
+        move    x:(r2),b
+        jclr    #7,b1,rt5_am_apply_scale
+        move    x:rt5_lfo_am_mult_ch,x1
+rt5_am_apply_scale:
+        ; channel-major live slot = channel*4 + logical operator
+        move    x:rt5_lfo_am_channel,b
+        asl     b
+        asl     b
+        move    x:rt5_lfo_am_op,a
+        add     b,a
+        move    a1,n1
+        move    a1,n2
+        move    #rt5_operator_gain_base_out,r1
+        move    #rt5_operator_gain_out,r2
+        nop
+        move    x:(r1+n1),x0
+        mpy     x0,x1,a
+        move    a1,x:(r2+n2)
+        move    #rt5_operator_gain_base_mod,r1
+        move    #rt5_operator_gain_mod,r2
+        nop
+        move    x:(r1+n1),x0
+        mpy     x0,x1,a
+        move    a1,x:(r2+n2)
+        move    x:rt5_lfo_am_op,b
+        move    #>1,x0
+        add     x0,b
+        move    b1,x:rt5_lfo_am_op
+        nop
+rt5_am_apply_done:
+        rts
+
+rt5_am_d1r_rows:
+        dc      0,16,8,24               ; logical M1,C1,M2,C2 raw row * 8
+
 ; Clock the two OPM timers after the generated sample. Thus a period of N is
 ; visible in status after N clock commands, while CSM is consumed by the key
 ; preparation at the beginning of sample N.
-        org     p:$26d0
+        org     p:$2710
 ym_clock_timers:
         move    x:ym_timer_b_phase,a
         move    #>1,x0
@@ -5815,7 +6001,7 @@ ym_clock_timers_done:
 
         ; Keep the cold exact global-clock helpers out of the bounded low-P
         ; region now shared with the production codec-rate control path.
-        org     p:$2520
+        org     p:$2540
         ym_lfo_code
 
 ; -----------------------------------------------------------------------------
@@ -5823,8 +6009,8 @@ ym_clock_timers_done:
 ; -----------------------------------------------------------------------------
 ; External P aliases external Y word for word on the Falcon, so this island
 ; occupies the physically free window between the external-Y reservation
-; (which ends at Y:$1f7f) and the envelope addends at Y:$2700. The stage-two
-; generator admits P sections inside [$2000,$2700) and nothing else maps the
+; (which ends at Y:$1f7f) and the envelope addends at Y:$2900. The stage-two
+; generator admits P sections inside [$2000,$2900) and nothing else maps the
 ; phys page. Everything here runs at block boundaries or event decode time,
 ; so its cost is proportional to envelope activity and amortizes across the
 ; 1007-frame period exactly like FIFO event bursts.
@@ -5873,10 +6059,18 @@ rt5_runtime_levels_done:
         move    a1,x:rt5_block_control
         move    a1,x:rt5_lfo_step_block
         move    a1,x:rt5_lfo_step_tick
+        move    a1,x:rt5_lfo_step_block_lo
+        move    a1,x:rt5_lfo_step_tick_lo
+        move    a1,y:rt5_lfo_acc_hi
+        move    a1,y:rt5_lfo_acc_lo
         move    a1,x:rt5_pm_scale
         move    a1,x:rt5_lfo_amd
         move    a1,x:rt5_lfo_waveform
         move    a1,x:rt5_timer_status
+        move    #rt5_ams_previous,r4
+        do      #8,rt5_runtime_ams_previous_done
+        move    a1,x:(r4)+
+rt5_runtime_ams_previous_done:
         move    #>1,a
         move    a1,x:rt5_noise_lfsr
         move    #>1024,a
@@ -6272,6 +6466,8 @@ rt5_event_decode_lfo:
         cmp     x0,a
         jeq     rt5_event_decode_lfo_depth
         jgt     rt5_event_decode_lfo_waveform
+        ; entered directly by the profile fixture with the rate byte in y1
+rt5_lfo_rate_decode:
         move    y1,a
         move    #>15,x0
         and     x0,a
@@ -6286,16 +6482,22 @@ rt5_event_decode_lfo:
         rep     n0
         asl     a
 rt5_lfo_rate_shifted:
-        move    a1,x:rt5_lfo_step_tick
-        move    a1,x0
-        move    a1,b
-        rep     #4
-        asl     b                       ; rate * 16
-        rep     #6
-        asl     a                       ; rate * 64
-        add     b,a
-        add     x0,a                    ; rate * 81
-        move    a1,x:rt5_lfo_step_block
+        ; The 48-bit accumulator holds ymfm's counter times 2^18, so both
+        ; decoded advances become high/low pairs at that scale: the raw
+        ; per-tick step shifted up, and its 81-tick block product from the
+        ; doubling multiply plus seventeen more shifts.
+        move    a1,x0                   ; per-tick step
+        move    a,b
+        rep     #18
+        asl     b
+        move    b1,x:rt5_lfo_step_tick
+        move    b0,x:rt5_lfo_step_tick_lo
+        move    #>81,y0
+        mpy     x0,y0,b                 ; step * 81 * 2
+        rep     #17
+        asl     b
+        move    b1,x:rt5_lfo_step_block
+        move    b0,x:rt5_lfo_step_block_lo
         rts
 rt5_event_decode_lfo_depth:
         jclr    #7,y1,rt5_lfo_amd_write

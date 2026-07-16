@@ -115,11 +115,11 @@ why the project publishes its own profiler.
   vectors. The realtime pitch conversion is exact — **0.009 ppm drift,
   at most 7 counts of phase error** — serial modulation runs at ymfm's
   decoded out>>1 depth through role-scaled gains, and pitch, timing,
-  noise, algorithms 0-3, and feedback-7 pass at 313.15 cycles/frame.
-  The measured remaining kernel work: true AM in place of the
-  deterministic block selection (its AMS-blind 0.75 smear depresses
-  algorithms 4-7 and feedback-0), per-level feedback depth, the swapped
-  stereo channel, DT1/DT2, noise-frequency/output substitution, and
+  noise, algorithms 0-3, feedback-7, and — with true block AM from a
+  48-bit LFO accumulator — **the complete LFO gate (spectral cosine
+  0.9973)** pass at 320.63 cycles/frame. The measured remaining kernel
+  work: the swapped stereo channel, per-level feedback depth (algorithms
+  4-7 and feedback-0), DT1/DT2, noise-frequency/output substitution, and
   sub-block event splitting.
 - MDX synchronization/modulation, remaining command behavior, real-hardware
   contention measurement, and the compatibility corpus remain. The exact
