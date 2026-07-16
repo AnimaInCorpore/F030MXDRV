@@ -110,14 +110,15 @@ why the project publishes its own profiler.
   imports the current register/key image, consumes the real rolling FIFO,
   applies direct live writes (including multiplier changes), mixes planar
   PDX, renders the inactive 1024-frame buffer, and restores the exact tables
-  on stop. `make capture-realtime` now replays all 15 perceptual scenarios
+  on stop. `make capture-realtime` replays all 15 perceptual scenarios
   through that production stream in Hatari and gates the reconstructed
-  vectors: the baseline report quantifies the remaining kernel work — the
-  realtime pitch conversion is still the bounded fixture placeholder, AM is
-  a deterministic block selection, and stereo is swapped — while envelope
-  tracking is already within one attenuation unit outside the attack block
-  and noise passes. Real pitch/DT1/DT2 conversion, noise-frequency/output
-  substitution, true AM, and sub-block event splitting remain.
+  vectors. The realtime pitch conversion is exact — **0.009 ppm drift,
+  at most 7 counts of phase error** — and pitch, timing, noise,
+  algorithms 0-1, and feedback-7 pass. The measured remaining kernel work:
+  serial-modulation depth (algorithms 2-5 spectral cosine 0.30-0.69),
+  true AM in place of the deterministic block selection, the swapped
+  stereo channel, DT1/DT2, noise-frequency/output substitution, and
+  sub-block event splitting.
 - MDX synchronization/modulation, remaining command behavior, real-hardware
   contention measurement, and the compatibility corpus remain. The exact
   boundary between implemented and pending work is kept in

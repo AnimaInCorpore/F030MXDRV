@@ -40,7 +40,7 @@ Every transport unit is one DSP/host 24-bit word. The upper byte is an opcode.
 | `14 00 00` | run the 2048-frame block-oriented algorithm-0 channel spike | deterministic checksum `0f 26 66` |
 | `15 00 00` | run the 2048-frame block-oriented algorithm-7 carrier spike | deterministic checksum `89 eb 00` |
 | `16 00 aa` | run the 2048-frame mixed-topology spike for algorithm `aa = 1..6` | per-algorithm deterministic checksum |
-| `17 00 00` | run the 128-block live-SSI decoded-control and envelope engine | deterministic checksum `ab 5f 30` |
+| `17 00 00` | run the 128-block live-SSI decoded-control and envelope engine | deterministic checksum `0e b0 03` |
 | `18 00 00`, then 2048 words after `52 44 59` | upload 1024 interleaved stereo PCM frames, render the realtime FM buffer, and start interrupt-fed SSI | ready token, then `00 00 00` before transmit starts |
 | `19 00 00`, then 2048 words after `52 44 59` | upload PCM to the inactive realtime buffer, render 16 64-frame FM blocks, and switch at a stereo boundary | ready token, then `00 00 00` after the switch |
 | anything else | unsupported command | `ff ff ff` |
@@ -78,7 +78,7 @@ DSP56001 sine ROM. The refill command prepares the inactive A/B buffer while
 SSI repeats the active complete buffer, then switches at a stereo boundary.
 Stop restores the packed tables, exact caches, external-Y mapping, and linear
 address modifiers. Command `12` returns the deterministic checksum of the
-first realtime buffer; the Hatari attack-trace fixture expects `fe 2f b0`.
+first realtime buffer; the Hatari attack-trace fixture expects `0d 3f 0c`.
 
 Active buffered audio accepts synchronous command `02` writes, `0e`
 transactions, `0f` queries, the refill matching its current mode (`13` or
@@ -188,7 +188,7 @@ output — and the command checksum — are bit-identical to the cleared-ring
 ordering. Algorithms 6/7 route their already-summed
 carrier rings through a separate decoded-pan path. The command explicitly
 clears a latched SSI underrun before restoring the external Y map and exact
-phase cache. Its checksum is `ab 5f 30`.
+phase cache. Its checksum is `0e b0 03`.
 
 Hatari measures 320.24 cycles per codec frame over the 8,192-frame,
 128-block profile against the 326.27-cycle budget, leaving 6.03 cycles
@@ -402,24 +402,26 @@ are implementation gaps against the contract, not relaxed acceptance criteria.
    expand 1024 host PDX frames into planar accumulators, render 16 realtime
    blocks into inactive A/B SSI buffers, and restore the exact path on stop.
    The Hatari smoke gate checks FIFO and direct-write service, three buffers,
-   clocks 1301/2603/3904, 3072 prepared frames, and checksum `fe2fb0`.
+   clocks 1301/2603/3904, 3072 prepared frames, and checksum `0d3f0c`.
 4. **Capture harness measuring (in progress):** `make capture-realtime` replays
    all 15 perceptual scenarios through the production commands `18`/`19` in
    Hatari, dumps DSP state at every 64-frame block boundary plus each completed
    buffer, reconstructs per-frame vectors, and feeds them through the
    comparator. The DSP's native clock, LFSR jumps, and phase advances verify
    against the published recurrences, and every schedule column matches the
-   exact reference. The baseline report fails as expected: the realtime pitch
-   conversion is still the bounded fixture placeholder
-   (`(step*MUL)>>5 | $1000`, about 10.6x low), which also drags algorithms 2-7
-   and feedback-0 under the spectral boundaries; block-held AM is the
-   deterministic full/0.75 selection, failing the LFO checks; and FM lands on
-   the swapped stereo channel. Envelope tracking already sits within one
-   attenuation unit outside the attack block (MAE 4.44, decay/sustain and
-   sustain/release transitions within 64 frames), and noise passes. Remaining:
-   real pitch-increment conversion with DT1/DT2, decoded noise
-   frequency/output, true AM application, sub-block event splitting for the
-   sub-frame latency contract, and attack-block reconstruction resolution.
+   exact reference. The realtime pitch conversion is now exact: each KC/KF
+   rebuild converts `step*MUL` into a block DDA increment through the
+   `2^19/(51*1007)` scale that matches the render's 255-times-two phase mac
+   against the 256-step sine ROM, and the capture gate measures **0.009 ppm
+   drift with at most 7 counts of phase error** (well inside the 20 ppm and
+   one-frame boundaries; drift is a least-squares rate fit, since endpoint
+   quotients carry tens of ppm of quantization). Pitch, timing, noise,
+   algorithms 0-1, and feedback-7 pass. Still failing and next in line:
+   serial-modulation timbre (algorithms 2-5 and feedback-0 spectral cosine
+   0.30-0.69, pointing at modulation-depth scaling), the deterministic
+   full/0.75 block AM (all LFO checks), FM on the swapped stereo channel,
+   envelope attack-block reconstruction (correlation 0.8902 vs 0.95), DT1/DT2,
+   decoded noise frequency/output, and sub-block event splitting.
 5. Measure cycle count, SSI underruns, buffer switches, and host/DSP contention
    on a real Falcon before declaring the audio transport complete.
 6. Finish MDX software modulation, synchronization, legato, remaining command

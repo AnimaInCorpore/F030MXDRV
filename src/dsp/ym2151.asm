@@ -321,6 +321,10 @@ rt5_mix_written:
 ; one channel slot; the POST offsets compensate for that advance. The @cvs
 ; wrapper only strips the Y-memory attribute so the X-space feedback anchor
 ; can be subtracted; the numeric offset is unchanged.
+; round(2^19 * 2^19/(51*1007)): the exact step-to-increment scale for the
+; render's 255-times-two per-frame phase mac against the 256-step sine ROM.
+RT5_PITCH_DDA_SCALE equ 5352297
+
 RT5_INC_BASE     equ @cvs(x,rt5_operator_increment)-rt5_feedback_1
 RT5_INC_OP1_PRE  equ RT5_INC_BASE+0
 RT5_INC_OP2_PRE  equ RT5_INC_BASE+8
@@ -6125,10 +6129,19 @@ rt5_pitch_shift_done:
         asr     b
         asr     b
         move    b0,a                    ; integer step * MUL
-        rep     #5
-        lsr     a
-        move    #>$001000,x0
-        or      x0,a                    ; bounded, non-silent DDA increment
+        ; Exact block-DDA conversion. The render's per-frame mac multiplies
+        ; each increment by $ff and doubles, and one sine-ROM cycle spans
+        ; 256*2^24 accumulator units, so the increment that reproduces the
+        ; 10.10 native step at the 1280:1007 codec rate is
+        ; step*MUL * 2^19/(51*1007); the scale constant carries 0.04 ppm and
+        ; the pitch fixture lands within 0.05 ppm. Only tones already past
+        ; the codec Nyquist wrap into the signed alias domain.
+        move    #>RT5_PITCH_DDA_SCALE,x0
+        move    a1,x1
+        mpy     x0,x1,b                 ; step*MUL * scale, <<1
+        rep     #20
+        asr     b                       ; (step*MUL * scale) >> 19
+        move    b0,a
         move    a1,x:(r3)+n3
 rt5_pitch_ops_done:
         rts

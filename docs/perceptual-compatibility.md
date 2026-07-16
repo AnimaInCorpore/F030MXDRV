@@ -80,14 +80,18 @@ samples the DSP PC at do-loop-end+1 on every iteration.
 
 Reconstruction refuses to guess: the dumped native clock must match the
 1280:1007 DDA at every boundary, consecutive LFSR dumps must be exactly 64
-Galois steps apart, and phase deltas must be block-uniform, or the run
-aborts. Audio comes from the captured buffers (24-bit 0.23 samples reported
-in the 16-bit host domain), phases interpolate the verified per-block
-deltas into ymfm's 22-bit domain (`phase48 >> 22`), envelope levels follow
-the affine mid-block contract above with the addend derived from the
-realized step, per-frame noise replays the same right-shifting
-x^17+x^14+1 Galois LFSR, and the schedule columns replicate the oracle's
-event policy bit for bit.
+Galois steps apart, and every block's phase advance must equal its dumped
+increment times 510 frames-per-mac — modulo one sine-ROM cycle (2^32
+accumulator units), because the independent-operator render path masks the
+stored accumulator to the ROM index every frame — or the run aborts. Audio
+comes from the captured buffers (24-bit 0.23 samples reported in the
+16-bit host domain). Phase accumulates the verified per-block increments
+into an unwrapped series emitted in ymfm's 2^22 domain, zeroed when a
+key-on edge drains at a block boundary exactly as the kernel zeroes the
+operator's phase. Envelope levels follow the affine mid-block contract
+above with the addend derived from the realized step, per-frame noise
+replays the same right-shifting x^17+x^14+1 Galois LFSR, and the schedule
+columns replicate the oracle's event policy bit for bit.
 
 Two reconstruction limits are documented rather than hidden: an attack that
 key-ons and converges inside one block never exposes its true multiplier or
@@ -95,15 +99,19 @@ an attack-state boundary, so that block falls back to a linear mid and the
 attack state is invisible; and the reported `lfo_am` is the kernel's actual
 deterministic full/0.75 block gain selection, not a modeled LFO.
 
-The first baseline report (protocol v19, commit `5471cf8` capture) fails
-the gate as expected and quantifies the open kernel work: pitch runs about
-10.6x low because the realtime increment conversion is still the bounded
-fixture placeholder (`(step*MUL)>>5 | $1000`), which also pulls algorithms
-2-7 and feedback-0 under the spectral boundaries; the LFO checks fail
-against the placeholder AM; FM output sits on the swapped stereo channel
-(the comparator's max-RMS channel pick tolerates this). Envelope tracking
-is already within one attenuation unit outside the attack block (MAE 4.44,
-both late transitions within 64 frames), and the noise boundaries pass.
+The current report passes pitch (0.009 ppm least-squares drift, at most
+7 counts of phase error), timing, noise (1.55% rate error, 0.78 spectral
+cosine), algorithms 0-1, and feedback-7. The measured open kernel work:
+serial-modulation timbre is off (algorithms 2-5 and feedback-0 sit at
+spectral cosine 0.30-0.69 while the independent-carrier algorithms 6-7
+reach 0.88-0.94, pointing at modulation-depth scaling rather than pitch);
+the deterministic full/0.75 block AM fails every LFO check; FM output sits
+on the swapped stereo channel (the comparator's max-RMS channel pick
+tolerates this); the log-spectrum RMSE hovers just over 12 dB on
+algorithms 3-7. Envelope tracking is within one attenuation unit outside
+the attack block (MAE 4.44, both late transitions within 64 frames);
+its correlation shortfall (0.8902 vs 0.95) is the documented attack-block
+reconstruction limit above, not measured kernel behavior.
 
 The realtime engine advances envelope state once per 64-frame block with a
 published per-rate affine recurrence, so a capture reconstructs each
@@ -119,7 +127,7 @@ The comparator enforces these boundaries:
 | Behavior | Acceptance boundary |
 | --- | --- |
 | native clock and writes | exact frame/native-sample map and exact ordered event hashes |
-| pitch | at most 20 ppm long-term phase drift and less than one codec frame of phase error |
+| pitch | at most 20 ppm long-term drift between least-squares phase rates and less than one codec frame of phase error |
 | envelope | mean attenuation error at most 24/1023, correlation at least 0.95, state transitions within 64 frames |
 | LFO | AM range within 25%, dominant-rate error at most one FFT bin, spectral cosine at least 0.90 |
 | noise | transition-rate error at most 3%, state-spectrum cosine at least 0.70 |

@@ -154,6 +154,21 @@ def dominant_bin(values: list[int]) -> int:
     return max(range(1, len(bins)), key=bins.__getitem__)
 
 
+def phase_rate(values: list[int]) -> float:
+    """Least-squares phase advance per frame over an unwrapped series."""
+    count = len(values)
+    if count < 2:
+        return 0.0
+    mean_index = (count - 1) / 2.0
+    mean_value = sum(values) / count
+    numerator = sum(
+        (index - mean_index) * (value - mean_value)
+        for index, value in enumerate(values)
+    )
+    denominator = sum((index - mean_index) ** 2 for index in range(count))
+    return numerator / denominator
+
+
 def unwrapped_phase(vector: Vector, operator: int) -> list[int]:
     phases = vector.column(f"op{operator}_phase")
     unwrapped = [0]
@@ -289,9 +304,13 @@ def compare_suites(
 
     pitch_reference = unwrapped_phase(reference["pitch"], 3)
     pitch_candidate = unwrapped_phase(candidate["pitch"], 3)
-    reference_advance = pitch_reference[-1]
-    candidate_advance = pitch_candidate[-1]
-    pitch_ppm = abs(candidate_advance - reference_advance) / max(reference_advance, 1) * 1e6
+    # Long-term drift is the difference between the two series' RATES. The
+    # endpoint quotient carries up to one native/frame step of quantization
+    # (tens of ppm over 8192 frames, swamping a 20 ppm boundary), so estimate
+    # each rate with a least-squares fit over every row instead.
+    reference_rate = phase_rate(pitch_reference)
+    candidate_rate = phase_rate(pitch_candidate)
+    pitch_ppm = abs(candidate_rate - reference_rate) / max(reference_rate, 1e-9) * 1e6
     phase_errors = [abs(got - exact) for exact, got in zip(pitch_reference, pitch_candidate)]
     reference_steps = [right - left for left, right in zip(pitch_reference, pitch_reference[1:])]
     phase_limit = max(reference_steps) if reference_steps else 0

@@ -151,7 +151,7 @@ MUL, key edges, envelope rates, LFO, and timers update persistent state. The
 is not yet met. DT1/DT2 pitch offsets and channel-7 noise-frequency/output
 substitution also remain to be integrated. The Hatari smoke gate renders three
 buffers, checks 3072 prepared frames, and pins the first attack buffer checksum
-to `$fe2fb0`.
+to `$0d3f0c`.
 
 ## Cycle feasibility gate
 
@@ -344,7 +344,11 @@ parallel Y-bank feedback pointer through `(r4+n4)`. The 32-event fixture
 covers every decoded register class: eight `$20-$27` algorithm/pan rewrites,
 five four-band total-level writes, four KC and two KF events that rebuild
 four base increments from the exact expanded `opm_phase_step` table with
-octave shift and doubled per-operator multiplier, five key on/off edges
+octave shift and doubled per-operator multiplier — converted to block DDA
+units through the `2^19/(51*1007)` scale that matches the render's
+255-times-two phase mac against the 256-step sine ROM, exact to 0.04 ppm
+with only past-Nyquist tones wrapping into the signed alias domain —
+five key on/off edges
 driving real attack/release state, one write from each of the four
 envelope-rate groups that rebuilds the live affine constants when its class
 matches the operator's ADSR state, LFO rate/depth/waveform writes, and
@@ -359,7 +363,7 @@ fill — so no noise-table words occupy the bounded P-memory image. Cleanup
 disables SSI, reads SSISR and writes TX to clear a latched underrun,
 restores the external Y map, and rebuilds the exact phase cache, including
 the internal-Y frequency-cache words the decoded multiplier/increment arrays
-overlay. The deterministic reply is `$ab5f30`.
+overlay. The deterministic reply is `$0eb003`.
 
 Decoded envelope curvature runs as a block-boundary pass at `P:$0080` in
 internal P RAM, where instruction fetches avoid the external-memory penalty.

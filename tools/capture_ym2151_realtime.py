@@ -348,6 +348,7 @@ class Boundary:
     lfsr: int
     lfo_phase: int
     phases48: list[int]  # channel-major ch*4+op 48-bit accumulators
+    increments: list[int]  # operator-major signed per-frame DDA increments
     levels: list[int]  # operator-major op*8+ch 10.13 attenuation
     env_states: list[int]  # operator-major raw DSP state bits
     env_a: list[int]  # operator-major 0.23 block multiplier
@@ -371,6 +372,10 @@ def read_boundary(record: Record, symbols: dict[tuple[str, str], int]) -> Bounda
         lfsr=record.words[("x", x_addr("rt5_noise_lfsr"))],
         lfo_phase=record.words[("x", x_addr("rt5_lfo_phase"))],
         phases48=[(h << 24) | l for h, l in zip(high, low)],
+        increments=[
+            signed24(v)
+            for v in record.array("y", y_addr("rt5_operator_increment"), 32)
+        ],
         levels=record.array("x", x_addr("rt5_envelope_level"), 32),
         env_states=record.array("x", x_addr("rt5_env_state"), 32),
         env_a=record.array("y", y_addr("rt5_env_a"), 32),
@@ -454,26 +459,68 @@ def reconstruct_rows(
                 f"error: boundary {index} native clock {boundary.native_count}, "
                 f"DDA expects {expected}"
             )
+    # A key-on edge zeroes the operator's phase when the FIFO drain applies
+    # it at a block boundary; mirror that (the exact reference does the same
+    # at the precise native sample). KON bits 3-6 key raw rows M1,M2,C1,C2,
+    # so logical columns M1,C1,M2,C2 read bits 3,5,4,6.
+    key_reset_block: dict[tuple[int, int], bool] = {}
+    boundary_clocks = [0] + [natives[k * BLOCK_FRAMES - 1] for k in range(1, blocks + 1)]
+    key_bits = 0
+    for event in events:
+        if event.reg != 0x08 or (event.data & 7) != 0:
+            continue
+        edges = (event.data >> 3) & ~(key_bits >> 3) & 0xF
+        key_bits = event.data
+        if not edges:
+            continue
+        block = next(
+            (k for k in range(blocks + 1) if boundary_clocks[k] >= event.sample),
+            None,
+        )
+        if block is None:
+            continue
+        for column, bit in enumerate((0, 2, 1, 3)):
+            if edges & (1 << bit):
+                key_reset_block[(block, column)] = True
+
+    # The independent-operator render path keeps only the sine-ROM index in
+    # the stored accumulator (`and y1,b1` masks it every frame), so dumped
+    # phases are meaningful modulo one ROM cycle (2^32 accumulator units) and
+    # cannot disambiguate multi-wrap blocks. The per-block increments are
+    # dumped too, so phase is reconstructed by accumulating them; every block
+    # is still verified against the dumped accumulator modulo one cycle.
+    rom_cycle = 1 << 32
     for index in range(blocks):
         state = boundaries[index].lfsr
         for _ in range(BLOCK_FRAMES):
             state = lfsr_step(state)
         if state != boundaries[index + 1].lfsr:
             raise SystemExit(f"error: LFSR jump mismatch entering block {index}")
-        for slot in range(32):
-            delta = (
-                boundaries[index + 1].phases48[slot]
-                - boundaries[index].phases48[slot]
-            ) % PHASE48_MODULUS
-            if delta % BLOCK_FRAMES:
+        for column, (channel_slot, operator_slot) in enumerate(
+            ((0, 0), (1, 8), (2, 16), (3, 24))
+        ):
+            base = (
+                0
+                if key_reset_block.get((index, column))
+                else boundaries[index].phases48[channel_slot]
+            )
+            observed = (
+                boundaries[index + 1].phases48[channel_slot] - base
+            ) % rom_cycle
+            expected = (
+                boundaries[index + 1].increments[operator_slot] * 510 * BLOCK_FRAMES
+            ) % rom_cycle
+            if observed != expected:
                 raise SystemExit(
-                    f"error: block {index} slot {slot} phase advance is not uniform"
+                    f"error: block {index} operator {column} advanced "
+                    f"{observed:#x}, increments say {expected:#x}"
                 )
 
-    # Channel-0 logical operators M1,C1,M2,C2: channel-major phase slots and
-    # operator-major envelope slots.
-    phase_slots = [0, 1, 2, 3]
+    # Channel-0 logical operators M1,C1,M2,C2: operator-major increment and
+    # envelope slots. Phase accumulates unwrapped so the emitted column wraps
+    # in ymfm's 2^22 domain rather than at the 256-step ROM cycle.
     env_slots = [0, 8, 16, 24]
+    phase_accumulators = [0, 0, 0, 0]
 
     rows: list[list[int]] = []
     for frame in range(frames):
@@ -499,15 +546,13 @@ def reconstruct_rows(
         row = [frame, native, event_count, event_hash, left >> 8, right >> 8,
                lfo_am, noise_state]
         for op in range(4):
-            p_slot = phase_slots[op]
             e_slot = env_slots[op]
-            delta = (
-                exit_.phases48[p_slot] - entry.phases48[p_slot]
-            ) % PHASE48_MODULUS
-            phase48 = (
-                entry.phases48[p_slot] + delta * offset // BLOCK_FRAMES
-            ) % PHASE48_MODULUS
-            phase = (phase48 >> 22) & 0x3FFFFF
+            if offset == 0 and key_reset_block.get((block, op)):
+                phase_accumulators[op] = 0
+            # The oracle reports each operator's phase after the frame's
+            # advance, so accumulate first and emit second.
+            phase_accumulators[op] += exit_.increments[e_slot] * 510
+            phase = (phase_accumulators[op] >> 22) & 0x3FFFFF
 
             before = entry.levels[e_slot]
             after = exit_.levels[e_slot]
