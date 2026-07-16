@@ -416,6 +416,39 @@ def read_audio(
     return samples
 
 
+def load_attack_factors(path: Path) -> list[int]:
+    """The generated per-rate full-block attack multipliers (0.23 words)."""
+    text = path.read_text(encoding="utf-8")
+    section = text[text.index("rt5_attack_factor:"):]
+    section = section[: section.index(":", len("rt5_attack_factor:") + 1)]
+    values = [int(v, 16) for v in re.findall(r"\$([0-9a-fA-F]+)", section)]
+    if len(values) < 64:
+        raise SystemExit("error: attack factor table is incomplete")
+    return values[:64]
+
+
+def effective_attack_rate(registers: dict[int, int], op_major: int) -> int:
+    """Mirror rt5_env_reload_op's attack-rate derivation."""
+    raw_slot = (op_major & 7) | ((op_major & 8) << 1) | ((op_major & 16) >> 1)
+    ar_register = registers.get(0x80 + raw_slot, 0)
+    rate = ar_register & 0x1F
+    if rate == 0:
+        return 0
+    rate *= 2
+    keycode = (registers.get(0x28 + (op_major & 7), 0) >> 2) & 0x1F
+    shift = 3 - (ar_register >> 6)
+    if shift > 0:
+        keycode >>= shift
+    return min(63, rate + keycode)
+
+
+def attack_level(before: int, alpha: float, frames: int) -> int:
+    """ymfm's overshooting exponential toward -1024, in 10.13 units."""
+    scaled = alpha ** (frames / 64.0)
+    level = scaled * (before + (1 << 23)) - (1 << 23)
+    return max(0, min(LEVEL_MAX, int(round(level))))
+
+
 def mid_block_level(before: int, after: int, multiplier: int) -> int:
     """Analytic 32-frame level from the published full-block affine step."""
     if before == after:
@@ -461,6 +494,25 @@ def reconstruct_rows(
                 f"error: boundary {index} native clock {boundary.native_count}, "
                 f"DDA expects {expected}"
             )
+    # Register mirror at each block boundary, for the attack-rate decode.
+    attack_factors = load_attack_factors(
+        REPO / "build/generated/envelope_tables.inc"
+    )
+    registers_by_block: list[dict[int, int]] = []
+    mirror: dict[int, int] = {}
+    boundary_clocks_pre = [0] + [
+        natives[k * BLOCK_FRAMES - 1] for k in range(1, blocks + 1)
+    ]
+    event_cursor = 0
+    for block in range(blocks):
+        while (
+            event_cursor < len(events)
+            and events[event_cursor].sample <= boundary_clocks_pre[block]
+        ):
+            mirror[events[event_cursor].reg] = events[event_cursor].data
+            event_cursor += 1
+        registers_by_block.append(dict(mirror))
+
     # Channel-0 AM sensitivity per block, from the same boundary-drain
     # schedule the kernel uses; the emitted lfo_am column is the kernel's
     # published block m_lfo_am shifted by it, exactly ymfm's channel offset.
@@ -575,14 +627,30 @@ def reconstruct_rows(
 
             before = entry.levels[e_slot]
             after = exit_.levels[e_slot]
-            if offset < 32:
-                mid = mid_block_level(before, after, entry.env_a[e_slot])
-                level = before + (mid - before) * offset // 32
+            if key_reset_block.get((block, op)):
+                # A key-on block's attack multiplier is consumed and reloaded
+                # inside the same boundary pass, so no dump exposes it;
+                # rebuild it from the published per-rate table and the same
+                # effective-rate decode the kernel runs, and emit ymfm's
+                # overshooting exponential with a genuine attack state.
+                rate = effective_attack_rate(registers_by_block[block], e_slot)
+                alpha = attack_factors[rate] / float(1 << 23)
+                mid = attack_level(before, alpha, 32)
+                if offset < 32:
+                    level = attack_level(before, alpha, offset)
+                else:
+                    level = mid + (after - mid) * (offset - 32) // 32
+                env = min(1023, max(0, level >> 13))
+                state = 1
             else:
-                mid = mid_block_level(before, after, entry.env_a[e_slot])
-                level = mid + (after - mid) * (offset - 32) // 32
-            env = min(1023, max(0, level >> 13))
-            state = dsp_state_to_ymfm(exit_.env_states[e_slot])
+                if offset < 32:
+                    mid = mid_block_level(before, after, entry.env_a[e_slot])
+                    level = before + (mid - before) * offset // 32
+                else:
+                    mid = mid_block_level(before, after, entry.env_a[e_slot])
+                    level = mid + (after - mid) * (offset - 32) // 32
+                env = min(1023, max(0, level >> 13))
+                state = dsp_state_to_ymfm(exit_.env_states[e_slot])
             row += [phase, env, state]
         rows.append(row)
     return rows

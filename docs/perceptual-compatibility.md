@@ -108,12 +108,17 @@ above with the addend derived from the realized step, per-frame noise
 replays the same right-shifting x^17+x^14+1 Galois LFSR, and the schedule
 columns replicate the oracle's event policy bit for bit.
 
-One reconstruction limit is documented rather than hidden: an attack that
-key-ons and converges inside one block never exposes its true multiplier or
-an attack-state boundary, so that block falls back to a linear mid and the
-attack state is invisible. The reported `lfo_am` is the kernel's own
-published block `m_lfo_am` shifted by the decoded channel sensitivity,
-block-held like every other realtime control.
+An attack that key-ons and converges inside one block never exposes its
+multiplier or an attack state at any boundary — the boundary pass consumes
+and reloads both — so the reconstruction rebuilds that block from the
+published per-rate attack table and the same effective-rate decode the
+kernel runs (attack rate doubled plus the KSR-shifted key code), emitting
+ymfm's overshooting exponential toward -1024 for the first half-block,
+anchoring the second half to the verified dumped exit, and reporting a
+genuine attack state whose decay transition lands at the block boundary.
+The reported `lfo_am` is the kernel's own published block `m_lfo_am`
+shifted by the decoded channel sensitivity, block-held like every other
+realtime control.
 
 The current report passes pitch (0.009 ppm least-squares drift, at most
 7 counts of phase error), timing, the complete LFO gate (range ratio
@@ -170,9 +175,12 @@ M1's history sum and its onward serial depth each give up the square
 root of the per-level error instead of one of them taking it all.
 Algorithm 5 remains outside the cosine boundary — its whole timbre is
 the single O1 depth split, the pathological case for the coupling — and
-the all-carrier algorithm 7 still drops feedback (its ring carries
-carrier-scale words that cannot double as history), paying in log-RMSE.
-Both wait on the render-loop restructure.
+waits on the render-loop restructure. The all-carrier algorithm 7
+regained feedback through a dedicated two-product stage: a modulo-2
+internal gain ring alternates y0 between the carrier and fold-scale
+gains on the two mpyr parallel loads, so its ring word stays the audible
+carrier while its history lands at the fold depth, two instructions per
+frame paid only by algorithm-7 channels with live feedback.
 
 The comparator enforces these boundaries:
 
