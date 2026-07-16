@@ -96,10 +96,17 @@ samples the DSP PC at do-loop-end+1 on every iteration.
 
 Reconstruction refuses to guess: the dumped native clock must match the
 1280:1007 DDA at every boundary, consecutive LFSR dumps must be exactly 64
-Galois steps apart, and every block's phase advance must equal its dumped
-increment times 510 frames-per-mac — modulo one sine-ROM cycle (2^32
-accumulator units), because the independent-operator render path masks the
-stored accumulator to the ROM index every frame — or the run aborts. Audio
+Galois steps apart, and every block's phase advance must equal its
+per-segment increments times 510 frames-per-mac — modulo one sine-ROM cycle
+(2^32 accumulator units), because the independent-operator render path masks
+the stored accumulator to the ROM index every frame — or the run aborts.
+Because the kernel splits blocks at each write's landing frame, the
+reconstruction carries a bit-exact Python mirror of the channel pitch
+rebuild (positions, DT1/DT2, multipliers, and the block-DDA scale from the
+same vendored ymfm tables); the mirror supplies the increments for segment
+spans no boundary dump exposes, and every dump's increments must equal the
+mirror's final segment or the run aborts, so the mirror can never drift
+from the kernel unnoticed. Audio
 comes from the captured buffers (24-bit 0.23 samples reported in the
 16-bit host domain). Phase accumulates the verified per-block increments
 into an unwrapped series emitted in ymfm's 2^22 domain, zeroed when a

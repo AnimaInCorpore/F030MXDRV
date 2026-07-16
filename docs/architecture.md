@@ -86,9 +86,9 @@ transactions, `0f` queries, the refill matching its current mode (`13` or
 cache and queued writes are consumed at their precise native sample while a
 refill renders 1280 native samples. In realtime mode direct writes are mirrored
 into the exact register image and decoded into the persistent block state;
-queued writes are drained at 64-frame boundaries before the next block. The
-realtime path therefore preserves FIFO order and rolling clock rate but
-currently quantizes event output latency to at most one 64-frame block. Its
+queued writes are drained at their landing frames: a block whose FIFO head
+falls inside it renders as event-aligned segments, so every write takes
+effect on the first codec frame at or after its native timestamp. Its
 drift-free 1280:1007 DDA advances 1024-frame refills by 1301 or 1302 native
 samples; the smoke sequence observes clocks 1301, 2603, and 3904. The rolling
 clock is not reset by start or refill; only chip reset returns it to zero.
@@ -367,10 +367,11 @@ codec-rate engine must update feedback and modulation on every produced sample;
 holding selected native outputs is not a valid shortcut because those outputs
 feed later operator state.
 
-Protocol v19 does not yet satisfy the sub-frame write-latency clause: the
-production kernel services ordered events only at 64-frame boundaries; this is
-an implementation gap against the contract, not a relaxed acceptance criterion.
-DT1/DT2 pitch offsets are decoded per operator since the channel pitch rebuild
+Protocol v19 now satisfies the write-latency clause: the production kernel
+splits a block at each queued write's landing frame, draining and decoding
+between the segments, so effects land on the first codec frame at or after
+their native timestamps. The envelope, AM, LFO, and timer advances keep their
+documented block cadence; only register effects split. DT1/DT2 pitch offsets are decoded per operator since the channel pitch rebuild
 adopted the exact engine's position and detune semantics, and register $0f is
 decoded into channel-7 noise substitution: operator 31's sine mutes while a
 once-per-block pass supplies ymfm's linear-attenuation noise volume, resampled
@@ -452,7 +453,9 @@ to the capture scenarios and the hardware soak.
    intermediates as quantization-chaos divergence at the fixture's
    maximal TL-0 depth rather than a kernel error (a comparator
    recalibration candidate); envelope attack-block reconstruction
-   (correlation 0.8902 vs 0.95); and sub-block event splitting.
+   has since been resolved by the analytic attack reconstruction
+   (0.9656), and sub-block event splitting now lands writes on their
+   exact frames.
 5. Measure cycle count, SSI underruns, buffer switches, and host/DSP contention
    on a real Falcon before declaring the audio transport complete.
 6. **MML executor complete (second stage):** the tick executor now covers

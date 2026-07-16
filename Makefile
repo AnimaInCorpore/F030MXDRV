@@ -241,7 +241,7 @@ $(DSP_STAGE2_IMAGE): tools/generate_dsp_stage2.py $(DSP_BUILD)/.assembled
 		--bootstrap $(DSP_BUILD)/YMBOOT.LOD \
 		--program $(DSP_BUILD)/YM2151.LOD \
 		--program-limit 0x1400 \
-		--island 0x2000 0x2a00 > $@
+		--island 0x2000 0x2b00 > $@
 
 check: all reference
 	@test -s $(RELEASE_DIR)/f030mxdrv.tos

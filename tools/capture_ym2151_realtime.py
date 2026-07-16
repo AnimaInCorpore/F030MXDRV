@@ -12,6 +12,7 @@ per-codec-frame TSV rows accepted by tools/compare_ym2151_realtime.py.
 from __future__ import annotations
 
 import argparse
+import bisect
 import os
 import re
 import shutil
@@ -357,6 +358,8 @@ class Boundary:
     env_states: list[int]  # operator-major raw DSP state bits
     env_a: list[int]  # operator-major 0.23 block multiplier
     env_b: list[int]  # operator-major signed 10.13 block addend
+    pm_scale: int  # decoded signed PM depth for the block PM offset
+    lfo_waveform: int  # waveform bits; bit 0 flips the block PM sign
     noise_threshold: int  # (ymfm frequency+1)*1007; zero while disabled
     noise_counter: int  # 2560-per-frame latch DDA position
     noise_snap: int  # LFSR snapshot at the last latch
@@ -388,6 +391,8 @@ def read_boundary(record: Record, symbols: dict[tuple[str, str], int]) -> Bounda
         env_states=record.array("x", x_addr("rt5_env_state"), 32),
         env_a=record.array("y", y_addr("rt5_env_a"), 32),
         env_b=[signed24(v) for v in record.array("y", y_addr("rt5_env_b"), 32)],
+        pm_scale=signed24(record.words[("x", x_addr("rt5_pm_scale"))]),
+        lfo_waveform=record.words[("x", x_addr("rt5_lfo_waveform"))],
         noise_threshold=record.words[("x", x_addr("rt5_noise_threshold"))],
         noise_counter=record.words[("x", x_addr("rt5_noise_counter"))],
         noise_snap=record.words[("x", x_addr("rt5_noise_state_snap"))],
@@ -469,6 +474,88 @@ def mid_block_level(before: int, after: int, multiplier: int) -> int:
     return max(0, min(LEVEL_MAX, int(round(mid))))
 
 
+# Bit-exact mirror of rt5_rebuild_channel_pitch, so segment increments exist
+# for spans no boundary dump can expose (a block with both boundary and
+# interior events). The tables come from the same vendored ymfm source the
+# kernel's are generated from, and every boundary dump cross-checks the
+# mirror below.
+DT2_DELTA = (0, 384, 500, 608)
+RAW_SLOT = (0, 16, 8, 24)  # logical M1,C1,M2,C2 to raw register slots
+PITCH_DDA_SCALE = 5352297
+
+
+def load_pitch_tables(source_path: Path) -> tuple[list[int], list[int]]:
+    source = source_path.read_text(encoding="utf-8")
+
+    def initializer(declaration: str) -> str:
+        start = source.index(declaration)
+        start = source.index("{", start) + 1
+        return source[start : source.index("};", start)]
+
+    def integers(body: str) -> list[int]:
+        cleaned = re.sub(r"//.*", "", body)
+        return [int(token, 0) for token in re.findall(r"0x[0-9a-fA-F]+|\b\d+\b", cleaned)]
+
+    phase = integers(initializer("static const uint32_t s_phase_step[12*64]"))
+    detune = integers(initializer("static uint8_t const s_detune_adjustment[32][4]"))
+    if len(phase) != 768 or len(detune) != 128:
+        raise SystemExit("error: ymfm pitch table shapes changed")
+    return phase, detune
+
+
+def block_pm_offset(boundary: Boundary) -> int:
+    """The block PM offset in increment units, exactly as the support pass
+    derives it: the published LFO index byte times the decoded depth through
+    the doubling multiply plus one shift, sign-flipped by waveform bit 0,
+    then the product's high word."""
+    value = (boundary.lfo_phase & 0xFF) * boundary.pm_scale
+    value <<= 2
+    if boundary.lfo_waveform & 1:
+        value = -value
+    return value >> 24
+
+
+def channel_increments(
+    regs: dict[int, int],
+    channel: int,
+    phase_table: list[int],
+    detune_table: list[int],
+    pm_offset: int = 0,
+) -> list[int]:
+    kc = regs.get(0x28 + channel, 0) & 0x7F
+    kf = (regs.get(0x30 + channel, 0) >> 2) & 0x3F
+    block = (kc >> 4) & 7
+    note = kc & 15
+    position = (note - (note >> 2)) * 64 + kf
+    keycode4 = ((kc >> 2) & 0x1F) * 4
+    increments = []
+    for slot in RAW_SLOT:
+        raw = slot + channel
+        pos = position + DT2_DELTA[(regs.get(0xC0 + raw, 0) >> 6) & 3]
+        blk = block
+        if pos >= 768:
+            pos -= 768
+            blk += 1
+            if blk > 7:
+                pos, blk = 767, 7
+        step = phase_table[pos] >> (7 - blk)
+        dtmul = regs.get(0x40 + raw, 0)
+        dt1 = (dtmul >> 4) & 7
+        delta = detune_table[keycode4 + (dt1 & 3)]
+        if dt1 & 4:
+            delta = -delta
+        step += delta
+        mul = dtmul & 15
+        mul2 = mul * 2 if mul else 1
+        product = (step * mul2) >> 1
+        inc = (product * PITCH_DDA_SCALE) >> 19
+        inc = (inc + pm_offset) & 0xFFFFFF
+        if inc & 0x800000:
+            inc -= 0x1000000
+        increments.append(inc)
+    return increments
+
+
 def reconstruct_rows(
     name: str,
     records: list[Record],
@@ -538,12 +625,17 @@ def reconstruct_rows(
             ams = ams_events.pop(0)[1]
         ams_by_block.append(ams)
 
-    # A key-on edge zeroes the operator's phase when the FIFO drain applies
-    # it at a block boundary; mirror that (the exact reference does the same
-    # at the precise native sample). KON bits 3-6 key raw rows M1,M2,C1,C2,
-    # so logical columns M1,C1,M2,C2 read bits 3,5,4,6.
-    key_reset_block: dict[tuple[int, int], bool] = {}
-    boundary_clocks = [0] + [natives[k * BLOCK_FRAMES - 1] for k in range(1, blocks + 1)]
+    # Every write lands on the first codec frame whose consumed native
+    # count reaches its timestamp; the kernel splits blocks at interior
+    # landings, so the reconstruction keys everything on landing frames.
+    def landing_frame(sample: int) -> int:
+        return bisect.bisect_left(natives, sample)
+
+    # A key-on edge zeroes the operator's phase when the drain applies it —
+    # at the block boundary or at its interior segment frame. KON bits 3-6
+    # key raw rows M1,M2,C1,C2, so logical columns M1,C1,M2,C2 read bits
+    # 3,5,4,6.
+    key_reset: dict[tuple[int, int], int] = {}
     key_bits = 0
     for event in events:
         if event.reg != 0x08 or (event.data & 7) != 0:
@@ -552,22 +644,63 @@ def reconstruct_rows(
         key_bits = event.data
         if not edges:
             continue
-        block = next(
-            (k for k in range(blocks + 1) if boundary_clocks[k] >= event.sample),
-            None,
-        )
-        if block is None:
+        frame = landing_frame(event.sample)
+        if frame >= frames:
             continue
         for column, bit in enumerate((0, 2, 1, 3)):
             if edges & (1 << bit):
-                key_reset_block[(block, column)] = True
+                key_reset[(frame // BLOCK_FRAMES, column)] = frame % BLOCK_FRAMES
+
+    # Channel-0 increments per segment: the register mirror advances at
+    # landing frames and the pitch mirror decodes it, giving the increments
+    # for spans between an interior event and the next boundary that no
+    # dump exposes. Each block's final segment is verified against the
+    # next boundary dump below, which validates the mirror itself.
+    phase_table, detune_table = load_pitch_tables(
+        REPO / "third_party/mame/3rdparty/ymfm/src/ymfm_fm.ipp"
+    )
+    seg_incs: list[list[tuple[int, list[int]]]] = []
+    pitch_mirror: dict[int, int] = {}
+    cursor = 0
+    for block in range(blocks):
+        # The dumped increments carry this block's PM offset, derived from
+        # the LFO state the support pass published — visible in the next
+        # boundary's dump — and shared by every segment's mid-block rebuild.
+        pm_offset = block_pm_offset(boundaries[block + 1])
+        while cursor < len(events) and landing_frame(events[cursor].sample) <= block * BLOCK_FRAMES:
+            pitch_mirror[events[cursor].reg] = events[cursor].data
+            cursor += 1
+        segments = [
+            (0, channel_increments(pitch_mirror, 0, phase_table, detune_table, pm_offset))
+        ]
+        while cursor < len(events) and landing_frame(events[cursor].sample) < (block + 1) * BLOCK_FRAMES:
+            frame = landing_frame(events[cursor].sample)
+            while cursor < len(events) and landing_frame(events[cursor].sample) == frame:
+                pitch_mirror[events[cursor].reg] = events[cursor].data
+                cursor += 1
+            segments.append(
+                (
+                    frame % BLOCK_FRAMES,
+                    channel_increments(pitch_mirror, 0, phase_table, detune_table, pm_offset),
+                )
+            )
+        seg_incs.append(segments)
+
+    def segment_at(block: int, offset: int) -> list[int]:
+        current = seg_incs[block][0][1]
+        for start, incs in seg_incs[block]:
+            if start > offset:
+                break
+            current = incs
+        return current
 
     # The independent-operator render path keeps only the sine-ROM index in
     # the stored accumulator (`and y1,b1` masks it every frame), so dumped
     # phases are meaningful modulo one ROM cycle (2^32 accumulator units) and
-    # cannot disambiguate multi-wrap blocks. The per-block increments are
-    # dumped too, so phase is reconstructed by accumulating them; every block
-    # is still verified against the dumped accumulator modulo one cycle.
+    # cannot disambiguate multi-wrap blocks. Phase is reconstructed by
+    # accumulating the mirrored per-segment increments; every block is
+    # verified against the dumped accumulator modulo one cycle, and every
+    # boundary dump's increments must equal the mirror's final segment.
     rom_cycle = 1 << 32
     for index in range(blocks):
         state = boundaries[index].lfsr
@@ -575,24 +708,40 @@ def reconstruct_rows(
             state = lfsr_step(state)
         if state != boundaries[index + 1].lfsr:
             raise SystemExit(f"error: LFSR jump mismatch entering block {index}")
+        final_incs = seg_incs[index][-1][1]
         for column, (channel_slot, operator_slot) in enumerate(
             ((0, 0), (1, 8), (2, 16), (3, 24))
         ):
+            dumped = boundaries[index + 1].increments[operator_slot]
+            if dumped != final_incs[column]:
+                raise SystemExit(
+                    f"error: block {index} operator {column} increment "
+                    f"{dumped:#x} disagrees with the decoded {final_incs[column]:#x}"
+                )
+            reset_offset = key_reset.get((index, column))
+            advance = 0
+            for position, (start, incs) in enumerate(seg_incs[index]):
+                end = (
+                    seg_incs[index][position + 1][0]
+                    if position + 1 < len(seg_incs[index])
+                    else BLOCK_FRAMES
+                )
+                for offset in range(start, end):
+                    if reset_offset is not None and offset == reset_offset:
+                        advance = 0
+                    advance += incs[column] * 510
             base = (
                 0
-                if key_reset_block.get((index, column))
+                if reset_offset is not None
                 else boundaries[index].phases48[channel_slot]
             )
             observed = (
                 boundaries[index + 1].phases48[channel_slot] - base
             ) % rom_cycle
-            expected = (
-                boundaries[index + 1].increments[operator_slot] * 510 * BLOCK_FRAMES
-            ) % rom_cycle
-            if observed != expected:
+            if observed != advance % rom_cycle:
                 raise SystemExit(
                     f"error: block {index} operator {column} advanced "
-                    f"{observed:#x}, increments say {expected:#x}"
+                    f"{observed:#x}, segments say {advance % rom_cycle:#x}"
                 )
 
     # Channel-0 logical operators M1,C1,M2,C2: operator-major increment and
@@ -639,30 +788,41 @@ def reconstruct_rows(
 
         row = [frame, native, event_count, event_hash, left >> 8, right >> 8,
                lfo_am, noise_state]
+        segment_incs = segment_at(block, offset)
         for op in range(4):
             e_slot = env_slots[op]
-            if offset == 0 and key_reset_block.get((block, op)):
+            reset_offset = key_reset.get((block, op))
+            if reset_offset == offset:
                 phase_accumulators[op] = 0
             # The oracle reports each operator's phase after the frame's
-            # advance, so accumulate first and emit second.
-            phase_accumulators[op] += exit_.increments[e_slot] * 510
+            # advance, so accumulate first and emit second. The increment is
+            # the mirrored value for this frame's segment, so a mid-block
+            # KC/KF/MUL/DT write bends the phase at its landing frame.
+            phase_accumulators[op] += segment_incs[op] * 510
             phase = (phase_accumulators[op] >> 22) & 0x3FFFFF
 
             before = entry.levels[e_slot]
             after = exit_.levels[e_slot]
-            if key_reset_block.get((block, op)):
+            if reset_offset is not None:
                 # A key-on block's attack multiplier is consumed and reloaded
                 # inside the same boundary pass, so no dump exposes it;
                 # rebuild it from the published per-rate table and the same
                 # effective-rate decode the kernel runs, and emit ymfm's
-                # overshooting exponential with a genuine attack state.
+                # overshooting exponential with a genuine attack state. An
+                # interior key holds the entry level until its landing frame
+                # and runs the attack over the remaining span.
+                span = BLOCK_FRAMES - reset_offset
+                mid_offset = reset_offset + span // 2
                 rate = effective_attack_rate(registers_by_block[block], e_slot)
                 alpha = attack_factors[rate] / float(1 << 23)
-                mid = attack_level(before, alpha, 32)
-                if offset < 32:
-                    level = attack_level(before, alpha, offset)
+                if offset < reset_offset:
+                    level = before
+                elif offset < mid_offset:
+                    level = attack_level(before, alpha, offset - reset_offset)
                 else:
-                    level = mid + (after - mid) * (offset - 32) // 32
+                    mid = attack_level(before, alpha, mid_offset - reset_offset)
+                    tail = max(1, BLOCK_FRAMES - mid_offset)
+                    level = mid + (after - mid) * (offset - mid_offset) // tail
                 env = min(1023, max(0, level >> 13))
                 state = 1
             else:

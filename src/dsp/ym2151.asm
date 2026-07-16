@@ -493,6 +493,34 @@ rt5_noise_state_snap:
 rt5_noise_gain:
         ds      1
 
+; Sub-block event-split bookkeeping, touched only while a block renders in
+; segments: the block-start native clock and DDA remainder, the walking
+; frame/consumption cursor mapping timestamps onto frames, the saved pan
+; stream bases the emit needs back, and this block's PM offset for the
+; mid-block increment rebuilds.
+rt5_seg_native_start:
+        ds      1
+rt5_seg_adv:
+        ds      1
+rt5_seg_walk_phase:
+        ds      1
+rt5_seg_walk_consumed:
+        ds      1
+rt5_seg_walk_frame:
+        ds      1
+rt5_seg_start:
+        ds      1
+rt5_seg_pan_left:
+        ds      1
+rt5_seg_pan_right:
+        ds      1
+rt5_seg_pm:
+        ds      1
+rt5_seg_drain_consumed:
+        ds      1
+rt5_seg_clock_hold:
+        ds      1
+
 RT5_OUT_GAIN_OFFSET equ rt5_operator_gain_out-rt5_phase
 RT5_MOD_GAIN_OFFSET equ rt5_operator_gain_mod-rt5_phase
 
@@ -540,8 +568,8 @@ rt5_pan_right_stream:
 ; 8,192-word external X/Y reservations. External P aliases external Y word
 ; for word on the Falcon (and external X aliases P at +$4000), so phys
 ; $2000-$28ff carries the cold-code island while these uninitialized arrays
-; own phys $2a00 (Y) and $6400 (X); the stage-two island check keeps program
-; code below Y:$2a00. Both base addresses are 64-aligned so (r5+n5)
+; own phys $2b00 (Y) and $6400 (X); the stage-two island check keeps program
+; code below Y:$2b00. Both base addresses are 64-aligned so (r5+n5)
 ; state reads stay inside one modulo block under the render's m5=63.
         org     x:$2400
 rt5_env_state:
@@ -576,7 +604,7 @@ rt5_runtime_output:
 
 
 ; Raised above the enlarged code island; only block-boundary code touches it.
-        org     y:$2a00
+        org     y:$2b00
 rt5_env_b:
         ds      32                      ; signed 10.13 full-block addend
 
@@ -2247,9 +2275,14 @@ rt5_profile_loop_start:
         ; the common ring every block, mark it unwritten: the first both-routed
         ; carrier writes it and the emit pass skips a ring nothing wrote. The
         ; noise pass runs behind the flag clear because a both-panned noise
-        ; channel writes the ring first and owns the flag.
+        ; channel writes the ring first and owns the flag. The stage bodies
+        ; count frames from n5 and take their common-ring base from n6, so
+        ; the production path can render event-split partial blocks; this
+        ; profile path always renders whole ones.
         clr     a
         move    a1,y:rt5_mix_written
+        move    #DSP_RT2_BLOCK_FRAMES,n5
+        move    #rt5_mix_ring,n6
         jsr     rt5_noise_block
 
         move    #>$100,r0
@@ -2429,14 +2462,9 @@ rt5_enter_runtime_map:
         move    #>rt5_channel_control-@cvs(x,rt5_feedback_0),n4
         rts
 
-; Render one production block from the current planar PCM pointers into the
-; walking inactive SSI output pointer. This is the command-17 hot topology
-; path with only its profile stream wrapping removed.
-rt5_render_runtime_block:
-        jsr     rt5_update_support_block
-        clr     a
-        move    a1,y:rt5_mix_written
-        jsr     rt5_noise_block
+; One n5-frame pass over all eight channels from the shared stage bodies;
+; both the whole-block path and the island's event-split segments use it.
+rt5_render_runtime_channels:
         move    #>$100,r0
         move    #rt5_feedback_1,r2
         move    #rt5_feedback_0,r4
@@ -2447,7 +2475,42 @@ rt5_render_runtime_block:
         do      #8,rt5_runtime_channels_done
         jsr     rt5_render_channel
 rt5_runtime_channels_done:
+        rts
 
+; Render one production block from the current planar PCM pointers into the
+; walking inactive SSI output pointer. This is the command-17 hot topology
+; path with only its profile stream wrapping removed — plus the sub-block
+; event check: when the transport FIFO holds a write due inside this block,
+; the island driver renders it as event-aligned partial segments so the
+; write lands on the first codec frame at or after its native timestamp.
+rt5_render_runtime_block:
+        jsr     rt5_update_support_block
+        clr     a
+        move    a1,y:rt5_mix_written
+        ; The support pass advanced the native clock to this block's end and
+        ; drained everything due at its start, so a remaining head timestamp
+        ; below the end clock lies strictly inside the block.
+        move    x:ym_queue_count,a
+        tst     a
+        jeq     rt5_runtime_whole_block
+        move    x:ym_queue_read_index,n0
+        move    #ym_write_queue_times,r0
+        nop
+        move    x:(r0+n0),a
+        move    x:ssi_native_sample_count,x0
+        sub     x0,a
+        move    #>$00ffff,x0
+        and     x0,a1
+        tst     a
+        jeq     rt5_render_split_block  ; due at the end clock: last frame
+        jset    #15,a1,rt5_render_split_block
+rt5_runtime_whole_block:
+        move    #DSP_RT2_BLOCK_FRAMES,n5
+        move    #rt5_mix_ring,n6
+        jsr     rt5_noise_block
+        jsr     rt5_render_runtime_channels
+
+rt5_runtime_emit:
         move    #rt5_mix_ring,r4
         move    x:rt5_pan_left_base,r1
         move    x:rt5_pan_right_base,r7
@@ -3035,7 +3098,7 @@ rt5_feedback_write_carrier:
         move    #>1,m5
         move    #rt2_stage_ring,r3
         move    l:(r7),b10
-        do      #DSP_RT2_BLOCK_FRAMES,rt5_feedback_write_carrier_done
+        do      n5,rt5_feedback_write_carrier_done
         move    x:(r2),x0 y:(r4),a
         add     x0,a a1,x:(r2)
         add     b,a
@@ -3072,7 +3135,7 @@ rt5_feedback_write_x:
         jeq     rt5_feedback_write_bypass
         move    #rt2_stage_ring,r3
         move    l:(r7),b10
-        do      #DSP_RT2_BLOCK_FRAMES,rt5_feedback_write_x_done
+        do      n5,rt5_feedback_write_x_done
         move    x:(r2),x0 y:(r4),a
         add     x0,a a1,x:(r2)
         add     b,a
@@ -3109,7 +3172,7 @@ rt5_feedback_add_x:
         jeq     rt5_feedback_add_bypass
         move    #rt2_stage_ring,r3
         move    l:(r7),b10
-        do      #DSP_RT2_BLOCK_FRAMES,rt5_feedback_add_x_done
+        do      n5,rt5_feedback_add_x_done
         move    x:(r2),x0 y:(r4),a
         add     x0,a a1,x:(r2)
         add     b,a
@@ -3130,7 +3193,7 @@ rt5_feedback_add_x_done:
 rt5_independent_write_x:
         move    #rt2_stage_ring,r3
         move    l:(r7),b10
-        do      #DSP_RT2_BLOCK_FRAMES,rt5_independent_write_x_done
+        do      n5,rt5_independent_write_x_done
         and     y1,b1
         move    b1,n0
         mac     x1,y1,b
@@ -3145,7 +3208,7 @@ rt5_independent_add_x:
         move    #rt2_stage_ring,r3
         move    #rt2_stage_ring,r5
         move    l:(r7),b10
-        do      #DSP_RT2_BLOCK_FRAMES,rt5_independent_add_x_done
+        do      n5,rt5_independent_add_x_done
         and     y1,b1 x:(r3)+,a
         move    b1,n0
         mac     x1,y1,b
@@ -3161,7 +3224,7 @@ rt5_serial_transform_x:
         move    #rt2_stage_ring,r5
         move    l:(r7),b10
         move    x:(r3)+,a
-        do      #DSP_RT2_BLOCK_FRAMES,rt5_serial_transform_x_done
+        do      n5,rt5_serial_transform_x_done
         add     b,a
         and     y1,a1
         move    a1,n0
@@ -3177,7 +3240,7 @@ rt5_serial_accumulate_x:
         move    #rt2_stage_ring,r3
         move    l:(r7),b10
         move    x:(r3)+,a
-        do      #DSP_RT2_BLOCK_FRAMES,rt5_serial_accumulate_x_done
+        do      n5,rt5_serial_accumulate_x_done
         add     b,a
         and     y1,a1
         move    a1,n0
@@ -3206,7 +3269,7 @@ rt5_serial_write_y:
         move    #rt2_stage_ring,r3
         move    l:(r7),b10
         move    x:(r3)+,a
-        do      #DSP_RT2_BLOCK_FRAMES,rt5_serial_write_y_done
+        do      n5,rt5_serial_write_y_done
         add     b,a
         and     y1,a1
         move    a1,n0
@@ -3225,7 +3288,7 @@ rt5_serial_accumulate_left_x:
         move    #rt2_stage_ring,r3
         move    l:(r7),b10
         move    x:(r3)+,a
-        do      #DSP_RT2_BLOCK_FRAMES,rt5_serial_accumulate_left_x_done
+        do      n5,rt5_serial_accumulate_left_x_done
         add     b,a
         and     y1,a1
         move    a1,n0
@@ -3246,7 +3309,7 @@ rt5_route_accumulated_carriers:
         move    x:rt5_current_channel_control,a
         jclr    #6,a1,rt5_route_accumulated_no_left
         jclr    #7,a1,rt5_route_accumulated_left
-        move    #rt5_mix_ring,r5
+        move    n6,r5                   ; segment-biased common-ring base
         jmp     rt5_ring_mix_common
 rt5_route_accumulated_no_left:
         jclr    #7,a1,rt5_route_accumulated_mute
@@ -3260,7 +3323,7 @@ rt5_route_accumulated_mute:
 
 rt5_accumulate_ring_y:
         move    #rt2_stage_ring,r3
-        do      #DSP_RT2_BLOCK_FRAMES,rt5_accumulate_ring_y_done
+        do      n5,rt5_accumulate_ring_y_done
         move    x:(r3)+,x0 y:(r5),a
         add     x0,a
         move    a,y:(r5)+
@@ -3279,7 +3342,7 @@ rt5_ring_mix_common:
         move    a1,y:rt5_mix_written
 rt5_write_ring_y:
         move    #rt2_stage_ring,r3
-        do      #DSP_RT2_BLOCK_FRAMES,rt5_write_ring_y_done
+        do      n5,rt5_write_ring_y_done
         move    x:(r3)+,b
         move    b,y:(r5)+
 rt5_write_ring_y_done:
@@ -3287,7 +3350,7 @@ rt5_write_ring_y_done:
 
 rt5_accumulate_ring_x:
         move    #rt2_stage_ring,r3
-        do      #DSP_RT2_BLOCK_FRAMES,rt5_accumulate_ring_x_done
+        do      n5,rt5_accumulate_ring_x_done
         move    x:(r3)+,a
         move    x:(r5),x0
         add     x0,a
@@ -3305,8 +3368,8 @@ rt5_route_carrier:
         move    x:rt5_current_channel_control,a
         jclr    #6,a1,rt5_route_no_left
         jclr    #7,a1,rt5_route_left
-        move    #rt5_mix_ring,r1
-        move    #rt5_mix_ring,r5
+        move    n6,r1                   ; segment-biased common-ring base
+        move    n6,r5
         jmp     rt5_serial_mix_common
 rt5_route_no_left:
         jclr    #7,a1,rt5_route_mute
@@ -6211,7 +6274,7 @@ rt5_noise_sign_ready:
         jclr    #7,a1,rt5_noise_left_only
         move    #>1,a
         move    a1,y:rt5_mix_written
-        move    #rt5_mix_ring,r1
+        move    n6,r1                   ; segment-biased common-ring base
         jsr     rt5_noise_ring_pass
         jmp     rt5_noise_state_store
 rt5_noise_left_only:
@@ -6224,7 +6287,7 @@ rt5_noise_no_left:
         jsr     rt5_noise_stream_pass
         jmp     rt5_noise_state_store
 rt5_noise_unpanned:
-        move    #rt5_mix_ring,r1
+        move    n6,r1
         jsr     rt5_noise_ring_pass
 rt5_noise_state_store:
         move    y1,x:rt5_noise_lfsr
@@ -6235,7 +6298,7 @@ rt5_noise_block_done:
 ; Both passes advance one Galois step and the latch DDA per frame; the
 ; ring form writes the fresh values, the stream form accumulates them.
 rt5_noise_ring_pass:
-        do      #DSP_RT2_BLOCK_FRAMES,rt5_noise_ring_done
+        do      n5,rt5_noise_ring_done
         add     x1,b
         move    y1,a
         lsr     a
@@ -6262,7 +6325,7 @@ rt5_noise_ring_done:
         rts
 
 rt5_noise_stream_pass:
-        do      #DSP_RT2_BLOCK_FRAMES,rt5_noise_stream_done
+        do      n5,rt5_noise_stream_done
         add     x1,b
         move    y1,a
         lsr     a
@@ -6325,6 +6388,186 @@ rt5_noise_decode_off:
         move    #ym_regdata,r0
         move    x:ym_regdata+$7f,y1
         jmp     rt5_env_tl_event
+
+; Event-split block driver. A transport write due inside this block lands
+; on the first codec frame at or after its native timestamp: the block
+; renders as event-aligned segments, draining and decoding the due writes
+; between them so every stage after the boundary reads the new state. The
+; envelope, AM, LFO, and timer advances keep their documented block
+; cadence; only register effects split. All segment lengths sum to the
+; full block, so the pan streams, the common ring, the noise LFSR, and
+; the boundary dumps stay exactly where the whole-block path leaves them.
+rt5_render_split_block:
+        ; Recover the block-start clock and DDA remainder from the advanced
+        ; state: the support pass added 353 mod 1007 to the remainder and
+        ; 81 or 82 to the clock.
+        move    x:rt5_native_phase,a
+        move    #>353,x0
+        sub     x0,a
+        jge     rt5_split_advanced_81
+        move    #>1007,x0
+        add     x0,a
+        move    #>82,b
+        jmp     rt5_split_phase_ready
+rt5_split_advanced_81:
+        move    #>81,b
+rt5_split_phase_ready:
+        move    a1,x:rt5_seg_walk_phase
+        move    b1,x:rt5_seg_adv
+        move    x:ssi_native_sample_count,a
+        sub     b,a
+        move    #>$00ffff,x0
+        and     x0,a1
+        move    a1,x:rt5_seg_native_start
+        clr     a
+        move    a1,x:rt5_seg_walk_consumed
+        move    a1,x:rt5_seg_walk_frame
+        move    a1,x:rt5_seg_start
+        move    x:rt5_pan_left_base,a
+        move    a1,x:rt5_seg_pan_left
+        move    x:rt5_pan_right_base,a
+        move    a1,x:rt5_seg_pan_right
+        ; this block's PM offset, recomputed for the mid-block increment
+        ; rebuilds exactly as the support pass derived it
+        move    x:rt5_lfo_phase,a
+        move    #>$ff,y1
+        and     y1,a1
+        move    a1,x0
+        move    x:rt5_pm_scale,y0
+        mpy     x0,y0,a
+        asl     a
+        move    x:rt5_lfo_waveform,b
+        jclr    #0,b1,rt5_split_pm_ready
+        neg     a
+rt5_split_pm_ready:
+        move    a1,x:rt5_seg_pm
+
+rt5_split_segment_loop:
+        ; Map the queue head onto its landing frame. An empty queue or a
+        ; head at or past the block end leaves the tail as the final
+        ; segment; otherwise the walk advances the 1280:1007 cursor until
+        ; the consumed native count reaches the head's block offset.
+        move    #>DSP_RT2_BLOCK_FRAMES,a
+        move    a1,x:rt5_seg_walk_frame
+        move    x:ym_queue_count,a
+        tst     a
+        jeq     rt5_split_render
+        move    x:ym_queue_read_index,n0
+        move    #ym_write_queue_times,r0
+        nop
+        move    x:(r0+n0),a
+        move    x:rt5_seg_native_start,x0
+        sub     x0,a
+        move    #>$00ffff,x0
+        and     x0,a1
+        move    x:rt5_seg_adv,b
+        cmp     b,a
+        jgt     rt5_split_render        ; lands in a later block
+        move    a1,y1                   ; head offset in native samples
+        move    x:rt5_seg_start,a
+        move    a1,r1                   ; walking frame cursor
+        move    x:rt5_seg_walk_phase,a
+        move    x:rt5_seg_walk_consumed,b
+        move    #>1280,x1
+        move    #>1007,x0
+        move    #>1,y0
+        ; Invariant: a/b hold the DDA remainder and native count through
+        ; the frames before r1, committed to memory before each peek. The
+        ; landing frame keeps the committed cursor (its own consumption is
+        ; recounted by the next walk) while the peeked count becomes the
+        ; drain clock, so writes due during the landing frame decode ahead
+        ; of it.
+rt5_split_walk:
+        move    a1,x:rt5_seg_walk_phase
+        move    b1,x:rt5_seg_walk_consumed
+        add     x1,a                    ; peek frame r1's consumption
+rt5_split_walk_carry:
+        cmp     x0,a
+        jlt     rt5_split_walk_peeked
+        sub     x0,a
+        add     y0,b
+        jmp     rt5_split_walk_carry
+rt5_split_walk_peeked:
+        cmp     y1,b
+        jge     rt5_split_walk_done     ; frame r1 contains the timestamp
+        move    (r1)+
+        jmp     rt5_split_walk
+rt5_split_walk_done:
+        move    b1,x:rt5_seg_drain_consumed
+        move    r1,a
+        move    a1,x:rt5_seg_walk_frame
+
+rt5_split_render:
+        ; Render [seg_start, landing frame) when the segment is non-empty.
+        move    x:rt5_seg_walk_frame,a
+        move    x:rt5_seg_start,x0
+        sub     x0,a
+        jeq     rt5_split_drain
+        move    a1,n5                   ; segment frame count
+        move    #>rt5_mix_ring,a
+        add     x0,a
+        move    a1,n6                   ; segment-biased ring base
+        move    x:rt5_seg_pan_left,a
+        add     x0,a
+        move    a1,x:rt5_pan_left_base
+        move    x:rt5_seg_pan_right,a
+        add     x0,a
+        move    a1,x:rt5_pan_right_base
+        jsr     rt5_noise_block
+        jsr     rt5_render_runtime_channels
+        ; Per-segment write-first epilogue: a segment no both-panned
+        ; carrier wrote is cleared here so the whole ring is valid for the
+        ; unconditional emit, and the flag resets for the next segment.
+        move    y:rt5_mix_written,a
+        tst     a
+        jne     rt5_split_ring_valid
+        clr     a
+        move    n6,r1
+        rep     n5
+        move    a1,y:(r1)+
+rt5_split_ring_valid:
+        clr     a
+        move    a1,y:rt5_mix_written
+
+rt5_split_drain:
+        ; Decode everything landing on this boundary frame, with the due
+        ; clock wound back to the segment position, then fold the block PM
+        ; offset over the rebuilt increment bases.
+        move    x:rt5_seg_walk_frame,a
+        move    a1,x:rt5_seg_start
+        move    #>DSP_RT2_BLOCK_FRAMES,x0
+        cmp     x0,a
+        jge     rt5_split_done
+        move    x:ssi_native_sample_count,a
+        move    a1,x:rt5_seg_clock_hold
+        move    x:rt5_seg_native_start,a
+        move    x:rt5_seg_drain_consumed,x0
+        add     x0,a
+        move    #>$00ffff,x0
+        and     x0,a1
+        move    a1,x:ssi_native_sample_count
+        jsr     rt5_service_transport_event
+        move    x:rt5_seg_clock_hold,a
+        move    a1,x:ssi_native_sample_count
+        move    x:rt5_seg_pm,x1
+        move    #rt5_increment_base,r2
+        move    #rt5_operator_increment,r7
+        move    x:(r2)+,b
+        add     x1,b
+        do      #32,rt5_split_increments_done
+        move    x:(r2)+,b       b,y:(r7)+
+        add     x1,b
+rt5_split_increments_done:
+        jmp     rt5_split_segment_loop
+
+rt5_split_done:
+        move    x:rt5_seg_pan_left,a
+        move    a1,x:rt5_pan_left_base
+        move    x:rt5_seg_pan_right,a
+        move    a1,x:rt5_pan_right_base
+        move    #>1,a
+        move    a1,y:rt5_mix_written    ; every segment left the ring valid
+        jmp     rt5_runtime_emit
 
 
 ; Clock the two OPM timers after the generated sample. Thus a period of N is
