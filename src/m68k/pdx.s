@@ -112,8 +112,12 @@ pdx_start_error:
 mxdrv_pdx_decode:
         lea     pdx_adpcm_reference_state,a2
 
-; Decode from the state at a2.
+; Decode from the state at a2. The step arithmetic scratches d3-d5, which
+; callers legitimately hold across per-frame mixing — the PCM staging fill
+; keeps its frame counter in d4, and an unsaved clobber here once let that
+; loop run past its buffer into the MXDRV state block.
 pdx_decoder_clock:
+        movem.l d3-d5,-(sp)
         tst.b   PDX_DECODER_NIBBLE(a2)
         bne     pdx_decode_high
 
@@ -201,11 +205,13 @@ pdx_decode_store_step:
         ext.l   d0
         lsl.l   #4,d0
         moveq   #1,d1
+        movem.l (sp)+,d3-d5
         rts
 
 pdx_decode_end:
         moveq   #0,d0
         moveq   #0,d1
+        movem.l (sp)+,d3-d5
         rts
 
 ; Reset decoder and all eight PCM8-style voice slots.

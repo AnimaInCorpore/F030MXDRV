@@ -62,7 +62,7 @@ M68K_OBJECTS := $(patsubst src/m68k/%.s,$(M68K_BUILD)/%.o,$(M68K_SOURCES))
 DOSBOX ?= $(shell command -v dosbox-staging 2>/dev/null || command -v dosbox 2>/dev/null)
 DOSBOX_FLAGS ?= --noprimaryconf --set output=texture
 
-.PHONY: all host dsp reference check capture-realtime compare-realtime smoke profile-dsp profile-dsp-rt \
+.PHONY: all host dsp reference check capture-realtime compare-realtime smoke endurance profile-dsp profile-dsp-rt \
 	profile-dsp-rt2 profile-dsp-rt3 profile-dsp-rt4 profile-dsp-rt5 \
 	clean run tools
 
@@ -201,7 +201,9 @@ $(M68K_BUILD)/%.o: src/m68k/%.s src/m68k/xbios.i src/m68k/protocol.i \
 
 $(RELEASE_DIR)/f030mxdrv.tos: $(M68K_OBJECTS) $(VLINK)
 	@mkdir -p $(RELEASE_DIR)
-	$(VLINK) $(M68K_OBJECTS) -tos-fastload -b ataritos -s -e start -o $@
+	# no -tos-fastload: the loader must clear the TPA, since driver and
+	# player state assumes zero-initialized BSS
+	$(VLINK) $(M68K_OBJECTS) -b ataritos -s -e start -o $@
 
 $(RELEASE_DIR)/f030mxdrv.ttp: $(RELEASE_DIR)/f030mxdrv.tos
 	cp $< $@
@@ -583,6 +585,39 @@ profile-dsp-rt4-alg%: check tools/profile_dsp.py
 		--projection-factor 8 \
 		--projection-label "linear eight-channel projection" \
 		--title "DSP56001 codec-rate algorithm-$* mixed-topology profile"
+
+# Play a real corpus song end to end through the argument-less AUTOPLAY.INF
+# path: two full loops, the automatic fade, and the clean shutdown, with the
+# blocking refill as the only cadence. Proves sustained mixed FM/PDX
+# scheduling under Hatari ahead of the real-hardware soak.
+endurance: check
+	@if ! command -v hatari >/dev/null 2>&1; then \
+		echo "error: endurance target needs Hatari" >&2; \
+		exit 1; \
+	fi
+	@rm -rf build/endurance build/hatari-endurance.trace build/hatari-endurance.log
+	@mkdir -p build/endurance
+	@cp $(RELEASE_DIR)/f030mxdrv.tos build/endurance/
+	@cp $(RELEASE_DIR)/XEVIOUS.MDX $(RELEASE_DIR)/XEVIOUS.PDX build/endurance/
+	@printf 'XEVIOUS.MDX XEVIOUS.PDX\r\n' > build/endurance/AUTOPLAY.INF
+	@SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy hatari \
+		--machine falcon --dsp emu \
+		--tos third_party/f030dsp3d/tools/tos402.rom --patch-tos true \
+		--fast-boot true --fast-forward true --sound off \
+		--confirm-quit false --run-vbls $(ENDURANCE_VBLS) \
+		--log-file build/hatari-endurance.log \
+		--trace-file build/hatari-endurance.trace \
+		--trace gemdos,dsp_host_interface,xbios \
+		build/endurance/f030mxdrv.tos
+	@test $$(rg -c "Direct Transfer 0x190000" build/hatari-endurance.trace) -ge $(ENDURANCE_MIN_REFILLS)
+	@rg -q "Dsp_Unlock" build/hatari-endurance.trace
+	@if rg -q "DSP->Host.: Transfer 0xffffff" build/hatari-endurance.trace; then \
+		echo "error: protocol error reply during playback" >&2; exit 1; \
+	fi
+	@echo "Hatari MDX/PDX endurance playback: OK"
+
+ENDURANCE_VBLS := 9000
+ENDURANCE_MIN_REFILLS := 200
 
 profile-dsp-rt5: check tools/profile_dsp.py
 	@if ! command -v hatari >/dev/null 2>&1; then \
