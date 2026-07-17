@@ -487,7 +487,10 @@ to the capture scenarios and the hardware soak.
    MDX/PDX pair end to end under Hatari — sustained refills as the only
    cadence, live ADPCM decoding, the natural song end, and the clean
    CODEC/DSP shutdown — with the trace asserting the refill volume and
-   the absence of protocol error replies.
+   the absence of protocol error replies. `make endurance-batch` extends
+   the same gate across every corpus song in `release/`, streaming each
+   trace through a FIFO scorer so no trace file is written and ending
+   each run at the observed shutdown.
 7. Run a compatibility corpus of real MDX/PDX pairs and complete the public
    MXDRV call-table behavior, error handling, packaging, and hardware soak
    tests.

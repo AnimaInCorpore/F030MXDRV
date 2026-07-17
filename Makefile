@@ -62,7 +62,7 @@ M68K_OBJECTS := $(patsubst src/m68k/%.s,$(M68K_BUILD)/%.o,$(M68K_SOURCES))
 DOSBOX ?= $(shell command -v dosbox-staging 2>/dev/null || command -v dosbox 2>/dev/null)
 DOSBOX_FLAGS ?= --noprimaryconf --set output=texture
 
-.PHONY: all host dsp reference check capture-realtime compare-realtime smoke endurance profile-dsp profile-dsp-rt \
+.PHONY: all host dsp reference check capture-realtime compare-realtime smoke endurance endurance-batch profile-dsp profile-dsp-rt \
 	profile-dsp-rt2 profile-dsp-rt3 profile-dsp-rt4 profile-dsp-rt5 \
 	clean run tools
 
@@ -618,6 +618,14 @@ endurance: check
 
 ENDURANCE_VBLS := 9000
 ENDURANCE_MIN_REFILLS := 200
+
+# The same end-to-end gate over every corpus song in release/. The driver
+# streams each Hatari trace through a FIFO and scores it in flight (refill
+# volume, clean Dsp_Unlock shutdown, no protocol error replies), so no
+# trace file lands on disk; failing songs keep a rolling trace tail in
+# build/endurance-batch/.
+endurance-batch: check
+	@python3 tools/endurance_batch.py
 
 profile-dsp-rt5: check tools/profile_dsp.py
 	@if ! command -v hatari >/dev/null 2>&1; then \
