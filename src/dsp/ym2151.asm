@@ -7271,7 +7271,7 @@ rt5_lfo_amd_write:
 rt5_event_decode_lfo_waveform:
         move    #>$1b,x0
         cmp     x0,a
-        jne     rt5_event_decode_done
+        jne     rt5_decode_register_done
         move    y1,a
         move    #>3,x0
         and     x0,a
@@ -7310,7 +7310,7 @@ rt5_event_decode_timer_b:
 rt5_event_decode_timer_control:
         move    #>$14,x0
         cmp     x0,a
-        jne     rt5_event_decode_done
+        jne     rt5_decode_register_done
         move    y1,a
         move    #>3,x0
         and     x0,a
