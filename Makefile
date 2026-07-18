@@ -10,6 +10,7 @@ VASM := $(VASM_DIR)/vasmm68k_mot
 VLINK := $(VLINK_DIR)/vlink
 
 M68K_BUILD := build/m68k
+XEVIOUS_M68K_BUILD := build/m68k-xevious
 DSP_BUILD := build/dsp
 NATIVE_BUILD := build/native
 GENERATED_BUILD := build/generated
@@ -58,17 +59,21 @@ M68K_SOURCES := \
 	src/m68k/mdx_clock.s \
 	src/m68k/pdx.s
 M68K_OBJECTS := $(patsubst src/m68k/%.s,$(M68K_BUILD)/%.o,$(M68K_SOURCES))
+XEVIOUS_M68K_OBJECTS := $(patsubst $(M68K_BUILD)/player.o,$(XEVIOUS_M68K_BUILD)/player.o,$(M68K_OBJECTS))
 
 DOSBOX ?= $(shell command -v dosbox-staging 2>/dev/null || command -v dosbox 2>/dev/null)
 DOSBOX_FLAGS ?= --noprimaryconf --set output=texture
 
-.PHONY: all host dsp reference check capture-realtime compare-realtime smoke endurance endurance-batch profile-dsp profile-dsp-rt \
+.PHONY: all host xevious dsp reference check capture-realtime compare-realtime smoke endurance endurance-batch profile-dsp profile-dsp-rt \
 	profile-dsp-rt2 profile-dsp-rt3 profile-dsp-rt4 profile-dsp-rt5 \
 	clean run tools
 
 all: host dsp
 
-host: $(RELEASE_DIR)/f030mxdrv.tos $(RELEASE_DIR)/f030mxdrv.ttp
+host: $(RELEASE_DIR)/f030mxdrv.tos $(RELEASE_DIR)/f030mxdrv.ttp \
+		$(RELEASE_DIR)/xevious.tos
+
+xevious: $(RELEASE_DIR)/xevious.tos
 
 dsp: $(RELEASE_DIR)/ym2151.lod $(DSP_STAGE2_IMAGE)
 
@@ -199,6 +204,13 @@ $(M68K_BUILD)/%.o: src/m68k/%.s src/m68k/xbios.i src/m68k/protocol.i \
 	$(VASM) $< -quiet -Felf -m68030 -Isrc/m68k -I$(GENERATED_BUILD) \
 		-o $@ -L $(M68K_BUILD)/$*.lst
 
+$(XEVIOUS_M68K_BUILD)/player.o: src/m68k/player.s src/m68k/xbios.i \
+		src/m68k/protocol.i $(VASM)
+	@mkdir -p $(XEVIOUS_M68K_BUILD)
+	$(VASM) $< -quiet -Felf -m68030 -DPLAYER_DEFAULT_XEVIOUS \
+		-Isrc/m68k -I$(GENERATED_BUILD) -o $@ \
+		-L $(XEVIOUS_M68K_BUILD)/player.lst
+
 $(RELEASE_DIR)/f030mxdrv.tos: $(M68K_OBJECTS) $(VLINK)
 	@mkdir -p $(RELEASE_DIR)
 	# no -tos-fastload: the loader must clear the TPA, since driver and
@@ -207,6 +219,10 @@ $(RELEASE_DIR)/f030mxdrv.tos: $(M68K_OBJECTS) $(VLINK)
 
 $(RELEASE_DIR)/f030mxdrv.ttp: $(RELEASE_DIR)/f030mxdrv.tos
 	cp $< $@
+
+$(RELEASE_DIR)/xevious.tos: $(XEVIOUS_M68K_OBJECTS) $(VLINK)
+	@mkdir -p $(RELEASE_DIR)
+	$(VLINK) $(XEVIOUS_M68K_OBJECTS) -b ataritos -s -e start -o $@
 
 $(DSP_BUILD)/BUILD.BAT: tools/BUILD_DSP.BAT src/dsp/ym2151.asm \
 		src/dsp/stage2_loader.asm src/dsp/protocol.inc $(YM2151_TABLES) \
@@ -248,6 +264,7 @@ $(DSP_STAGE2_IMAGE): tools/generate_dsp_stage2.py $(DSP_BUILD)/.assembled
 check: all reference
 	@test -s $(RELEASE_DIR)/f030mxdrv.tos
 	@test -s $(RELEASE_DIR)/f030mxdrv.ttp
+	@test -s $(RELEASE_DIR)/xevious.tos
 	@test -s $(RELEASE_DIR)/ym2151.lod
 	@test -s $(DSP_STAGE2_IMAGE)
 	@test -s $(YM2151_VECTORS)

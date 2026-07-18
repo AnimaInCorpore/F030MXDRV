@@ -194,6 +194,7 @@ The outputs are:
 ```text
 release/f030mxdrv.tos
 release/f030mxdrv.ttp
+release/xevious.tos
 release/ym2151.lod
 ```
 
@@ -207,6 +208,11 @@ executable with a Desktop command-line entry point:
 ```text
 F030MXDRV.TTP song.mdx [bank.pdx]
 ```
+
+For a quick playback test, `xevious.tos` starts `XEVIOUS.MDX` with
+`XEVIOUS.PDX` when launched without arguments. Keep both files beside the
+executable. An explicit command line still overrides this built-in default;
+`make xevious` rebuilds the dedicated executable.
 
 Without arguments, an `AUTOPLAY.INF` file beside the program supplies the
 same two-token command line, so Desktop launches and unattended runs start

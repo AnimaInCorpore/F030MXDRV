@@ -133,6 +133,18 @@ player_parse_two:
         moveq   #1,d0
         bra     player_parse_return
 player_parse_empty:
+        ifd     PLAYER_DEFAULT_XEVIOUS
+        ; The dedicated xevious.tos build behaves like a normal explicit
+        ; two-file command tail when launched from the Desktop. Keep command
+        ; line arguments authoritative; this fallback is reached only for an
+        ; empty tail and leaves the general AUTOPLAY.INF build unchanged.
+        tst.b   player_autoplay_tried
+        bne     player_parse_none
+        move.b  #1,player_autoplay_tried
+        lea     player_xevious_tail,a0
+        bra     player_parse_restart
+        endc
+
         ; No command tail: an AUTOPLAY.INF beside the program supplies the
         ; same two-token grammar, so desktop launches and unattended test
         ; runs start playback without arguments. Control bytes and line
@@ -478,6 +490,12 @@ player_test_extra_tail:
 player_test_extra_tail_end:
 player_test_empty_tail:
         dc.b    0
+        ifd     PLAYER_DEFAULT_XEVIOUS
+player_xevious_tail:
+        dc.b    player_xevious_tail_end-player_xevious_tail-1
+        dc.b    'XEVIOUS.MDX XEVIOUS.PDX'
+player_xevious_tail_end:
+        endc
 player_test_mdx:
         dc.b    'TEST.MDX',0
 player_test_pdx:
