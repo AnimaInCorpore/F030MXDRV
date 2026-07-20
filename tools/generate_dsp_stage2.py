@@ -112,8 +112,9 @@ def make_boot_image(path: Path) -> list[int]:
 def make_program_stream(
     path: Path,
     program_limit: int | None = None,
-    island: tuple[int, int] | None = None,
+    islands: list[tuple[int, int]] | None = None,
 ) -> tuple[list[int], int, int]:
+    islands = islands or []
     sections, entry = parse_lod(path)
     sections = merge_sections(sections)
     if entry != 0:
@@ -149,19 +150,19 @@ def make_program_stream(
         # entirely inside the declared free island above the external-Y
         # reservation; Falcon external P aliases external Y word for word.
         below_tables = program_limit is None or section.limit <= program_limit
-        inside_island = island is not None and (
-            section.address >= island[0] and section.limit <= island[1]
+        inside_island = any(
+            section.address >= start and section.limit <= limit
+            for start, limit in islands
         )
         if not (below_tables or inside_island):
+            described = ", ".join(
+                f"P:${start:04x}-${limit - 1:04x}" for start, limit in islands
+            )
             raise SystemExit(
                 f"error: final program section P:${section.address:04x}-"
                 f"${section.limit - 1:04x} overlaps the reserved table region "
-                f"at P:${program_limit:04x} and lies outside the free island"
-                + (
-                    f" P:${island[0]:04x}-${island[1] - 1:04x}"
-                    if island is not None
-                    else ""
-                )
+                f"at P:${program_limit:04x} and lies outside the free islands"
+                + (f" {described}" if islands else "")
             )
 
     stream = [STAGE2_MAGIC, len(sections)]
@@ -185,11 +186,11 @@ def emit_include(
     bootstrap: Path,
     program: Path,
     program_limit: int | None = None,
-    island: tuple[int, int] | None = None,
+    islands: list[tuple[int, int]] | None = None,
 ) -> str:
     boot_words = make_boot_image(bootstrap)
     stream, section_count, initialized_words = make_program_stream(
-        program, program_limit, island
+        program, program_limit, islands
     )
 
     boot_bytes: list[int] = []
@@ -221,19 +222,20 @@ def main() -> None:
     parser.add_argument(
         "--island",
         nargs=2,
+        action="append",
         type=lambda value: int(value, 0),
         metavar=("START", "LIMIT"),
         help="allow P sections inside [START, LIMIT), a physically free "
-        "window above the external-Y reservation",
+        "window above the external-Y reservation; repeatable",
     )
     arguments = parser.parse_args()
-    island = tuple(arguments.island) if arguments.island else None
+    islands = [tuple(pair) for pair in arguments.island or []]
     print(
         emit_include(
             arguments.bootstrap,
             arguments.program,
             arguments.program_limit,
-            island,
+            islands,
         ),
         end="",
     )

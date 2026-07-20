@@ -42,12 +42,12 @@ interrupt-fed DAC transport, all on stock Falcon hardware.
   streaming decoder voices matching the MSM6258 predictor, step, clamping,
   and nibble order, with all five playback rates, 16 volume steps, hardware
   pan, and saturating stereo mixing at the Falcon codec cadence.
-- **Continuous DAC transport.** The DSP SSI transmit interrupt replays exact
-  1280-native-sample/1007-codec-frame resampling periods through 16-bit SSI
-  at 49.17 kHz into the Falcon DAC, double-buffered, with timestamped YM
-  register events on a rolling native-sample clock that survives refills.
+- **Continuous DAC transport.** The DSP SSI transmit interrupt feeds 16-bit
+  stereo at 49.17 kHz into the Falcon DAC. Production playback is double-
+  buffered in 1024-frame periods, with sequencer writes batched into the next
+  refill and each prepared buffer switched only at a complete boundary.
 - **Verified, measured, reproducible.** A native ymfm oracle, golden oracle
-  traces, a 17-scenario perceptual capture gate replayed through the
+  traces, an 18-scenario perceptual capture gate replayed through the
   production player in Hatari, a corpus-wide end-to-end endurance gate, and
   eleven DSP cycle profiles gate every change.
 
@@ -57,7 +57,7 @@ The driver is player-complete under emulation. What remains before a release
 is the real-hardware pass: soak testing on a physical Falcon, the MXDRV
 option-call semantics, and packaging.
 
-- **The perceptual capture gate passes all 17 scenarios.** Pitch holds
+- **The perceptual capture gate passes all 18 scenarios.** Pitch holds
   0.009 ppm drift with at most 7 counts of phase error, DT1/DT2 detune lands
   within 1.9–5.8 ppm, the complete LFO scenario scores 0.9973 spectral
   cosine, envelope transitions land within 9 frames (mid-block key-ons
@@ -68,12 +68,21 @@ option-call semantics, and packaging.
   The documented compromises — one shared feedback depth with per-level
   folding, and two measurement-bounded margins where maximal-depth
   quantization chaos makes trajectories irreproducible — are recorded there
-  with their bounds.
+  with their bounds. Feedback level 7 dispatches to history-precise stage
+  twins that land the self-feedback path exactly on ymfm's depth: the
+  coupled fold's doubled loop gain otherwise sustains a slow frame-rate
+  limit cycle that splices sustained mixes after tens of periods, invisible
+  to the short gate scenarios but eliminated (1,173 splices/s to zero on the
+  40-period repro) by the decoupled stage.
 - **Every corpus song plays end to end.** `make endurance-batch` plays all
   17 real MDX/PDX songs in `release/` through the argument-less autoplay
   path under Hatari — sustained refills as the only cadence, live ADPCM
   decoding, two full loops, the automatic fade, and a clean CODEC/DSP
   shutdown — with zero protocol errors across the corpus.
+- **Stock-clock refill timing is gated.** `make stock-audio` runs the dedicated
+  Xevious player with a 16 MHz 68030 and normal 32 MHz DSP, then verifies from
+  Hatari's raw SSI trace that every steady A/B handoff occurs after exactly
+  2048 stereo words (one 1024-frame, 20.83 ms period).
 - The sample-exact renderer (12,024.34 instruction cycles per native
   62.5 kHz sample against the 256.68-cycle budget — 46.85x real time) is
   retained as the conformance reference that anchors the perceptual kernel.
@@ -91,14 +100,15 @@ option-call semantics, and packaging.
   Terminal release envelopes and fully silent channels bypass work that
   cannot affect chip state or output; hot scalar state lives in
   short-addressable internal X RAM.
-- Protocol v19 retains the exact 1007-frame conformance transport and adds a
+- Protocol v22 retains the exact 1007-frame conformance transport and adds a
   1024-frame production transport aligned to sixteen 64-frame synthesis
-  blocks. The 68030 uploads interleaved PDX, the DSP expands it to planar
-  accumulators, renders FM into the inactive interleaved SSI buffer, switches
-  at a stereo boundary, and leaves the last complete block repeating if a
-  refill misses a codec period. A refillable 32-entry ring FIFO carries
-  ordered register events with native-sample timestamps while SSI runs, and
-  events due inside a block split the render at their landing frame.
+  blocks. The 68030 mixes PDX voice-major into one mono block, uploads it once
+  with the global PCM8 pan and coalesced ordered YM writes, then prepares the
+  following period while the DSP renders. The DSP expands PDX to planar
+  accumulators, renders FM into the inactive interleaved SSI buffer, and
+  switches only at a complete 20.83 ms boundary. Production bursts have a
+  64-word staging area, while a refillable 32-entry ring FIFO retains the exact
+  timestamped event path used by conformance capture.
 - A guarded timer-service entry reports exact YM Timer-B periods in native
   sample units; public play connects it to an otherwise-idle MFP Timer A
   whose 1024 Hz ISR only accumulates ticks, with a foreground pump doing the
@@ -118,7 +128,7 @@ make check
 
 This also compiles a native MAME/ymfm oracle, mechanically generates
 compressed DSP lookup tables, emits the exact 256-sample conformance trace,
-validates a 17-scenario codec-rate perceptual corpus, and gates an independent
+validates an 18-scenario codec-rate perceptual corpus, and gates an independent
 256-step/codec-feedback projection against it under `build/reference/`.
 
 ## Verify
@@ -161,13 +171,15 @@ reconstructs the per-frame vectors, and runs the comparator (equivalently,
 existing capture directory). The vector schema and thresholds are documented
 in [`docs/perceptual-compatibility.md`](docs/perceptual-compatibility.md).
 
-Two end-to-end endurance gates play real corpus songs through the
+The stock timing gate and two end-to-end endurance gates play real corpus
+songs through the
 argument-less autoplay path under Hatari — sustained refills, live ADPCM
 decoding, the natural song end after two loops and the fade, and clean
 CODEC/DSP shutdown, with the trace asserting the refill volume and the
 absence of protocol error replies:
 
 ```sh
+make stock-audio      # Xevious, stock 16 MHz 68030, raw SSI cadence
 make endurance        # the reference song, trace-asserted
 make endurance-batch  # every corpus song in release/
 ```
@@ -241,7 +253,7 @@ conformance mode in Hatari.
   real-time kernel.
 - `tools/ym2151_oracle.cpp`: native executable built against vendored ymfm.
 - `tools/capture_ym2151_realtime.py`: Hatari capture orchestrator for the
-  17-scenario perceptual gate.
+  18-scenario perceptual gate.
 - `tools/compare_ym2151_realtime.py`: codec-rate vector validator and
   exact-to-perceptual comparator.
 - `tools/generate_ym2151_tables.py`: mechanical ymfm-to-DSP table generator.
@@ -250,6 +262,7 @@ conformance mode in Hatari.
 - `tools/profile_dsp.py`: deterministic Hatari DSP-cycle capture and report.
 - `tools/generate_dsp_stage2.py`: LOD-to-embedded-loader image generator.
 - `tools/endurance_batch.py`: corpus-wide end-to-end playback gate.
+- `tools/stock_audio_timing.py`: stock-clock raw-SSI refill timing gate.
 - `tests/traces/`: timestamped oracle input traces — tone, noise, timer/CSM,
   vibrato, and the perceptual corpus fixtures.
 - `docs/ym2151-ground-truth.md`: facts extracted from the vendored MAME core.

@@ -7,14 +7,17 @@ gate turns that relaxed boundary into deterministic data and pass/fail rules.
 
 ## Reference corpus
 
-`make check` generates 17 TSV files under
+`make check` generates 18 TSV files under
 `build/reference/ym2151-perceptual/`:
 
 - sustained pitch, non-aligned key/register-write timing, a complete ADSR
   contour, AM/PM LFO, channel-7 noise at the fastest and a slow latch
   rate, and per-operator DT1/DT2 detune scenarios;
-- algorithms 0-7 with operator-1 feedback level 4; and
-- algorithm 0 at feedback levels 0 and 7.
+- algorithms 0-7 with operator-1 feedback level 4;
+- algorithm 0 at feedback levels 0 and 7; and
+- two real CON4 voices sustained at feedback level 7 for forty
+  1024-frame periods (`feedback-7-long`, 40,960 frames), the long-run
+  stability scenario gated on its output-splice count.
 
 The algorithm and feedback scenarios drive `perceptual_topology.trace`,
 whose modulators sit 6-9 dB below full volume. The earlier all-carrier
@@ -87,12 +90,12 @@ each scenario the harness compiles the exact trace into a `CAPTURE.SCN`
 (every scenario fits the 32-entry FIFO ring and its 32,767-sample horizon),
 which switches the TTP's no-argument launch into capture mode: reset, queue
 every write through the real rolling FIFO, then start and refill the
-protocol-v19 realtime stream with silent PCM. Hatari debugger breakpoints
+protocol-v22 realtime stream with silent PCM. Hatari debugger breakpoints
 dump the rt5 phase accumulators, envelope state and block coefficients,
 LFO/noise/timer scalars, and native clock at every 64-frame block entry, and
-both SSI buffers after each completed 1024-frame transaction; buffer
-completion anchors on each handler's single `jsr send_reply` because Hatari
-samples the DSP PC at do-loop-end+1 on every iteration.
+both SSI buffers after each completed 1024-frame transaction; explicit
+post-render symbols anchor buffer completion because protocol v22 acknowledges
+host-buffer ownership before the DSP finishes rendering.
 
 Reconstruction refuses to guess: the dumped native clock must match the
 1280:1007 DDA at every boundary, consecutive LFSR dumps must be exactly 64
@@ -134,7 +137,7 @@ The current report passes pitch (0.009 ppm least-squares drift, at most
 noise (1.55% rate error, 0.78 spectral cosine), algorithms 0-3 (spectral
 cosine measured against the recalibrated moderate-depth fixture),
 algorithms 2 and 6 (0.706 and 0.951/11.8 with the per-algorithm fold
-bias), and feedback-7 (0.799), with FM on the correct stereo channels
+bias), and feedback-7 (0.805 with the level-7 history-precise stage), with FM on the correct stereo channels
 and RMS energy ratios of 0.90-1.07. Under the relative topology
 boundaries, algorithms 0 through 6 pass — the capture tracks the folded
 model to within 0.01 of cosine on five of them and to three or four
@@ -189,6 +192,27 @@ internal gain ring alternates y0 between the carrier and fold-scale
 gains on the two mpyr parallel loads, so its ring word stays the audible
 carrier while its history lands at the fold depth, two instructions per
 frame paid only by algorithm-7 channels with live feedback.
+
+At feedback level 7 the coupled fold left the SELF path one power of two
+above ymfm's exact `(out0+out1)>>3` depth — enough loop gain to sustain a
+frame-rate limit cycle whose output swings splice the corpus mix after
+tens of sustained periods, an instability the 4,096-frame gate scenarios
+are structurally too short to see (a two-voice CON4-FB7 capture is clean
+over 4 periods yet splices ~1,173 times per second by period 40).
+Level-7 channels therefore dispatch to history-precise stage twins: the
+parallel move on an `asr` stores the pre-shift product into the
+modulation ring, so the onward depth is untouched, while the halved
+accumulator becomes the feedback history — landing the self path exactly
+on ymfm's level-7 depth for one extra instruction per frame, paid only
+by level-7 channels. The class choice (bypass for level 0, precise for
+level 7) is folded into the per-channel packed dispatch word at
+register-decode time, and replacing the per-block algorithm bit tree
+with that word more than pays for the stage: the eight-channel profile
+dropped from 326.17 to 324.94 instruction cycles per frame against the
+326.27 budget. The oracle's folded model applies the same extra history
+shift at level 7, the 40-period repro renders with zero splices on the
+captured DSP, and the moderate-depth (level 4) scenarios are
+byte-identical to the previous kernel.
 
 The comparator enforces these boundaries:
 

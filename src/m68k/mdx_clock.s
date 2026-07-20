@@ -5,6 +5,7 @@
         global  mxdrv_mdx_clock_pump
         global  mxdrv_mdx_clock_pending
         global  mxdrv_mdx_clock_installed
+        global  mxdrv_mdx_clock_resync
 
 MFP_IERA                equ     $fffffa07
 MFP_IPRA                equ     $fffffa0b
@@ -91,6 +92,24 @@ mxdrv_mdx_clock_pending:
 mxdrv_mdx_clock_installed:
         moveq   #0,d0
         move.b  mdx_clock_installed_flag,d0
+        rts
+
+; Discard setup-time Timer-A backlog immediately after the first audio block is
+; accepted. No audio has played yet, so carrying loader/render latency into the
+; first foreground pump would only repeat the opening block while catching up.
+mxdrv_mdx_clock_resync:
+        movem.l d1-d7/a0-a6,-(sp)
+        Supexec mdx_clock_resync_super
+        movem.l (sp)+,d1-d7/a0-a6
+        rts
+
+mdx_clock_resync_super:
+        move.w  sr,-(sp)
+        move.w  #$2700,sr
+        clr.l   mdx_clock_phase
+        clr.w   mdx_clock_pending_ticks
+        moveq   #0,d0
+        move.w  (sp)+,sr
         rts
 
 ; XBIOS Supexec callback. Timer A is also used by Falcon DMA sound, so any

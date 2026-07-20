@@ -115,7 +115,7 @@ channels, preloads the new block's first left word, and restores `$5a00`.
 Buffer pointers use `r6/r7`; the phase-cache loop owns `r4`, so sharing that
 register would displace the refill position during every YM sample.
 
-Protocol v19 implements the event shape with a rolling clock. A refillable
+Protocol v22 implements the event shape with a rolling clock. A refillable
 32-entry ring FIFO stores an absolute 16-bit native-sample time beside each
 packed register write. Entries must be in nondecreasing modular order and
 within the 32,767-sample future horizon; all writes due at a boundary are
@@ -127,20 +127,26 @@ restarting at zero.
 
 Protocol commands `$18` and `$19` use the integrated command-`$17` block kernel
 for normal playback while preserving commands `$11`/`$13` as the exact
-conformance stream. Each realtime transaction transfers 1024 interleaved
-signed 16-bit PDX frames. The DSP expands those samples by eight bits into
-planar 24-bit accumulators, then renders 16 64-frame FM blocks into the inactive
-2048-word interleaved SSI buffer. Realtime playback uses `m6=2047`; the exact
-1007-frame stream retains `m6=2013`.
+conformance stream. Each realtime transaction transfers a count and up to 64
+ordered YM writes, the common PCM8 pan, and 1024 signed mono PDX frames. The
+DSP stages the writes without decoding them while TOS performs its unpaced
+bulk transfer, queues them at the current rolling timestamp after the PCM has
+arrived, and expands each mono sample by eight bits into the selected planar
+24-bit accumulator(s), then
+renders 16 64-frame FM blocks into the inactive 2048-word interleaved SSI
+buffer. Realtime playback uses `m6=2047`; the exact 1007-frame stream retains
+`m6=2013`.
 
 Start imports the exact register and key image into persistent decoded state,
 clears phase and feedback, rebuilds pitch/gain/envelope state, backs up the
 packed table, derives the 64-step noise jump tables, and maps the sine ROM.
-Refill selects the inactive planar workspace and SSI output buffer, receives
-the next host PCM period behind a ready-token gate, renders it while the active
-buffer loops, and switches only at a stereo boundary. Stop restores the packed
-tables, exact expanded tables and caches, external Y mapping, SSI state, and
-linear address modifiers.
+Refill selects the inactive planar workspace and SSI output buffer and receives
+the next host period behind a ready-token gate. Once the upload is private DSP
+memory it acknowledges the host, allowing the 16 MHz 68030 to mix the following
+period while the DSP renders. The completed output waits for `r6` to wrap to
+the active buffer base and switches only at a whole 1024-frame boundary. Stop
+restores the packed tables, exact expanded tables and caches, external Y
+mapping, SSI state, and linear address modifiers.
 
 The realtime LFO is a 48-bit accumulator holding ymfm's 32-bit counter times
 2^18, advanced by decoded 81/82-tick pairs, so the true waveform index —
@@ -178,12 +184,12 @@ The production block boundary drains the real 32-entry transport FIFO and uses
 the same register decoder for direct live writes. Algorithm/pan, TL, KC/KF,
 MUL, key edges, envelope rates, LFO, and timers update persistent state. The
 1280:1007 DDA advances successive 1024-frame buffers to native clocks 1301,
-2603, and 3904 without drift. Events are currently applied only before a
-64-frame block, so ordering is preserved but the sub-frame compatibility target
-is not yet met. DT1/DT2 pitch offsets and channel-7 noise-frequency/output
-substitution also remain to be integrated. The Hatari smoke gate renders three
-buffers, checks 3072 prepared frames, and pins the first attack buffer checksum
-to `$f45044`.
+2603, and 3904 without drift. An event landing inside a 64-frame block splits
+that block into ordered segments and takes effect on its first codec frame.
+DT1/DT2 pitch offsets and channel-7 noise frequency/output substitution are
+decoded by the production kernel. The Hatari smoke gate renders three buffers,
+checks 3072 prepared frames, and pins the first attack buffer checksum to
+`$c57f58`.
 
 ## Cycle feasibility gate
 
@@ -449,22 +455,35 @@ Hatari's Falcon decode (and the hardware it models) maps external P to the
 external X onto the upper 16K at `phys = addr + $4000`. The `P:$1400` ceiling
 therefore only protects the Y-resident table region. The window from the end
 of the external-Y reservation at `Y:$1f7f` through `Y:$26ff` is program space.
-The island at `P:$2000-$26fa` holds the generated per-rate tables, amortized
-envelope helpers, relocated cold event-decode bodies, rt5 fixtures, the exact
-global helper at `P:$2520`, and the exact timer helper at `P:$26d0`. The
-stage-two generator admits P sections inside `[$2000,$2700)` and rejects
-everything else above `$1400`. The uninitialized envelope state remains in
-`X:$2400`/`X:$2480` (physical `$6400`/`$6480`), while its Y addend array moved
-to `Y:$2700`; none aliases the expanded program island.
+The island at `P:$2000-$2af6` holds the generated per-rate tables, amortized
+envelope helpers, relocated cold event-decode bodies, rt5 fixtures, and the
+exact global and timer helpers. A second island at `P:$2b20` sits just above
+the envelope block addends at `Y:$2b00-$2b1f` and carries the per-class
+algorithm entry heads, the feedback-level-7 history-precise stage twins, the
+feedback bypass stages, and the packed-dispatch rebuild helpers with their
+class-row tables. The stage-two generator accepts a repeated `--island`
+argument and admits P sections inside `[$2000,$2b00)` or `[$2b20,$3400)`,
+rejecting everything else above `$1400`. The uninitialized envelope state
+remains in `X:$2400`/`X:$2480` (physical `$6400`/`$6480`), while its Y addend
+array at `Y:$2b00` separates the two program islands; nothing aliases either
+island.
 
-Two DSP56001 pitfalls bit during this work. REP with a register count of
+Three DSP56001 pitfalls bit during this work. A subroutine that parks a
+modifier register (`m3` here) leaves a time bomb for every later `(r3)+`
+walker: the dispatch-word rebuild once restored `m3` to the render map's 63
+during cold init, and the noise-jump table generator — which runs later in
+the same init and walks `r3` linearly — silently wrapped its writes inside
+one 64-word block, corrupting scattered table entries whose effect surfaced
+only as intermittent LFSR discontinuities blocks later. Helpers must leave
+inherited modifiers untouched and keep their own indexed accesses wrap-free
+by placement instead. REP with a register count of
 zero executes 65,536 times, and `tst` sees the whole 56-bit accumulator, so
 an octave count computed by fractional MPY must drop its A0/B0 fraction
 bits (`move b1,b`) before the zero guard. And TOS 4.02's `Dsp_BlkUnpacked`
 polls host-port TXDE only before its first word, then writes the rest of the
 block blind: any command whose receive loop starts more than about one
 host-write period after the command word consumes silently loses a word to
-the one-deep transmit latch. Protocol v19 gates every multi-word upload on a
+the one-deep transmit latch. Protocol v22 gates every multi-word upload on a
 `$524459` ready token the DSP sends from immediately before its parked
 receive loop.
 
@@ -478,15 +497,15 @@ final YM program deliberately begins at `P:$0080`, leaving
 through `Dsp_BlkUnpacked`.
 
 The generated stream starts with magic `$4d584c`, followed by a section count
-and address/count/data records. The low program sections end at `P:$13ff` and
-the stream carries the island as additional sparse sections through
-`P:$26fa`. The current image contains 6,584 initialized program words in eight
-sections. After installing them, the loader replies `$4c4f41` and jumps through
+and address/count/data records. The low program sections end below `P:$1400`
+and the stream carries both islands as additional sparse sections through
+`P:$2c19`. The current image contains 7,975 initialized program words in
+thirteen sections. After installing them, the loader replies `$4c4f41` and jumps through
 the replaced reset vector at `P:$0000`. The build generator rejects a bootstrap
 above the 512-word XBIOS limit, any overlap with the reserved loader gap, non-P
 sections, sections outside 16-bit P memory, and any section that neither
-stays below the `P:$1400` table boundary nor fits inside the declared
-`[$2000,$2700)` island.
+stays below the `P:$1400` table boundary nor fits inside one of the declared
+`[$2000,$2b00)` and `[$2b20,$3400)` islands.
 This removes the former 8 KiB converted-LOD ceiling from future specialized or
 unrolled kernels; the actual Falcon P-memory reservation is now the relevant
 limit.

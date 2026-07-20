@@ -9,6 +9,7 @@
         global  mxdrv_pdx_set_pan
         global  mxdrv_pdx_active_mask
         global  mxdrv_pdx_mix_frame
+        global  mxdrv_pdx_mix_block
 
 PDX_SAMPLE_COUNT        equ     96
 PDX_TABLE_BYTES         equ     PDX_SAMPLE_COUNT*8
@@ -29,6 +30,7 @@ PDX_VOICE_CURRENT       equ     20
 PDX_VOICE_BYTES         equ     24
 PDX_VOICE_COUNT         equ     8
 PDX_RESAMPLE_DENOMINATOR equ    3021
+PDX_MIX_BLOCK_FRAMES    equ     1024
 
         text
 
@@ -416,6 +418,126 @@ pdx_mix_right:
 pdx_mix_done:
         rts
 
+; Render one complete production PCM period into the host-port staging area.
+; The PCM8 pan register is global, so the realtime wire format carries it once
+; followed by 1024 mono samples instead of expanding every frame to left/right
+; on the 68030.  Walking voices outside frames also avoids seven inactive-slot
+; tests per frame, and the volume multiply is redone only when the zero-order
+; source sample changes.
+; in: a3 = longword-aligned destination
+; out: [a3] = pan (0-3), followed by DSP_RT_MIX_FRAME_COUNT signed samples
+mxdrv_pdx_mix_block:
+        moveq   #0,d0
+        move.b  pdx_pcm_pan,d0
+        move.l  d0,(a3)+
+
+        ; When no PCM voice is sounding — every period of an FM-only song, and
+        ; the common case between drum hits otherwise — emit the silent period
+        ; directly and skip the clear, mix, and saturating-store passes over
+        ; 1024 frames.
+        lea     pdx_voices,a2
+        moveq   #PDX_VOICE_COUNT-1,d1
+pdx_mix_block_silence_test:
+        tst.b   PDX_VOICE_ACTIVE(a2)
+        bne     pdx_mix_block_render
+        lea     PDX_VOICE_BYTES(a2),a2
+        dbra    d1,pdx_mix_block_silence_test
+        moveq   #0,d0
+        move.w  #PDX_MIX_BLOCK_FRAMES-1,d4
+pdx_mix_block_silence:
+        move.l  d0,(a3)+
+        dbra    d4,pdx_mix_block_silence
+        rts
+
+pdx_mix_block_render:
+        lea     pdx_mix_block_buffer,a1
+        moveq   #0,d0
+        move.w  #PDX_MIX_BLOCK_FRAMES-1,d4
+pdx_mix_block_clear:
+        move.l  d0,(a1)+
+        dbra    d4,pdx_mix_block_clear
+
+        lea     pdx_voices,a2
+        moveq   #PDX_VOICE_COUNT-1,d7
+pdx_mix_block_voice:
+        tst.b   PDX_VOICE_ACTIVE(a2)
+        beq     pdx_mix_block_next_voice
+
+        lea     pdx_mix_block_buffer,a1
+        move.w  #PDX_MIX_BLOCK_FRAMES-1,d4
+        moveq   #0,d2
+        move.w  PDX_VOICE_PHASE(a2),d2
+        moveq   #0,d3
+        move.b  PDX_VOICE_RATE(a2),d3
+        add.w   d3,d3
+        lea     pdx_rate_phase(pc),a0
+        move.w  (a0,d3.w),d3
+        bsr     pdx_mix_scale_current
+
+pdx_mix_block_frame:
+        move.l  (a1),d0
+        add.l   d6,d0
+        move.l  d0,(a1)+
+        add.w   d3,d2
+        cmpi.w  #PDX_RESAMPLE_DENOMINATOR,d2
+        bcs     pdx_mix_block_frame_next
+        subi.w  #PDX_RESAMPLE_DENOMINATOR,d2
+        move.w  d2,PDX_VOICE_PHASE(a2)
+        bsr     pdx_decoder_clock
+        tst.l   d1
+        beq     pdx_mix_block_end_voice
+        move.w  d0,PDX_VOICE_CURRENT(a2)
+        bsr     pdx_mix_scale_current
+        moveq   #0,d2
+        move.w  PDX_VOICE_PHASE(a2),d2
+pdx_mix_block_frame_next:
+        dbra    d4,pdx_mix_block_frame
+        move.w  d2,PDX_VOICE_PHASE(a2)
+        bra     pdx_mix_block_next_voice
+
+pdx_mix_block_end_voice:
+        clr.b   PDX_VOICE_ACTIVE(a2)
+        clr.w   PDX_VOICE_CURRENT(a2)
+
+pdx_mix_block_next_voice:
+        lea     PDX_VOICE_BYTES(a2),a2
+        dbra    d7,pdx_mix_block_voice
+
+        ; Saturate only after all voices have accumulated, matching the scalar
+        ; mixer, then leave panning to the DSP-side planar expansion.
+        lea     pdx_mix_block_buffer,a1
+        move.w  #PDX_MIX_BLOCK_FRAMES-1,d4
+pdx_mix_block_store:
+        move.l  (a1)+,d0
+        cmpi.l  #32767,d0
+        ble     pdx_mix_block_clamp_low
+        move.l  #32767,d0
+pdx_mix_block_clamp_low:
+        cmpi.l  #-32768,d0
+        bge     pdx_mix_block_sample_ready
+        move.l  #-32768,d0
+pdx_mix_block_sample_ready:
+        move.l  d0,(a3)+
+        dbra    d4,pdx_mix_block_store
+        rts
+
+; Scale the current signed decoder output by this voice's PCM8 Q12 volume.
+; d2/d3/d4 and the walking pointers survive so this can sit on the rare source
+; transition rather than the codec-frame hot path.
+pdx_mix_scale_current:
+        moveq   #0,d0
+        move.w  PDX_VOICE_CURRENT(a2),d0
+        ext.l   d0
+        moveq   #0,d1
+        move.b  PDX_VOICE_VOLUME(a2),d1
+        add.w   d1,d1
+        lea     pdx_volume_q12(pc),a0
+        muls.w  (a0,d1.w),d0
+        asr.l   #8,d0
+        asr.l   #4,d0
+        move.l  d0,d6
+        rts
+
 ; floor(16 * 1.1^step), step 0-48, from MAME's OKIM6258 decoder.
 pdx_adpcm_steps:
         dc.w    16,17,19,21,23,25,28,31,34,37,41,45,50,55,60,66,73
@@ -446,6 +568,8 @@ pdx_voices:
 pdx_pcm_pan:
         ds.b    1
         ds.b    1                       ; keep reset span word-aligned
+pdx_mix_block_buffer:
+        ds.l    PDX_MIX_BLOCK_FRAMES
         even
 
         end

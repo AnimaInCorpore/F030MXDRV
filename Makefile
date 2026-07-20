@@ -64,7 +64,7 @@ XEVIOUS_M68K_OBJECTS := $(patsubst $(M68K_BUILD)/player.o,$(XEVIOUS_M68K_BUILD)/
 DOSBOX ?= $(shell command -v dosbox-staging 2>/dev/null || command -v dosbox 2>/dev/null)
 DOSBOX_FLAGS ?= --noprimaryconf --set output=texture
 
-.PHONY: all host xevious dsp reference check capture-realtime compare-realtime smoke endurance endurance-batch profile-dsp profile-dsp-rt \
+.PHONY: all host xevious dsp reference check capture-realtime compare-realtime smoke stock-audio endurance endurance-batch profile-dsp profile-dsp-rt \
 	profile-dsp-rt2 profile-dsp-rt3 profile-dsp-rt4 profile-dsp-rt5 \
 	clean run tools
 
@@ -147,7 +147,8 @@ $(YM2151_PERCEPTUAL_STAMP): $(YM2151_ORACLE) \
 		tests/traces/perceptual_detune.trace \
 		tests/traces/perceptual_timing.trace \
 		tests/traces/perceptual_envelope.trace \
-		tests/traces/perceptual_lfo.trace
+		tests/traces/perceptual_lfo.trace \
+		tests/traces/bisect_two_bom_fb7.trace
 	@rm -rf $(YM2151_PERCEPTUAL_DIR) $(YM2151_PERCEPTUAL_MODEL_DIR) \
 		$(YM2151_PERCEPTUAL_FOLDED_DIR)
 	@mkdir -p $(YM2151_PERCEPTUAL_DIR) $(YM2151_PERCEPTUAL_MODEL_DIR) \
@@ -187,6 +188,8 @@ $(YM2151_PERCEPTUAL_STAMP): $(YM2151_ORACLE) \
 				--algorithm 0 --feedback $$feedback \
 				> $$output_dir/feedback-$$feedback.tsv || exit 1; \
 		done; \
+		$(YM2151_ORACLE) $$mode tests/traces/bisect_two_bom_fb7.trace 40960 \
+			> $$output_dir/feedback-7-long.tsv || exit 1; \
 	done
 	python3 tools/compare_ym2151_realtime.py validate \
 		--reference $(YM2151_PERCEPTUAL_DIR) \
@@ -259,7 +262,8 @@ $(DSP_STAGE2_IMAGE): tools/generate_dsp_stage2.py $(DSP_BUILD)/.assembled
 		--bootstrap $(DSP_BUILD)/YMBOOT.LOD \
 		--program $(DSP_BUILD)/YM2151.LOD \
 		--program-limit 0x1400 \
-		--island 0x2000 0x2b00 > $@
+		--island 0x2000 0x2b00 \
+		--island 0x2b20 0x3400 > $@
 
 check: all reference
 	@test -s $(RELEASE_DIR)/f030mxdrv.tos
@@ -278,7 +282,7 @@ check: all reference
 	@rg -q "^DSP_STAGE2_PROGRAM_WORDS equ " $(DSP_STAGE2_IMAGE)
 	@file $(RELEASE_DIR)/f030mxdrv.tos $(RELEASE_DIR)/ym2151.lod
 
-# Replay every perceptual scenario through the protocol-v19 realtime stream
+# Replay every perceptual scenario through the protocol-v22 realtime stream
 # in Hatari, reconstruct per-frame vectors from the block-boundary dumps, and
 # feed them through the exact-to-perceptual comparator.
 capture-realtime: check
@@ -318,7 +322,7 @@ smoke: check
 	@rg -q "XBIOS 0x6E Dsp_ExecBoot" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x4d584c" build/hatari-smoke.trace
 	@rg -q "Transfer 0x4c4f41" build/hatari-smoke.trace
-	@rg -q "Transfer 0x4d5813" build/hatari-smoke.trace
+	@rg -q "Transfer 0x4d5816" build/hatari-smoke.trace
 	@rg -q "Transfer 0x01dc19" build/hatari-smoke.trace
 	@rg -q "Transfer 0x524459" build/hatari-smoke.trace
 	@rg -q "GEMDOS 0x42 Fseek\\(0, [0-9]+, 2\\)" build/hatari-smoke.trace
@@ -375,7 +379,7 @@ smoke: check
 	@rg -q "Direct Transfer 0x01c5de" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x01c6c0" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x170000" build/hatari-smoke.trace
-	@rg -q "Transfer 0xfaba95" build/hatari-smoke.trace
+	@rg -q "Transfer 0x09c4b8" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x01c6de" build/hatari-smoke.trace
 	@rg -q "XBIOS 0x80 Locksnd" build/hatari-smoke.trace
 	@rg -q "XBIOS 0x89 Dsptristate\\(0x1, 0x0\\)" build/hatari-smoke.trace
@@ -410,6 +414,13 @@ smoke: check
 	@rg -q "XBIOS 0x89 Dsptristate\\(0x0, 0x0\\)" build/hatari-smoke.trace
 	@rg -q "XBIOS 0x81 Unlocksnd" build/hatari-smoke.trace
 	@echo "Hatari MXDRV MDX/PDX + DSP YM2151 interrupt-buffered smoke test: OK"
+
+# Exercise the dedicated player at the stock 16 MHz 68030 clock and prove from
+# the SSI trace that every prepared 1024-frame block replaces the active block
+# at the next 20.83 ms stereo boundary. The 600-handoff floor runs past both
+# former stalls and requires a >32-write burst to exercise the expanded stage.
+stock-audio: xevious
+	@python3 tools/stock_audio_timing.py
 
 profile-dsp: check tools/profile_dsp.py
 	@if ! command -v hatari >/dev/null 2>&1; then \

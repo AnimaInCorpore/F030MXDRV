@@ -389,8 +389,16 @@ public:
                 modulation = (m_feedback_0[channel] + m_feedback_1[channel])
                     >> (10 - feedback);
             else
+            {
+                // The kernel's level-7 history-precise stage halves only the
+                // stored feedback pair, landing the SELF path exactly on
+                // ymfm's (out0+out1)>>3 depth while the onward fold depth is
+                // untouched; without it the coupled fold's doubled loop gain
+                // sustains a frame-rate limit cycle over long renders.
+                const int self_extra = feedback == 7 ? 1 : 0;
                 modulation = (m_feedback_0[channel] + m_feedback_1[channel])
-                    >> (1 + fold);
+                    >> (1 + fold + self_extra);
+            }
 
             std::array<int32_t, 8> operator_output{};
             const int32_t out1_carrier = m_feedback_in[channel] = quantized_volume(

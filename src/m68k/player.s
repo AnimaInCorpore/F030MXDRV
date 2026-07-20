@@ -302,6 +302,7 @@ player_load_return:
 ; out: d0=0 after natural/user stop, -1 after a reported setup failure
 player_run:
         movem.l d1-d7/a0-a6,-(sp)
+        bsr     mxdrv_ym_batch_disable
         clr.b   player_sound_owned
         clr.b   player_audio_started
         clr.b   player_fading
@@ -349,22 +350,29 @@ player_files_loaded:
         bne     player_play_error
 
         ; Prime the tracks before rendering the first block so their initial
-        ; voices, notes, and PDX triggers are represented immediately.
+        ; voices, notes, and PDX triggers populate the exact register mirror
+        ; before the realtime decoder initializes from it.
         bsr     mxdrv_mdx_timer_service
         tst.w   d0
         beq     player_finished
 
-        bsr     dsp_start_realtime_audio
-        cmp.l   #DSP_REPLY_OK,d0
-        bne     player_dsp_error
-        move.b  #1,player_audio_started
-
+        ; Console output can consume multiple VBLs on a stock machine. Finish
+        ; it before SSI starts so it cannot delay the first pipelined refill.
         Cconws  player_playing_text
         Cconws  player_mdx_filename
         Cconws  player_playing_suffix
         tst.b   player_pdx_filename
-        beq     player_loop
+        beq     player_start_audio
         Cconws  player_pdx_warning
+player_start_audio:
+        bsr     dsp_start_realtime_audio
+        cmp.l   #DSP_REPLY_OK,d0
+        bne     player_dsp_error
+        bsr     mxdrv_mdx_clock_resync
+        move.b  #1,player_audio_started
+        ; Once SSI is live, ordered pump writes ride with the PCM refill that
+        ; consumes them, avoiding dozens of per-write XBIOS handshakes.
+        bsr     mxdrv_ym_batch_enable
 
 player_loop:
         ; The blocking realtime refill is the playback cadence. Waiting for a
@@ -431,6 +439,7 @@ player_cleanup_error:
         moveq   #-1,d7
 
 player_cleanup:
+        bsr     mxdrv_ym_batch_disable
         moveq   #5,d0
         bsr     mxdrv_call
         tst.b   player_audio_started

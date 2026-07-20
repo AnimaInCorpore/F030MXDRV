@@ -52,11 +52,13 @@ bounds against that vector.
 ## Current boundary
 
 `src/m68k/pdx.s` provides validated lookup plus the eight-voice host mixer. It
-renders 1024 Falcon codec frames for each protocol-v19 realtime transaction.
-The DSP expands the interleaved signed 16-bit host mix into planar 24-bit
-accumulators, adds 16 64-frame FM blocks, saturates to the inactive interleaved
-SSI buffer, and switches A/B buffers at a stereo boundary. MDX tracks 8-15
+renders 1024 Falcon codec frames for each protocol-v22 realtime transaction.
+The production mixer walks active voices outside the frame loop, emitting one
+signed mono block plus the common PCM8 pan. The DSP expands it into planar
+24-bit accumulators, adds 16 64-frame FM blocks, saturates to the inactive
+interleaved SSI buffer, and switches A/B buffers at a whole-buffer boundary.
+MDX tracks 8-15
 start and stop the eight voices, and the TTP player uses this realtime start and
 refill path. The older 1007-frame exact FM/PCM stream remains as a conformance
-gate. Real MDX/PDX corpus comparison and Falcon hardware underrun/contention
-measurements are still required before calling playback complete.
+gate. Hatari's stock-clock SSI gate covers refill contention; a physical Falcon
+soak remains required before release.

@@ -5,7 +5,7 @@
 
 ; Codec-vector capture mode. When CAPTURE.SCN exists beside the TTP, the
 ; no-argument launch replays that compiled scenario through the production
-; protocol-v19 realtime transport instead of the conformance suite, so an
+; protocol-v22 realtime transport instead of the conformance suite, so an
 ; external harness can observe block-boundary DSP state. The file is
 ; big-endian: 'SCN1', frame count (a multiple of the 1024-frame buffer),
 ; an event count of at most the 32 FIFO slots, then time.w/reg.b/data.b

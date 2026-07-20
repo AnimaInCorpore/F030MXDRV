@@ -990,6 +990,10 @@ mdx_track_retire:
         move.w  mxdrv_mdx_active,d0
         bclr    d7,d0
         move.w  d0,mxdrv_mdx_active
+        ; A parse or write failure has already retired this track. Continuing
+        ; into its service phase can retry the same failed batched write
+        ; forever (the next write fails too once the batch is full).
+        bra     mdx_tick_next
 
 ; Per-tick performance service, run for every live track after its parse:
 ; portamento and software-LFO advance, the delayed keyon sequence, and the
