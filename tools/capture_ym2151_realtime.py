@@ -3,7 +3,7 @@
 
 For every perceptual scenario this harness compiles the exact trace into a
 CAPTURE.SCN consumed by the TTP's capture mode, replays it through the
-protocol-v19 realtime stream inside Hatari, and collects DSP state dumps from
+protocol-v22 realtime stream inside Hatari, and collects DSP state dumps from
 debugger breakpoints at every 64-frame block entry and at every completed
 1024-frame buffer. A reconstruction pass turns those dumps into the
 per-codec-frame TSV rows accepted by tools/compare_ym2151_realtime.py.
@@ -48,7 +48,15 @@ SCENARIOS: dict[str, tuple[str, int, int | None, int | None]] = {
     },
     "feedback-0": ("perceptual_topology.trace", 4096, 0, 0),
     "feedback-7": ("perceptual_topology.trace", 4096, 0, 7),
+    # Two real CON4 voices sustained at feedback level 7 for forty periods:
+    # the folded kernel's level-7 limit cycle only splices the output after
+    # tens of periods, so this scenario runs five times longer than the rest
+    # and is gated on its splice count in the comparator.
+    "feedback-7-long": ("bisect_two_bom_fb7.trace", 40960, None, None),
 }
+
+# Emulated-time floors for scenarios that outrun the default --run-vbls.
+SCENARIO_RUN_VBLS = {"feedback-7-long": 6000}
 
 # Symbol-anchored dump ranges shared by both breakpoint scripts. Each entry is
 # (memory space, first symbol, last symbol, extra words past the last symbol).
@@ -145,36 +153,15 @@ def resolve_ranges(
     return resolved
 
 
-def first_reply_after(listing: Path, address: int) -> int:
-    """P address of the first `jsr send_reply` at or after the given address.
-
-    A `do`-loop's end label cannot host a one-shot breakpoint: Hatari samples
-    the DSP PC at loop-end+1 on every iteration. Each realtime start/refill
-    handler instead sends exactly one OK reply after its sixteen blocks, so
-    that `jsr` is the reliable buffer-completion marker.
-    """
-    pattern = re.compile(r"^\s*\d+\s+P:([0-9A-F]+)\s+[0-9A-F]+\s+jsr\s+send_reply\b")
-    candidates = []
-    for line in listing.read_text(errors="replace").splitlines():
-        match = pattern.match(line)
-        if match:
-            candidates.append(int(match.group(1), 16))
-    following = [value for value in sorted(candidates) if value >= address]
-    if not following:
-        raise SystemExit(f"error: no `jsr send_reply` found after P:{address:04x}")
-    return following[0]
-
-
 def write_debug_scripts(
     directory: Path, symbols: dict[tuple[str, str], int], listing: Path
 ) -> Path:
     block_entry = require_symbol(symbols, "P", "rt5_render_runtime_block")
-    start_done = first_reply_after(
-        listing, require_symbol(symbols, "P", "command_start_realtime_mixed")
-    )
-    refill_done = first_reply_after(
-        listing, require_symbol(symbols, "P", "command_refill_realtime_mixed")
-    )
+    # Start/refill now acknowledge as soon as the uploaded host payload is
+    # owned, allowing the 68030 to prepare the next period in parallel. These
+    # explicit symbols remain true render-completion markers for buffer dumps.
+    start_done = require_symbol(symbols, "P", "command_rt_start_buffer_ready")
+    refill_done = require_symbol(symbols, "P", "command_rt_refill_buffer_ready")
 
     state_ranges = resolve_ranges(symbols, STATE_RANGES)
     buffer_ranges = state_ranges + resolve_ranges(symbols, BUFFER_RANGES)
@@ -230,6 +217,7 @@ def run_scenario(
     run_vbls: int,
 ) -> tuple[list[Record], list[TraceEvent], int]:
     trace_name, frames, algorithm, feedback = SCENARIOS[name]
+    run_vbls = max(run_vbls, SCENARIO_RUN_VBLS.get(name, 0))
     events = apply_overrides(
         load_trace(REPO / "tests" / "traces" / trace_name), algorithm, feedback
     )

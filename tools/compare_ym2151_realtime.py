@@ -24,7 +24,18 @@ BASE_SCENARIOS = (
 )
 ALGORITHM_SCENARIOS = tuple(f"algorithm-{index}" for index in range(8))
 FEEDBACK_SCENARIOS = ("feedback-0", "feedback-7")
-SCENARIOS = BASE_SCENARIOS + ALGORITHM_SCENARIOS + FEEDBACK_SCENARIOS
+# Long sustained-feedback scenarios: two real CON4 voices held at feedback
+# level 7 for forty 1024-frame periods. The folded kernel's coupled gain once
+# sustained a frame-rate limit cycle here whose output splices only surface
+# after tens of periods — structurally invisible to the short scenarios — so
+# these are gated on a splice count rather than spectra.
+STABILITY_SCENARIOS = ("feedback-7-long",)
+SCENARIOS = BASE_SCENARIOS + ALGORITHM_SCENARIOS + FEEDBACK_SCENARIOS + STABILITY_SCENARIOS
+# A splice is a consecutive-sample step larger than any waveform in the
+# fixture produces legitimately; the pre-fix kernel scored ~977 of them
+# (1,173/s) on this scenario while exact ymfm and the repaired kernel score 0.
+SPLICE_THRESHOLD = 8000
+SPLICE_MARGIN = 25
 REQUIRED_COLUMNS = {
     "frame",
     "native_sample",
@@ -123,6 +134,15 @@ def audio(vector: Vector) -> list[int]:
     left = vector.column("left")
     right = vector.column("right")
     return left if rms(left) >= rms(right) else right
+
+
+def splice_count(vector: Vector) -> int:
+    values = audio(vector)
+    return sum(
+        1
+        for previous, current in zip(values, values[1:])
+        if abs(current - previous) > SPLICE_THRESHOLD
+    )
 
 
 def spectral_metrics(reference: list[int], candidate: list[int]) -> tuple[float, float, float]:
@@ -296,6 +316,23 @@ def validate_reference(suite: dict[str, Vector]) -> tuple[list[str], list[str]]:
         errors.append("feedback: levels 0 and 7 are indistinguishable")
     feedback_cosine, _, _ = spectral_metrics(feedback_zero, feedback_seven)
     notes.append(f"feedback 0/7 spectral cosine: {feedback_cosine:.4f}")
+
+    for name in STABILITY_SCENARIOS:
+        vector = suite[name]
+        if len(vector.rows) < 32768:
+            errors.append(
+                f"{name}: {len(vector.rows)} frames are too few to exercise "
+                "sustained-feedback drift"
+            )
+        if rms(audio(vector)) < 1.0:
+            errors.append(f"{name}: silent output")
+        splices = splice_count(vector)
+        if splices > SPLICE_MARGIN:
+            errors.append(
+                f"{name}: exact reference carries {splices} splices; the "
+                "fixture must be splice-free at the source"
+            )
+        notes.append(f"{name}: reference splices: {splices}")
     return errors, notes
 
 
@@ -496,6 +533,26 @@ def compare_suites(
             )
         if not 0.20 <= energy_ratio <= 5.0:
             errors.append(f"{name}: RMS energy ratio {energy_ratio:.3f} is outside 0.20-5.0")
+
+    # Long-run feedback stability: spectra tolerate the documented level-7
+    # trajectory chaos, so this class of defect is gated on the splice count
+    # instead — relative to the folded model, which shares the kernel's fold
+    # semantics and scores zero with the history-precise stage.
+    for name in STABILITY_SCENARIOS:
+        candidate_splices = splice_count(candidate[name])
+        bound = SPLICE_MARGIN
+        model_note = ""
+        if fold_model is not None:
+            model_splices = splice_count(fold_model[name])
+            bound = model_splices + SPLICE_MARGIN
+            model_note = f" (folded model {model_splices})"
+        if candidate_splices > bound:
+            errors.append(
+                f"{name}: {candidate_splices} output splices exceed the "
+                f"sustained-feedback bound of {bound}; the pre-fix kernel's "
+                "frame-rate limit cycle scored ~977 here"
+            )
+        notes.append(f"{name}: splices={candidate_splices}{model_note}")
     return errors, notes
 
 
