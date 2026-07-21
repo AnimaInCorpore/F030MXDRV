@@ -4,6 +4,7 @@
         include "pdx_adpcm_reference.i"
 
         global  start
+        global  mxdrv_basepage
 
 DSP_X_WORDS     equ     8192
 DSP_Y_WORDS     equ     8192
@@ -14,11 +15,16 @@ SOUND_DSP_XMIT  equ     1
 SOUND_DAC       equ     8
 SOUND_CLK25M    equ     0
 SOUND_CLK50K    equ     1
+SOUND_CLK25K    equ     3
 SOUND_NO_SHAKE  equ     1
 
         text
 
 start:
+        ; Publish the basepage before anything pushes: the PDX decode cache
+        ; carves its workspace out of the TPA this program already owns,
+        ; between the end of BSS and the stack (see mxdrv_pdx_precache).
+        move.l  4(sp),mxdrv_basepage
         Cconws  banner
 
         movea.l 4(sp),a0              ; TOS basepage pointer at process entry
@@ -241,9 +247,34 @@ run_conformance:
         cmpi.l  #-1,d0
         bne     protocol_failed
 
+        ; A nine-track MDX uses IOCS-style legacy ADPCM. FB is still legal on
+        ; track 8, but without E8 it must not apply PCM8's +14 dB gain.
+        moveq   #2,d0
+        move.l  #mdx_legacy_pcm_song_end-mdx_legacy_pcm_song,d1
+        lea     mdx_legacy_pcm_song(pc),a1
+        bsr     mxdrv_call
+        tst.l   d0
+        bne     protocol_failed
+        moveq   #4,d0
+        bsr     mxdrv_call
+        tst.l   d0
+        bne     protocol_failed
+        bsr     mxdrv_mdx_timer_service
+        cmpi.l  #$0100,d0
+        bne     protocol_failed
+        moveq   #0,d0
+        bsr     mxdrv_pdx_voice_volume
+        cmpi.l  #8,d0                  ; fixed unity, not FB $0f's PCM8 gain
+        bne     protocol_failed
+        moveq   #5,d0
+        bsr     mxdrv_call
+        tst.l   d0
+        bne     protocol_failed
+
         ; Copy and start a bounded MDX image through calls $02/$04. Track 0
         ; executes raw OPM/tempo commands and an FM note; track 8 triggers PDX
-        ; entry 0. Track 1 proves F6/F5 looping and F4 final-pass escape.
+        ; entry 0 after E8 enables PCM8 gain. Track 1 proves F6/F5 looping and
+        ; F4 final-pass escape.
         moveq   #2,d0
         move.l  #mdx_test_song_end-mdx_test_song,d1
         lea     mdx_test_song(pc),a1
@@ -306,6 +337,10 @@ run_conformance:
         bne     protocol_failed
         bsr     mxdrv_pdx_active_mask
         cmpi.l  #1,d0
+        bne     protocol_failed
+        moveq   #0,d0
+        bsr     mxdrv_pdx_voice_volume
+        cmpi.l  #15,d0                 ; E8 makes FB $0f a real PCM8 gain
         bne     protocol_failed
 
         bsr     mxdrv_mdx_timer_service
@@ -1100,8 +1135,8 @@ run_conformance:
 
         ; Reload the valid bank after the malformed-bank checks, then prove
         ; that a host-rendered PDX period reaches the DSP-owned SSI path. Keep
-        ; FM silent so the first nonzero stereo probe sums the exact second
-        ; ADPCM sample from both channels.
+        ; FM silent so the first nonzero stereo probe is the oracle's first
+        ; decoded ADPCM point on both channels.
         bsr     mxdrv_reset
         tst.l   d0
         bne     protocol_failed
@@ -1128,6 +1163,8 @@ run_conformance:
         Setmode #SOUND_STEREO16
         Settracks #0,#0
         Dsptristate #1,#0
+        ; The command-$11/$13 exact conformance transport is still 1007 frames
+        ; at 49.17 kHz. Production reconnects at 24.585 kHz below.
         Devconnect #SOUND_DSP_XMIT,#SOUND_DAC,#SOUND_CLK25M,#SOUND_CLK50K,#SOUND_NO_SHAKE
 
         bsr     dsp_start_mixed_audio
@@ -1145,7 +1182,7 @@ run_conformance:
 
         move.l  #DSP_CMD_QUERY_MIX,d0   ; first nonzero left+right probe
         bsr     dsp_exchange
-        cmpi.l  #PDX_REF_ADPCM_01*2,d0
+        cmpi.l  #PDX_REF_FAST_FIRST_NONZERO,d0
         bne     audio_protocol_failed
 
         move.l  #DSP_CMD_PING+$cd09,d0  ; mixed PDX/FM transport marker
@@ -1303,10 +1340,10 @@ run_conformance:
         bne     audio_protocol_failed
 
         ; Promote the command-$17 block engine into its production-shaped
-        ; 1024-frame A/B transport. Reset establishes native time zero, then
-        ; the same sustained voice and rolling FIFO exercise both halves while
-        ; SSI remains live. Sixteen 64-frame blocks advance each refill by
-        ; 1301 or 1302 native samples under the exact 1280:1007 DDA.
+        ; 512-frame, 24.585 kHz A/B transport. Reconnect only after the exact
+        ; 49.17 kHz stream above has stopped. Sixteen 32-frame quality blocks
+        ; retain the same 20.83 ms period and 1301/1302-native-sample clock.
+        Devconnect #SOUND_DSP_XMIT,#SOUND_DAC,#SOUND_CLK25M,#SOUND_CLK25K,#SOUND_NO_SHAKE
         bsr     mxdrv_reset
         tst.l   d0
         bne     audio_protocol_failed
@@ -1530,6 +1567,27 @@ csm_trace:
         dc.b    $10,$ff,$11,$02,$14,$81
         even
 
+; Nine-track legacy MDX: track 8 asks for volume 15, but no E8 enables PCM8.
+; Its first track offset is 20, which is the legacy table discriminator.
+mdx_legacy_pcm_song:
+        dc.b    'Legacy ADPCM gain',13,10,$1a,0
+mdx_legacy_pcm_sequence:
+        dc.w    mdx_legacy_pcm_voice-mdx_legacy_pcm_sequence
+        dcb.w   8,mdx_legacy_pcm_end_track-mdx_legacy_pcm_sequence
+        dc.w    mdx_legacy_pcm_track-mdx_legacy_pcm_sequence
+mdx_legacy_pcm_end_track:
+        dc.b    $f1,$00
+mdx_legacy_pcm_track:
+        dc.b    $fc,$03                ; both outputs
+        dc.b    $fb,$0f                ; ignored by IOCS ADPCM's fixed gain
+        dc.b    $ed,$04                ; 15.625 kHz
+        dc.b    $80,$01                ; PDX entry 0 for two ticks
+        dc.b    $f1,$00
+mdx_legacy_pcm_voice:
+        dc.b    0                      ; valid, unused voice-table byte
+mdx_legacy_pcm_song_end:
+        even
+
 ; Minimal raw MDX image. A standard title/PDX header precedes a sequence block
 ; containing the voice-table displacement and sixteen relative track pointers.
 mdx_test_song:
@@ -1546,7 +1604,7 @@ mdx_test_fm_track:
         dc.b    $fb,$0f                ; loudest normal volume: +2 carrier TL
         dc.b    $fe,$1b,$5a            ; raw OPM write
         dc.b    $ff,$a4                ; tempo
-        dc.b    $e8                    ; PCM8 enable is native here: a no-op
+        dc.b    $e8                    ; enable PCM8 gain and extra PCM tracks
         dc.b    $f3,$00,$40            ; detune one semitone up
         dc.b    $f0,$00                ; explicit zero keyon delay
         dc.b    $80,$00                ; note 0 for one tick
@@ -1570,7 +1628,7 @@ mdx_test_repeat_after_end:
         dc.b    $f1,$00
 mdx_test_pcm_track:
         dc.b    $fc,$03                ; both outputs
-        dc.b    $fb,$08                ; unity PCM8 gain
+        dc.b    $fb,$0f                ; +14 dB proves E8 selected PCM8 gain
         dc.b    $ed,$04                ; explicit default 15.625 kHz rate
         dc.b    $80,$01                ; PDX entry 0 for two ticks
         dc.b    $f1,$00
@@ -1736,6 +1794,8 @@ dsp_stage2_reply:
 dsp_table_reply:
         ds.l    1
 player_mode:
+        ds.l    1
+mxdrv_basepage:
         ds.l    1
 
         end

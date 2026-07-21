@@ -112,6 +112,7 @@ mxdrv_api_set_pdx:
         move.l  d1,d2
         bsr     mxdrv_copy_data
         move.l  d1,mxdrv_pdx_size
+        bsr     mxdrv_pdx_precache
         moveq   #0,d0
         rts
 

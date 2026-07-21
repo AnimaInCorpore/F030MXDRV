@@ -86,6 +86,7 @@ mxdrv_mdx_reset:
         clr.w   mxdrv_mdx_active
         clr.b   mxdrv_mdx_error
         clr.b   mxdrv_mdx_timer_busy
+        clr.b   mxdrv_mdx_pcm8_enabled
         clr.l   mxdrv_mdx_service_count
         move.b  #$c8,mxdrv_mdx_tempo
         lea     mxdrv_mdx_sync_flags,a0
@@ -366,7 +367,7 @@ mdx_parse_command:
         cmpi.b  #$e9,d0
         beq     mdx_command_lfo_delay
         cmpi.b  #$e8,d0
-        beq     mdx_command_more          ; PCM8 enable: native voices already
+        beq     mdx_command_enable_pcm8
         cmpi.b  #$e7,d0
         beq     mdx_command_extension
         bra     mdx_track_end             ; $e0-$e6 end the performance
@@ -558,6 +559,10 @@ mdx_command_apply_pcm_volume:
         subi.w  #8,d0
         moveq   #0,d1
         move.b  MDX_TRACK_VOLUME(a6),d1
+        tst.b   mxdrv_mdx_pcm8_enabled
+        bne     .volume_ready
+        moveq   #8,d1                  ; legacy ADPCM has no PCM8 gain control
+.volume_ready:
         bsr     mxdrv_pdx_voice_set_volume
         tst.l   d0
         bne     mdx_track_invalid
@@ -843,6 +848,14 @@ mdx_command_lfo_delay:
         move.b  (a4)+,MDX_TRACK_LFO_DELAY(a6)
         bra     mdx_command_more
 
+; E8 installs/enables PCM8 in the original driver. Before it executes, track
+; 8 is the single IOCS ADPCM channel: FB is parsed and cached but does not
+; scale the sample. Our software voices cover both backends, so retain the
+; mode bit and select unity gain for the legacy path at each volume boundary.
+mdx_command_enable_pcm8:
+        move.b  #1,mxdrv_mdx_pcm8_enabled
+        bra     mdx_command_more
+
 ; E7 is MXDRV's extension prefix. Sub-command 0 ends the performance and 3
 ; sets or clears damp mode (force a keyoff before every keyon). The others
 ; carry host-PCM8 or fade operands this standalone executor does not model.
@@ -1119,6 +1132,10 @@ mdx_service_pcm:
         move.b  MDX_TRACK_PAN(a6),d3
         moveq   #0,d4
         move.b  MDX_TRACK_VOLUME(a6),d4
+        tst.b   mxdrv_mdx_pcm8_enabled
+        bne     .volume_ready
+        moveq   #8,d4                  ; IOCS ADPCM playback is fixed at unity
+.volume_ready:
         bsr     mxdrv_pdx_voice_start
         tst.l   d0
         bne     mdx_tick_next           ; empty/missing PDX is a silent note
@@ -1181,6 +1198,10 @@ mdx_fade_apply_pcm:
         bpl     mdx_fade_apply_volume
         moveq   #0,d1
 mdx_fade_apply_volume:
+        tst.b   mxdrv_mdx_pcm8_enabled
+        bne     .volume_ready
+        moveq   #8,d1                  ; legacy ADPCM stays fixed until stop
+.volume_ready:
         bsr     mxdrv_pdx_voice_set_volume
 mdx_fade_apply_next:
         addq.w  #1,d7
@@ -1561,6 +1582,8 @@ mxdrv_mdx_tempo:
 mxdrv_mdx_error:
         ds.b    1
 mxdrv_mdx_timer_busy:
+        ds.b    1
+mxdrv_mdx_pcm8_enabled:
         ds.b    1
         even
 mxdrv_mdx_service_count:

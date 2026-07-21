@@ -1,13 +1,13 @@
 # YM2151 perceptual compatibility gate
 
-The real-time Falcon kernel targets perceptual compatibility at the codec's
-49,169.921875 Hz frame rate. The exact 62.5 kHz ymfm path remains the oracle,
+The real-time Falcon kernel targets perceptual compatibility at the quality
+clock's 24,584.9609375 Hz frame rate. The exact 62.5 kHz ymfm path remains the oracle,
 but codec-rate output is not required to match its individual samples. This
 gate turns that relaxed boundary into deterministic data and pass/fail rules.
 
 ## Reference corpus
 
-`make check` generates 18 TSV files under
+`make check` generates 19 TSV files under
 `build/reference/ym2151-perceptual/`:
 
 - sustained pitch, non-aligned key/register-write timing, a complete ADSR
@@ -15,9 +15,11 @@ gate turns that relaxed boundary into deterministic data and pass/fail rules.
   rate, and per-operator DT1/DT2 detune scenarios;
 - algorithms 0-7 with operator-1 feedback level 4;
 - algorithm 0 at feedback levels 0 and 7; and
-- two real CON4 voices sustained at feedback level 7 for forty
-  1024-frame periods (`feedback-7-long`, 40,960 frames), the long-run
-  stability scenario gated on its output-splice count.
+- two real voices sustained at feedback level 7 for eighty 512-frame periods
+  (40,960 frames), the long-run stability scenarios gated on their
+  output-splice count: `feedback-7-long` on algorithm 4 (O1 feeds two
+  independent carrier pairs) and `feedback-7-long-algorithm-5` on algorithm 5
+  (O1 fans out to three carriers), the topology the coupled fold found hardest.
 
 The algorithm and feedback scenarios drive `perceptual_topology.trace`,
 whose modulators sit 6-9 dB below full volume. The earlier all-carrier
@@ -34,7 +36,7 @@ and the gate discriminates real pitch, depth, routing, and envelope
 errors — which is its purpose. No requantized implementation can track
 the maximal-depth trajectories.
 
-The oracle advances exact ymfm native samples with the same 1280:1007
+The oracle advances exact ymfm native samples with the same 2560:1007
 zero-order schedule as `ssi_render_frame`. Writes are applied before their
 exact native sample. Each output row therefore describes the first codec frame
 that can contain the effect of every ordered write.
@@ -52,7 +54,7 @@ Every row contains:
 | `opN_env`, `opN_state` | exact logical-operator attenuation and ADSR state |
 
 `tools/compare_ym2151_realtime.py validate` also proves that the corpus itself
-has a drift-free 1280:1007 schedule, all required event markers, visible ADSR,
+has a drift-free 2560:1007 schedule, all required event markers, visible ADSR,
 AM/PM and noise activity, eight distinct algorithm fingerprints, and distinct
 feedback spectra. This prevents an accidentally silent or ineffective fixture
 from weakening the later candidate comparison.
@@ -69,15 +71,15 @@ and YM3012 round trip independently of ymfm's native-rate channel output.
 
 This isolates the chosen synthesis-rate/timbre compromise from control-state
 implementation errors. The checked projection has zero pitch/control drift,
-algorithm spectral cosine from 0.7229 to 0.9999, normalized log-spectrum RMSE
-from 5.09 to 10.61 dB, and RMS energy ratios from 0.967 to 1.028. Its generated
+algorithm spectral cosine from 0.7731 to 0.9999, normalized log-spectrum RMSE
+from 2.58 to 9.30 dB, and RMS energy ratios from 0.974 to 1.032. Its generated
 `comparison-report.txt` is a build gate. It is not a substitute for capturing
 the eventual DSP implementation, because it deliberately borrows exact
 frame-boundary control state.
 
 ## Candidate contract
 
-A DSP capture directory must contain the same 17 filenames and columns. Run:
+A DSP capture directory must contain the same 19 filenames and columns. Run:
 
 ```sh
 make compare-realtime REALTIME_CANDIDATE_DIR=path/to/capture
@@ -90,17 +92,17 @@ each scenario the harness compiles the exact trace into a `CAPTURE.SCN`
 (every scenario fits the 32-entry FIFO ring and its 32,767-sample horizon),
 which switches the TTP's no-argument launch into capture mode: reset, queue
 every write through the real rolling FIFO, then start and refill the
-protocol-v22 realtime stream with silent PCM. Hatari debugger breakpoints
+protocol-v23 realtime stream with silent PCM. Hatari debugger breakpoints
 dump the rt5 phase accumulators, envelope state and block coefficients,
-LFO/noise/timer scalars, and native clock at every 64-frame block entry, and
-both SSI buffers after each completed 1024-frame transaction; explicit
-post-render symbols anchor buffer completion because protocol v22 acknowledges
+LFO/noise/timer scalars, and native clock at every 32-frame block entry, and
+both SSI buffers after each completed 512-frame transaction; explicit
+post-render symbols anchor buffer completion because protocol v23 acknowledges
 host-buffer ownership before the DSP finishes rendering.
 
 Reconstruction refuses to guess: the dumped native clock must match the
-1280:1007 DDA at every boundary, consecutive LFSR dumps must be exactly 64
+2560:1007 DDA at every boundary, consecutive LFSR dumps must be exactly 32
 Galois steps apart, and every block's phase advance must equal its
-per-segment increments times 510 frames-per-mac — modulo one sine-ROM cycle
+per-segment increments at 510 accumulator units per frame — modulo one sine-ROM cycle
 (2^32 accumulator units), because the independent-operator render path masks
 the stored accumulator to the ROM index every frame — or the run aborts.
 Because the kernel splits blocks at each write's landing frame, the
@@ -131,88 +133,61 @@ The reported `lfo_am` is the kernel's own published block `m_lfo_am`
 shifted by the decoded channel sensitivity, block-held like every other
 realtime control.
 
-The current report passes pitch (0.009 ppm least-squares drift, at most
-7 counts of phase error), timing, the complete LFO gate (range ratio
-0.984, dominant-bin error 0, spectral cosine 0.9973 with true block AM),
-noise (1.55% rate error, 0.78 spectral cosine), algorithms 0-3 (spectral
-cosine measured against the recalibrated moderate-depth fixture),
-algorithms 2 and 6 (0.706 and 0.951/11.8 with the per-algorithm fold
-bias), and feedback-7 (0.805 with the level-7 history-precise stage), with FM on the correct stereo channels
-and RMS energy ratios of 0.90-1.07. Under the relative topology
-boundaries, algorithms 0 through 6 pass — the capture tracks the folded
-model to within 0.01 of cosine on five of them and to three or four
-decimal places where the fold compromise dominates (algorithm 5 at
-0.3475 against the model's 0.3481, algorithm 6 at 0.9509 against
-0.9507) — leaving two honest failures: algorithm 7's log-RMSE, carrying the
-dropped-feedback compromise, and the envelope correlation below.
-feedback-0 — the suite's one unfolded full-depth serial chain — carries
-a widened 0.25 sensitivity margin: a same-flavor simulation of the
-kernel's semantics tracks the capture (0.86) while diverging from the
-folded model by the capture's own gap (0.679 against 0.684), proving the
-dispatch path faithful and the divergence inherent to trajectory
-sensitivity at that depth; the margin still fails gross errors, which
-measure 0.5 or more below the model.
-Envelope tracking is within
-one attenuation unit outside the attack block (MAE 4.44, both late
-transitions within 64 frames); its correlation shortfall (0.8902 vs 0.95)
-is the documented attack-block reconstruction limit above, not measured
-kernel behavior.
+The checked report is regenerated at 24.585 kHz. Pitch, detune, ordered-write
+timing, LFO, noise, envelope state, all eight algorithms, feedback 0/7, and
+the sustained-feedback splice fixture are graded in two explicit tiers. The
+independent codec-rate model must first pass absolute exact-reference bounds.
+The captured DSP is then checked against that same exact-feedback model for
+the residual caused by its linear 256-step ROM and block-quantized state. No
+folded-feedback model or per-algorithm feedback bias is accepted.
 
-The realtime engine advances envelope state once per 64-frame block with a
+The realtime engine advances envelope state once per 32-frame block with a
 published per-rate affine recurrence, so a capture reconstructs each
 operator's mid-block level analytically from the block-boundary dump and the
 same recurrence, then interpolates per-frame rows linearly between the
-32-frame points; ADSR state columns hold the boundary value. The quantized
-block recurrence itself scores mean attenuation error 2.99/1023, correlation
-0.977, and 61-frame transition lag against the exact ADSR reference under
-this reconstruction, inside every boundary below.
+32-frame points; ADSR state columns hold the boundary value. The checked DSP
+capture scores mean attenuation error 1.62/1023, correlation 0.9996, and a
+four-frame transition lag against the exact ADSR reference.
 
 ## Feedback-depth record
 
-M1 produces one product per frame that feeds both the serial-modulation
-ring and the two-word feedback history, and the nine-instruction stage
-loop has no free data register, so ring and history scales are coupled:
-any per-level depth must fold into M1's single gain, shifting its onward
-serial modulation by the same factor. Exact per-level depth needs
-decoupled scales — roughly two more instructions in the feedback stage
-loop, about 28 cycles/frame at the fixture's seven feedback-active
-channels against a present margin of twelve — so the kernel picks the
-best coupled fold instead. The oracle's perceptual model takes
-`YM_MODEL_FOLD_MODE`/`YM_MODEL_FOLD_K` to simulate exactly that coupled
-fold (exact ymfm when unset), the comparator scores each variant offline,
-and the captured DSP tracks the predictions to a few hundredths. On the
-moderate-depth fixture the half fold k = (10-FB)>>1 wins decisively:
-M1's history sum and its onward serial depth each give up the square
-root of the per-level error instead of one of them taking it all.
-Algorithm 5 remains outside the cosine boundary — its whole timbre is
-the single O1 depth split, the pathological case for the coupling — and
-waits on the render-loop restructure. The all-carrier algorithm 7
-regained feedback through a dedicated two-product stage: a modulo-2
-internal gain ring alternates y0 between the carrier and fold-scale
-gains on the two mpyr parallel loads, so its ring word stays the audible
-carrier while its history lands at the fold depth, two instructions per
-frame paid only by algorithm-7 channels with live feedback.
+The 24.585 kHz budget allows M1 to produce two products per frame. One uses
+the normal serial gain for audible onward modulation; the other uses the
+feedback-level history gain, matching ymfm's
+`(out0 + out1) >> (10 - FB)` law independently for levels 1–7. Feedback zero
+still dispatches to the no-history bypass. Algorithm 7 alternates its carrier
+and history gains through the same modulo-2 gain ring, so its audible carrier
+is not attenuated to obtain the requested history depth.
 
-At feedback level 7 the coupled fold left the SELF path one power of two
-above ymfm's exact `(out0+out1)>>3` depth — enough loop gain to sustain a
-frame-rate limit cycle whose output swings splice the corpus mix after
-tens of sustained periods, an instability the 4,096-frame gate scenarios
-are structurally too short to see (a two-voice CON4-FB7 capture is clean
-over 4 periods yet splices ~1,173 times per second by period 40).
-Level-7 channels therefore dispatch to history-precise stage twins: the
-parallel move on an `asr` stores the pre-shift product into the
-modulation ring, so the onward depth is untouched, while the halved
-accumulator becomes the feedback history — landing the self path exactly
-on ymfm's level-7 depth for one extra instruction per frame, paid only
-by level-7 channels. The class choice (bypass for level 0, precise for
-level 7) is folded into the per-channel packed dispatch word at
-register-decode time, and replacing the per-block algorithm bit tree
-with that word more than pays for the stage: the eight-channel profile
-dropped from 326.17 to 324.94 instruction cycles per frame against the
-326.27 budget. The oracle's folded model applies the same extra history
-shift at level 7, the 40-period repro renders with zero splices on the
-captured DSP, and the moderate-depth (level 4) scenarios are
-byte-identical to the previous kernel.
+This removes the former coupled fold, its per-algorithm bias table, and the
+special level-7 repair class. The integrated worst-case profile measures
+364.14 cycles per quality frame against a 652.53-cycle budget. Sustained FB7
+remains separately splice-gated because feedback trajectories are sensitive
+to waveform-table quantization even when their depth law is correct — the
+exact-arithmetic implementation model already carries the ROM/block
+quantization the DSP capture must additionally survive, and its own
+splice count is now printed alongside the candidate's (`model_splices` in
+the comparator report) so a future failure can tell which layer diverged.
+
+`feedback-7-long` only ever exercised algorithm 4, where O1 drives two
+independent carrier pairs. Algorithm 5 routes O1's output to three carriers
+in parallel instead of two, the single-operator depth split the coupled
+fold's per-algorithm bias table struggled hardest to tune (see the removed
+per-algorithm bias history above). `feedback-7-long-algorithm-5` replays the
+same two voices and levels recabled to CON5 to fence that topology
+independently.
+
+Its exact reference legitimately swings harder than CON4's: a shared O1
+discontinuity now combines across three summed carriers instead of two,
+peaking at 12,312 with no growth over the run (steady-state, spread evenly
+across all ten deciles of the 40,960 frames — not a limit cycle). This
+scenario alone therefore uses a 13,000-count splice threshold
+(`SPLICE_THRESHOLDS` in `compare_ym2151_realtime.py`) instead of the shared
+8,000 bound tuned against algorithm 4's smoother topology; the 25-splice
+count margin, the part of the gate that actually catches instability, is
+unchanged. The quantized model already comes in clean at either threshold
+(max step 7,708) — its 256-step ROM rounds off exactly the sharp edges that
+push the exact reference past 8,000.
 
 The comparator enforces these boundaries:
 
@@ -220,38 +195,18 @@ The comparator enforces these boundaries:
 | --- | --- |
 | native clock and writes | exact frame/native-sample map and exact ordered event hashes |
 | pitch | at most 20 ppm long-term drift between least-squares phase rates and less than one codec frame of phase error |
-| envelope | mean attenuation error at most 24/1023, correlation at least 0.95, state transitions within 64 frames |
+| envelope | mean attenuation error at most 24/1023, correlation at least 0.95, state transitions within 32 frames |
 | LFO | AM range within 25%, dominant-rate error at most one FFT bin, spectral cosine at least 0.90 |
 | noise | transition-rate error at most 3%, state-spectrum cosine at least 0.70 |
-| feedback and algorithms | spectral cosine at least the folded model's score minus 0.10, log-spectrum RMSE at most the folded model's plus 6 dB, RMS energy within 0.20-5.0x |
+| model feedback and algorithms vs exact | spectral cosine at least 0.70, log-spectrum RMSE at most 12 dB, RMS energy within 0.20-5.0x |
+| DSP feedback and algorithms vs model | spectral cosine at least 0.60, log-spectrum RMSE at most 14 dB, RMS energy vs exact within 0.20-5.0x |
 
-feedback-0's cosine margin is 0.25 rather than 0.10: with no feedback
-level to fold, its first-stage modulation runs at full serial depth,
-the one regime in the suite where correct implementations with
-different table quantizations cannot trajectory-track (the simulation
-evidence is in the current-report paragraph above).
-
-algorithm-7's RMSE margin is 10 dB rather than 6: a feedback harmonic
-comb over four clean carriers is the suite's sparsest spectrum, and in
-its empty bins the log-RMSE metric mostly measures each
-implementation's own noise floor — the kernel's clean quarter-sine ROM
-against the model's log-sin/exp table pair. The capture tracks the
-folded model to four cosine decimals (0.9574) and 0.9% of energy while
-sitting 7.4 dB above it on RMSE; the dropped-feedback error this bound
-exists to catch scored 47 dB above the model, so the widened margin
-still separates implementation errors by a factor of four.
-
-The topology boundaries are relative to the *folded model*: the same
-perceptual projection rendered with the kernel's published feedback fold
-and per-algorithm bias (`YM_MODEL_FOLD_MODE=3`, the bias table mirrored
-from `rt5_fold_bias`). Two tiers separate two questions. The plain
-model-versus-exact comparison, still gated on absolute boundaries,
-answers whether the intended compromise is musically sound; the capture
-comparison answers whether the kernel implements that compromise
-correctly, which the bounded quantization residual of any re-quantized
-implementation (measured at 0.00-0.07 of cosine at moderate depth) must
-not obscure. An absolute 0.70 bar left less headroom below the model's
-own floor than that residual and graded noise, not correctness.
+For a DSP/model pair with cosine at least 0.95, the log-RMSE ceiling is not
+applied. This handles sparse carrier spectra where both signals put virtually
+all power in the same bins but one linear-ROM harmonic lands exactly on the
+numeric zero floor; cosine and the independent energy bound still gate the
+audible result. The exact-reference cosine and log-RMSE remain printed for
+every captured topology even when the implementation tier is decisive.
 
 The phase, event, and accumulator boundaries are intentionally stricter than
 the timbre boundary: long-term pitch and control timing are chip semantics,

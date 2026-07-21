@@ -95,27 +95,23 @@ transmit-exception vector at `P:$0012` is a long interrupt that reads SSISR and
 then writes TX, the required sequence for clearing TUE. It is a recovery path,
 not part of normal block playback.
 
-The Falcon DAC rate selected by the host is 25.175 MHz divided by 4 and 128,
-or 49,169.921875 Hz. Relative to the native 62,500 Hz OPM rate this is exactly
-`1280/1007`, so the staging renderer advances one or two native samples per
-codec frame and stores the latest result. Each 1007-frame block uses 2014
-interleaved stereo words. Buffer A starts at external `X:$1000`, buffer B at
-`X:$1800`; both are 2048-word aligned so `m6=2013` wraps each non-power-of-two
-block correctly. They are uninitialized storage, add no `.LOD` records, and
-both fit below the 8192-word external-X reservation.
+The Falcon DAC rate selected by the production host is 25.175 MHz divided by
+4 and 256, or 24,584.9609375 Hz. Relative to the native 62,500 Hz OPM rate
+this is exactly `2560/1007`. Each production period has 512 stereo frames, or
+1024 interleaved SSI words. Buffer A starts at external `X:$1000`, buffer B at
+`X:$1800`, and `m6=1023` wraps either power-of-two period. They are
+uninitialized storage, add no `.LOD` records, and both fit below the 8192-word
+external-X reservation.
 
-Protocol command `$11` receives 1007 interleaved signed stereo frames rendered
-by the 68030 PDX mixer. The DSP renders the matching FM period, adds and clamps
-each channel to signed 16-bit, then starts interrupt-fed playback from buffer A.
-Command `$13` selects the inactive buffer with `r7`, receives and mixes the next
-period there while `r6` keeps the active block repeating, then switches only
-after a complete stereo pair. The switch clears TIE while retaining transmit,
-waits for TDE, supplies a matching right word if the active pointer is between
-channels, preloads the new block's first left word, and restores `$5a00`.
-Buffer pointers use `r6/r7`; the phase-cache loop owns `r4`, so sharing that
-register would displace the refill position during every YM sample.
+Protocol commands `$11`/`$13` retain the older 1007-frame exact-renderer
+interface for conformance tests. They are not the production playback path at
+the 24.585 kHz clock. Commands `$18`/`$19` select and fill the inactive
+512-frame buffer while `r6` transmits the active one, then switch only on a
+whole-period boundary. Buffer pointers use `r6/r7`; the phase-cache loop owns
+`r4`, so sharing that register would displace the refill position during every
+YM sample.
 
-Protocol v22 implements the event shape with a rolling clock. A refillable
+Protocol v23 implements the event shape with a rolling clock. A refillable
 32-entry ring FIFO stores an absolute 16-bit native-sample time beside each
 packed register write. Entries must be in nondecreasing modular order and
 within the 32,767-sample future horizon; all writes due at a boundary are
@@ -128,23 +124,23 @@ restarting at zero.
 Protocol commands `$18` and `$19` use the integrated command-`$17` block kernel
 for normal playback while preserving commands `$11`/`$13` as the exact
 conformance stream. Each realtime transaction transfers a count and up to 64
-ordered YM writes, the common PCM8 pan, and 1024 signed mono PDX frames. The
+ordered YM writes, the common PCM8 pan, and 512 signed mono PDX frames. The
 DSP stages the writes without decoding them while TOS performs its unpaced
 bulk transfer, queues them at the current rolling timestamp after the PCM has
 arrived, and expands each mono sample by eight bits into the selected planar
-24-bit accumulator(s), then
-renders 16 64-frame FM blocks into the inactive 2048-word interleaved SSI
-buffer. Realtime playback uses `m6=2047`; the exact 1007-frame stream retains
-`m6=2013`.
+24-bit accumulator(s). The receive path applies a two-tap
+`(current+previous)/2` PCM reconstruction filter, then renders 16 32-frame FM
+blocks into the inactive 1024-word interleaved SSI buffer. Quality playback
+uses `m6=1023`; the exact 1007-frame conformance stream retains `m6=2013`.
 
 Start imports the exact register and key image into persistent decoded state,
 clears phase and feedback, rebuilds pitch/gain/envelope state, backs up the
-packed table, derives the 64-step noise jump tables, and maps the sine ROM.
+packed table, derives the 32-step noise jump tables, and maps the sine ROM.
 Refill selects the inactive planar workspace and SSI output buffer and receives
 the next host period behind a ready-token gate. Once the upload is private DSP
 memory it acknowledges the host, allowing the 16 MHz 68030 to mix the following
 period while the DSP renders. The completed output waits for `r6` to wrap to
-the active buffer base and switches only at a whole 1024-frame boundary. Stop
+the active buffer base and switches only at a whole 512-frame boundary. Stop
 restores the packed tables, exact expanded tables and caches, external Y
 mapping, SSI state, and linear address modifiers.
 
@@ -169,10 +165,10 @@ either scale wrong shows up spectrally, not just in level: 4x-deep
 modulation buries fundamentals under high-order sidebands, and clipped
 carrier sums counterfeit harmonics that vanish once levels are right.
 
-The all-carrier algorithm's first operator needs two products per frame —
-its ring word is the audible carrier while its feedback history wants the
-fold scale — and the data ALU has exactly two Y registers, both taken by
-the block gain and the ring mask. The dedicated stage escapes the register
+The all-carrier algorithm's first operator needs two products per frame — its
+ring word uses the audible carrier gain while its feedback history uses the
+independently decoded feedback gain — and the data ALU has exactly two Y
+registers, both taken by the block gain and the ring mask. The dedicated stage escapes the register
 wall with a modulo-2 address ring: r5 walks a two-word internal gain pair
 under m5 = 1, and each of the loop's two `mpyr` instructions consumes the
 previous y0 while its parallel Y load fetches the other gain, so the gains
@@ -183,13 +179,13 @@ algorithm-7 channels with nonzero feedback pay it.
 The production block boundary drains the real 32-entry transport FIFO and uses
 the same register decoder for direct live writes. Algorithm/pan, TL, KC/KF,
 MUL, key edges, envelope rates, LFO, and timers update persistent state. The
-1280:1007 DDA advances successive 1024-frame buffers to native clocks 1301,
-2603, and 3904 without drift. An event landing inside a 64-frame block splits
+2560:1007 DDA advances successive 512-frame buffers to native clocks 1301,
+2603, and 3904 without drift. An event landing inside a 32-frame block splits
 that block into ordered segments and takes effect on its first codec frame.
 DT1/DT2 pitch offsets and channel-7 noise frequency/output substitution are
 decoded by the production kernel. The Hatari smoke gate renders three buffers,
-checks 3072 prepared frames, and pins the first attack buffer checksum to
-`$c57f58`.
+checks 1536 prepared frames, and pins the first attack buffer checksum to
+`$98e818`.
 
 ## Cycle feasibility gate
 
@@ -367,10 +363,10 @@ Falcon's 8,192-word X/Y reservations. The right stream temporarily overlays
 external-Y table storage, so the packed table is backed up in X and expanded
 again before the exact renderer resumes.
 
-Each 64-frame block drains every due ordered write from a profile-local
+Each 32-frame block drains every due ordered write from a profile-local
 FIFO — the fixture schedules one write at each of the first 25 boundaries, a
 seven-event burst at boundary 24, the shape of a real MXDRV voice load, and
-a late boundary-90 key-off — advances the drift-free 1280:1007 native
+a late boundary-90 key-off — advances the drift-free 2560:1007 native
 clock, a decoded-rate LFO, both decoded timers, and a maximum-length
 one-step-per-frame noise LFSR, runs one two-instruction, 32-iteration loop
 that rebuilds every PM-adjusted per-operator phase increment, and tail-calls
@@ -383,8 +379,8 @@ covers every decoded register class: eight `$20-$27` algorithm/pan rewrites,
 five four-band total-level writes, four KC and two KF events that rebuild
 four base increments from the exact expanded `opm_phase_step` table with
 octave shift and doubled per-operator multiplier — converted to block DDA
-units through the `2^19/(51*1007)` scale that matches the render's
-255-times-two phase mac against the 256-step sine ROM, exact to 0.04 ppm
+units through the `2^20/(51*1007)` scale that matches the lower-rate render's
+phase mac against the 256-step sine ROM, exact to 0.04 ppm
 with only past-Nyquist tones wrapping into the signed alias domain —
 five key on/off edges
 driving real attack/release state, one write from each of the four
@@ -394,14 +390,14 @@ Timer B plus timer control load/run/status handling. The scaled `$19` PM depth m
 low eight control bits into this block's signed increment offset, and
 control bit 16 still selects full or 0.75 AM gain in all four stages.
 Full-accumulator moves invoke the DSP56001 limiter only after the complete
-mix. The exact 64-step Galois noise transform is applied through three
+mix. The exact 32-step Galois noise transform is applied through three
 6/6/5-bit slice tables that command setup derives from the x^17+x^14+1 step
-function itself — 17 single-bit columns advanced 64 steps, then a doubling
+function itself — 17 single-bit columns advanced 32 steps, then a doubling
 fill — so no noise-table words occupy the bounded P-memory image. Cleanup
 disables SSI, reads SSISR and writes TX to clear a latched underrun,
 restores the external Y map, and rebuilds the exact phase cache, including
 the internal-Y frequency-cache words the decoded multiplier/increment arrays
-overlay. The deterministic reply is `$377cc7`.
+overlay. The deterministic reply is `$1ce79e`.
 
 Decoded envelope curvature runs as a block-boundary pass at `P:$0080` in
 internal P RAM, where instruction fetches avoid the external-memory penalty.
@@ -425,10 +421,10 @@ live in the external island with the generated tables. The capture harness
 derives mid-block levels analytically from the same defining recurrence, so
 no mid-block state is stored.
 
-Hatari measures 2,623,374 instruction cycles for 8,192 frames over 128
-blocks, or 320.24 cycles per frame against the 326.27-cycle budget, leaving
-6.03 cycles (1.85%). The 163.53 ms modeled span fits its 166.61 ms period.
-The 128-block window amortizes the 32-event fixture at a realistic MXDRV
+Hatari measures 2,983,043 instruction cycles for 8,192 frames over 256
+blocks, or 364.14 cycles per frame against the 652.53-cycle budget, leaving
+288.39 cycles (44.2%). The 185.95 ms modeled span fits its 333.21 ms period.
+The 256-block window amortizes the 32-event fixture at a realistic MXDRV
 write density, and the envelope fixture exercises an eight-operator key-on
 transient that decays to its sustain levels and retires, one sustained D2R
 decay tail, and a late release that caps and retires — so steady-state
@@ -459,9 +455,9 @@ The island at `P:$2000-$2af6` holds the generated per-rate tables, amortized
 envelope helpers, relocated cold event-decode bodies, rt5 fixtures, and the
 exact global and timer helpers. A second island at `P:$2b20` sits just above
 the envelope block addends at `Y:$2b00-$2b1f` and carries the per-class
-algorithm entry heads, the feedback-level-7 history-precise stage twins, the
-feedback bypass stages, and the packed-dispatch rebuild helpers with their
-class-row tables. The stage-two generator accepts a repeated `--island`
+algorithm entry heads, the exact independent feedback stages, the feedback
+bypass stages, and the packed-dispatch rebuild helpers with their class-row
+tables. The stage-two generator accepts a repeated `--island`
 argument and admits P sections inside `[$2000,$2b00)` or `[$2b20,$3400)`,
 rejecting everything else above `$1400`. The uninitialized envelope state
 remains in `X:$2400`/`X:$2480` (physical `$6400`/`$6480`), while its Y addend
@@ -483,7 +479,7 @@ bits (`move b1,b`) before the zero guard. And TOS 4.02's `Dsp_BlkUnpacked`
 polls host-port TXDE only before its first word, then writes the rest of the
 block blind: any command whose receive loop starts more than about one
 host-write period after the command word consumes silently loses a word to
-the one-deep transmit latch. Protocol v22 gates every multi-word upload on a
+the one-deep transmit latch. Protocol v23 gates every multi-word upload on a
 `$524459` ready token the DSP sends from immediately before its parked
 receive loop.
 
@@ -499,8 +495,8 @@ through `Dsp_BlkUnpacked`.
 The generated stream starts with magic `$4d584c`, followed by a section count
 and address/count/data records. The low program sections end below `P:$1400`
 and the stream carries both islands as additional sparse sections through
-`P:$2c19`. The current image contains 7,975 initialized program words in
-thirteen sections. After installing them, the loader replies `$4c4f41` and jumps through
+`P:$2ba6`. The current image contains 7,862 initialized program words in
+fourteen sections. After installing them, the loader replies `$4c4f41` and jumps through
 the replaced reset vector at `P:$0000`. The build generator rejects a bootstrap
 above the 512-word XBIOS limit, any overlap with the reserved loader gap, non-P
 sections, sections outside 16-bit P memory, and any section that neither

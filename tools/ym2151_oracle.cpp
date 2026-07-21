@@ -334,30 +334,6 @@ public:
         auto &regs = engine.regs();
         output.clear();
 
-        // Experimental sweep hook: YM_MODEL_FOLD_MODE simulates the DSP
-        // kernel's coupled M1 gain fold k (serial-from-O1 and the raw
-        // feedback-pair sum both shift by 1+k; O1 as a carrier is
-        // unaffected, and the all-carrier algorithm 7 keeps feedback at the
-        // fold depth through its two-product stage). Unset = exact ymfm.
-        static const int fold_mode = [] {
-            const char *value = std::getenv("YM_MODEL_FOLD_MODE");
-            return value ? std::atoi(value) : -1;
-        }();
-        static const int fold_fixed = [] {
-            const char *value = std::getenv("YM_MODEL_FOLD_K");
-            return value ? std::atoi(value) : 0;
-        }();
-        // mode 3: half fold plus a per-algorithm bias, eight comma-free
-        // digits (value minus 5) in YM_MODEL_FOLD_BIAS, e.g. "56655525".
-        static const std::array<int, 8> fold_bias = [] {
-            std::array<int, 8> bias{};
-            const char *value = std::getenv("YM_MODEL_FOLD_BIAS");
-            if (value && std::strlen(value) == 8)
-                for (int i = 0; i < 8; ++i)
-                    bias[i] = value[i] - '0' - 5;
-            return bias;
-        }();
-
         for (uint32_t channel = 0; channel < 8; ++channel)
         {
             // The perceptual kernel advances feedback once per produced codec
@@ -371,43 +347,15 @@ public:
             const uint32_t am_offset = regs.lfo_am_offset(channel);
             const uint32_t feedback = regs.ch_feedback(channel);
             const uint32_t algorithm = regs.ch_algorithm(channel);
-            int fold = 0;
-            if (fold_mode == 0)
-                fold = fold_fixed;
-            else if (fold_mode == 1)
-                fold = feedback ? int(9 - feedback) : 0;
-            else if (fold_mode == 2)
-                fold = feedback ? int(10 - feedback) / 2 : 0;
-            else if (fold_mode == 3)
-                fold = feedback
-                    ? std::max(0, int(10 - feedback) / 2 + fold_bias[algorithm])
-                    : 0;
-            int32_t modulation;
-            if (feedback == 0)
-                modulation = 0;
-            else if (fold_mode < 0)
-                modulation = (m_feedback_0[channel] + m_feedback_1[channel])
+            int32_t modulation = feedback == 0
+                ? 0
+                : (m_feedback_0[channel] + m_feedback_1[channel])
                     >> (10 - feedback);
-            else
-            {
-                // The kernel's level-7 history-precise stage halves only the
-                // stored feedback pair, landing the SELF path exactly on
-                // ymfm's (out0+out1)>>3 depth while the onward fold depth is
-                // untouched; without it the coupled fold's doubled loop gain
-                // sustains a frame-rate limit cycle over long renders.
-                const int self_extra = feedback == 7 ? 1 : 0;
-                modulation = (m_feedback_0[channel] + m_feedback_1[channel])
-                    >> (1 + fold + self_extra);
-            }
 
             std::array<int32_t, 8> operator_output{};
             const int32_t out1_carrier = m_feedback_in[channel] = quantized_volume(
                 *engine.debug_operator(raw[0]), modulation, am_offset);
-            // Every modulation lookup sees O1 at the folded gain; only the
-            // all-carrier algorithm 7 consumes the unfolded value below.
-            operator_output[1] = fold_mode < 0
-                ? out1_carrier
-                : (out1_carrier >> fold);
+            operator_output[1] = out1_carrier;
 
             const uint16_t topology = kAlgorithmOps[algorithm];
             modulation = operator_output[(topology >> 0) & 1] >> 1;
@@ -474,12 +422,11 @@ void emit_codec_vectors(const std::string &trace_path, uint32_t frames,
     inspectable_ym2151 chip(intf);
     chip.reset();
 
-    // Match the Falcon codec exactly: 25.175 MHz / 4 / 128. The rational
-    // native-to-codec schedule is represented by 1280/1007 and is the same
-    // zero-order policy used by ssi_render_frame in the exact DSP path.
-    constexpr uint32_t kCodecNumerator = 1280;
+    // Match the Falcon quality clock exactly: 25.175 MHz / 4 / 256. The
+    // rational native-to-codec schedule is represented by 2560/1007.
+    constexpr uint32_t kCodecNumerator = 2560;
     constexpr uint32_t kCodecDenominator = 1007;
-    constexpr double kCodecRate = 25'175'000.0 / 4.0 / 128.0;
+    constexpr double kCodecRate = 25'175'000.0 / 4.0 / 256.0;
     std::cout << "# ymfm YM2151 "
               << (perceptual ? "codec-rate perceptual projection" : "exact codec reference")
               << "; native_rate="

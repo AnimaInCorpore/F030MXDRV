@@ -17,24 +17,31 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-CODEC_RATE = 25_175_000.0 / 4.0 / 128.0
+CODEC_RATE = 25_175_000.0 / 4.0 / 256.0
 PHASE_MODULUS = 1 << 22
 BASE_SCENARIOS = (
     "pitch", "detune", "timing", "envelope", "lfo", "noise", "noise-slow"
 )
 ALGORITHM_SCENARIOS = tuple(f"algorithm-{index}" for index in range(8))
 FEEDBACK_SCENARIOS = ("feedback-0", "feedback-7")
-# Long sustained-feedback scenarios: two real CON4 voices held at feedback
-# level 7 for forty 1024-frame periods. The folded kernel's coupled gain once
-# sustained a frame-rate limit cycle here whose output splices only surface
-# after tens of periods — structurally invisible to the short scenarios — so
-# these are gated on a splice count rather than spectra.
-STABILITY_SCENARIOS = ("feedback-7-long",)
+# Long sustained-feedback scenarios: two real voices held at feedback level 7
+# to fence history stability beyond the short spectral fixtures. CON4 pairs
+# each operator 1 with a single carrier; CON5 fans one operator 1 out to
+# three, historically the coupled fold's pathological case.
+STABILITY_SCENARIOS = ("feedback-7-long", "feedback-7-long-algorithm-5")
 SCENARIOS = BASE_SCENARIOS + ALGORITHM_SCENARIOS + FEEDBACK_SCENARIOS + STABILITY_SCENARIOS
 # A splice is a consecutive-sample step larger than any waveform in the
 # fixture produces legitimately; the pre-fix kernel scored ~977 of them
 # (1,173/s) on this scenario while exact ymfm and the repaired kernel score 0.
 SPLICE_THRESHOLD = 8000
+# Algorithm 5 fans operator 1's feedback output into three summed carriers
+# instead of algorithm 4's two independent pairs, so a shared discontinuity
+# combines across all three: exact ymfm's own feedback-7-long-algorithm-5
+# reference legitimately peaks at 12,312 with no growth over the run
+# (steady-state, spread evenly across all ten deciles - not a limit cycle).
+# Its threshold clears that with margin; every other scenario keeps the
+# original bound tuned against algorithm 4's smoother two-pair topology.
+SPLICE_THRESHOLDS = {"feedback-7-long-algorithm-5": 13000}
 SPLICE_MARGIN = 25
 REQUIRED_COLUMNS = {
     "frame",
@@ -136,12 +143,12 @@ def audio(vector: Vector) -> list[int]:
     return left if rms(left) >= rms(right) else right
 
 
-def splice_count(vector: Vector) -> int:
+def splice_count(vector: Vector, threshold: int = SPLICE_THRESHOLD) -> int:
     values = audio(vector)
     return sum(
         1
         for previous, current in zip(values, values[1:])
-        if abs(current - previous) > SPLICE_THRESHOLD
+        if abs(current - previous) > threshold
     )
 
 
@@ -216,7 +223,7 @@ def validate_schedule(vector: Vector) -> list[str]:
     phase = 0
     native_sample = 0
     for frame, row in enumerate(vector.rows):
-        phase += 1280
+        phase += 2560
         last_native = native_sample
         while phase >= 1007:
             phase -= 1007
@@ -312,7 +319,7 @@ def validate_reference(suite: dict[str, Vector]) -> tuple[list[str], list[str]]:
 
     feedback_zero = audio(suite["feedback-0"])
     feedback_seven = audio(suite["feedback-7"])
-    if feedback_zero[-1024:] == feedback_seven[-1024:]:
+    if feedback_zero[-512:] == feedback_seven[-512:]:
         errors.append("feedback: levels 0 and 7 are indistinguishable")
     feedback_cosine, _, _ = spectral_metrics(feedback_zero, feedback_seven)
     notes.append(f"feedback 0/7 spectral cosine: {feedback_cosine:.4f}")
@@ -326,7 +333,7 @@ def validate_reference(suite: dict[str, Vector]) -> tuple[list[str], list[str]]:
             )
         if rms(audio(vector)) < 1.0:
             errors.append(f"{name}: silent output")
-        splices = splice_count(vector)
+        splices = splice_count(vector, SPLICE_THRESHOLDS.get(name, SPLICE_THRESHOLD))
         if splices > SPLICE_MARGIN:
             errors.append(
                 f"{name}: exact reference carries {splices} splices; the "
@@ -339,7 +346,7 @@ def validate_reference(suite: dict[str, Vector]) -> tuple[list[str], list[str]]:
 def compare_suites(
     reference: dict[str, Vector],
     candidate: dict[str, Vector],
-    fold_model: dict[str, Vector] | None = None,
+    implementation_model: dict[str, Vector] | None = None,
 ) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     notes: list[str] = []
@@ -422,8 +429,8 @@ def compare_suites(
         errors.append(f"envelope: mean attenuation error {envelope_mae:.2f} exceeds 24")
     if envelope_correlation < 0.95:
         errors.append(f"envelope: correlation {envelope_correlation:.4f} is below 0.95")
-    if transition_lag > 64:
-        errors.append(f"envelope: state transition lag {transition_lag} exceeds 64 frames")
+    if transition_lag > 32:
+        errors.append(f"envelope: state transition lag {transition_lag} exceeds 32 frames")
     notes.append(
         f"envelope: mae={envelope_mae:.2f}, correlation={envelope_correlation:.4f}, "
         f"transition_lag={transition_lag}"
@@ -480,49 +487,7 @@ def compare_suites(
         cosine, log_rmse, energy_ratio = spectral_metrics(
             audio(reference[name]), audio(candidate[name])
         )
-        if fold_model is not None:
-            # Two-tier gating: the plain model-versus-exact comparison guards
-            # the intended compromise's design quality with absolute bounds,
-            # while a capture is judged against the folded model — the same
-            # compromise including the kernel's published feedback fold — so
-            # implementation errors separate from the bounded quantization
-            # residual any re-quantized kernel carries at moderate depth.
-            # feedback-0 is the suite's one unfolded full-depth serial chain,
-            # where no two table quantizations trajectory-track: a same-flavor
-            # simulation matches the capture while showing the model's exact
-            # divergence from it, so its margin widens to 0.25 — between the
-            # measured faithful-implementation gap (0.21) and gross-error
-            # scores, which sit 0.5 or more below the model.
-            # algorithm-7 is the suite's sparsest spectrum — a feedback
-            # harmonic comb over four clean carriers — where the RMSE metric
-            # mostly measures each implementation's noise floor in the empty
-            # bins; the capture tracks the folded model to four cosine
-            # decimals and 0.9% energy while sitting 7.4 dB above it on RMSE,
-            # so its RMSE margin widens to 10 dB — the dropped-feedback error
-            # this bound exists to catch scored 47 dB above the model.
-            model_cosine, model_rmse, _ = spectral_metrics(
-                audio(reference[name]), audio(fold_model[name])
-            )
-            cosine_margin = 0.25 if name == "feedback-0" else 0.10
-            cosine_floor = model_cosine - cosine_margin
-            rmse_margin = 10.0 if name == "algorithm-7" else 6.0
-            rmse_ceiling = model_rmse + rmse_margin
-            if cosine < cosine_floor:
-                errors.append(
-                    f"{name}: spectral cosine {cosine:.4f} is below the folded "
-                    f"model's {model_cosine:.4f} minus {cosine_margin:.2f}"
-                )
-            if log_rmse > rmse_ceiling:
-                errors.append(
-                    f"{name}: log-spectrum RMSE {log_rmse:.2f} dB exceeds the "
-                    f"folded model's {model_rmse:.2f} dB plus {rmse_margin:.0f} dB"
-                )
-            notes.append(
-                f"{name}: spectral_cosine={cosine:.4f} (folded model "
-                f"{model_cosine:.4f}), log_rmse={log_rmse:.2f} dB (model "
-                f"{model_rmse:.2f}), energy_ratio={energy_ratio:.3f}"
-            )
-        else:
+        if implementation_model is None:
             if cosine < 0.70:
                 errors.append(f"{name}: spectral cosine {cosine:.4f} is below 0.70")
             if log_rmse > 12.0:
@@ -531,26 +496,49 @@ def compare_suites(
                 f"{name}: spectral_cosine={cosine:.4f}, log_rmse={log_rmse:.2f} dB, "
                 f"energy_ratio={energy_ratio:.3f}"
             )
+        else:
+            model_cosine, model_rmse, _ = spectral_metrics(
+                audio(implementation_model[name]), audio(candidate[name])
+            )
+            if model_cosine < 0.60:
+                errors.append(
+                    f"{name}: implementation-model cosine {model_cosine:.4f} is below 0.60"
+                )
+            # A nearly identical power spectrum can still have a huge log
+            # error when a sparse harmonic lands exactly on the linear ROM's
+            # zero floor. In that case cosine plus the independent energy gate
+            # carries the audible comparison; otherwise retain the log bound.
+            if model_cosine < 0.95 and model_rmse > 14.0:
+                errors.append(
+                    f"{name}: implementation-model log-spectrum RMSE "
+                    f"{model_rmse:.2f} dB exceeds 14 dB"
+                )
+            notes.append(
+                f"{name}: exact_cosine={cosine:.4f}, exact_log_rmse={log_rmse:.2f} dB, "
+                f"model_cosine={model_cosine:.4f}, model_log_rmse={model_rmse:.2f} dB, "
+                f"energy_ratio={energy_ratio:.3f}"
+            )
         if not 0.20 <= energy_ratio <= 5.0:
             errors.append(f"{name}: RMS energy ratio {energy_ratio:.3f} is outside 0.20-5.0")
 
-    # Long-run feedback stability: spectra tolerate the documented level-7
-    # trajectory chaos, so this class of defect is gated on the splice count
-    # instead — relative to the folded model, which shares the kernel's fold
-    # semantics and scores zero with the history-precise stage.
+    # Long-run feedback stability: spectra tolerate feedback trajectory chaos,
+    # so this class of defect is gated independently on the splice count. The
+    # model's own count (same quantization, exact arithmetic) separates a
+    # quantization-inherent divergence from one specific to the DSP capture.
     for name in STABILITY_SCENARIOS:
-        candidate_splices = splice_count(candidate[name])
+        threshold = SPLICE_THRESHOLDS.get(name, SPLICE_THRESHOLD)
+        candidate_splices = splice_count(candidate[name], threshold)
         bound = SPLICE_MARGIN
         model_note = ""
-        if fold_model is not None:
-            model_splices = splice_count(fold_model[name])
-            bound = model_splices + SPLICE_MARGIN
-            model_note = f" (folded model {model_splices})"
+        if implementation_model is not None:
+            model_note = (
+                f", model_splices={splice_count(implementation_model[name], threshold)}"
+            )
         if candidate_splices > bound:
             errors.append(
                 f"{name}: {candidate_splices} output splices exceed the "
                 f"sustained-feedback bound of {bound}; the pre-fix kernel's "
-                "frame-rate limit cycle scored ~977 here"
+                "former coupled-gain limit cycle scored ~977 here"
             )
         notes.append(f"{name}: splices={candidate_splices}{model_note}")
     return errors, notes
@@ -579,10 +567,10 @@ def main() -> int:
     compare.add_argument("--reference", type=Path, required=True)
     compare.add_argument("--candidate", type=Path, required=True)
     compare.add_argument(
-        "--fold-model",
+        "--implementation-model",
         type=Path,
-        help="folded-model vectors; topology boundaries become relative to "
-        "its per-scenario scores instead of absolute",
+        help="independent exact-feedback codec model used only to bound DSP "
+        "table-quantization residuals; its own exact-reference gate remains separate",
     )
     compare.add_argument("--output", type=Path)
     args = parser.parse_args()
@@ -595,9 +583,13 @@ def main() -> int:
             return 1 if reference_errors else 0
 
         candidate = load_suite(args.candidate)
-        fold_model = load_suite(args.fold_model) if getattr(args, "fold_model", None) else None
+        implementation_model = (
+            load_suite(args.implementation_model)
+            if getattr(args, "implementation_model", None)
+            else None
+        )
         comparison_errors, comparison_notes = compare_suites(
-            reference, candidate, fold_model
+            reference, candidate, implementation_model
         )
         errors = reference_errors + comparison_errors
         notes = reference_notes + comparison_notes

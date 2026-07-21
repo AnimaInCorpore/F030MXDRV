@@ -3,9 +3,9 @@
 
 For every perceptual scenario this harness compiles the exact trace into a
 CAPTURE.SCN consumed by the TTP's capture mode, replays it through the
-protocol-v22 realtime stream inside Hatari, and collects DSP state dumps from
-debugger breakpoints at every 64-frame block entry and at every completed
-1024-frame buffer. A reconstruction pass turns those dumps into the
+protocol-v23 realtime stream inside Hatari, and collects DSP state dumps from
+debugger breakpoints at every 32-frame block entry and at every completed
+512-frame buffer. A reconstruction pass turns those dumps into the
 per-codec-frame TSV rows accepted by tools/compare_ym2151_realtime.py.
 """
 
@@ -26,9 +26,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from profile_dsp import parse_listing, require_symbol  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
-BLOCK_FRAMES = 64
-BUFFER_FRAMES = 1024
-CODEC_NUMERATOR = 1280
+BLOCK_FRAMES = 32
+BUFFER_FRAMES = 512
+CODEC_NUMERATOR = 2560
 CODEC_DENOMINATOR = 1007
 FNV_OFFSET = 2_166_136_261
 FNV_PRIME = 16_777_619
@@ -48,15 +48,17 @@ SCENARIOS: dict[str, tuple[str, int, int | None, int | None]] = {
     },
     "feedback-0": ("perceptual_topology.trace", 4096, 0, 0),
     "feedback-7": ("perceptual_topology.trace", 4096, 0, 7),
-    # Two real CON4 voices sustained at feedback level 7 for forty periods:
-    # the folded kernel's level-7 limit cycle only splices the output after
-    # tens of periods, so this scenario runs five times longer than the rest
-    # and is gated on its splice count in the comparator.
+    # Two real CON4 voices sustained at feedback level 7. This long scenario
+    # fences codec-rate feedback-history stability beyond the short spectra.
     "feedback-7-long": ("bisect_two_bom_fb7.trace", 40960, None, None),
+    # Same two voices and levels, recabled to algorithm 5 (CON5): O1 fans out
+    # to three carriers instead of CON4's two independent pairs, historically
+    # the coupled fold's pathological case. Fences that topology separately.
+    "feedback-7-long-algorithm-5": ("bisect_two_bom_alg5_fb7.trace", 40960, None, None),
 }
 
 # Emulated-time floors for scenarios that outrun the default --run-vbls.
-SCENARIO_RUN_VBLS = {"feedback-7-long": 6000}
+SCENARIO_RUN_VBLS = {"feedback-7-long": 6000, "feedback-7-long-algorithm-5": 6000}
 
 # Symbol-anchored dump ranges shared by both breakpoint scripts. Each entry is
 # (memory space, first symbol, last symbol, extra words past the last symbol).
@@ -73,8 +75,8 @@ STATE_RANGES: tuple[tuple[str, str, str, int], ...] = (
     ("x", "ym_queue_count", "ssi_refill_buffer", 0),
 )
 BUFFER_RANGES: tuple[tuple[str, str, str, int], ...] = (
-    ("x", "ssi_buffer_a", "ssi_buffer_a", 2047),
-    ("x", "ssi_buffer_b", "ssi_buffer_b", 2047),
+    ("x", "ssi_buffer_a", "ssi_buffer_a", 1023),
+    ("x", "ssi_buffer_b", "ssi_buffer_b", 1023),
 )
 STATE_MARKER = 0
 BUFFER_MARKER = 1
@@ -128,7 +130,7 @@ def apply_overrides(
 
 def compile_scenario(events: list[TraceEvent], frames: int) -> bytes:
     if frames % BUFFER_FRAMES:
-        raise ValueError("frame count must be a whole number of 1024-frame buffers")
+        raise ValueError("frame count must be a whole number of 512-frame buffers")
     if len(events) > 32:
         raise ValueError("scenario does not fit the 32-entry FIFO ring")
     blob = struct.pack(">4sLHH", b"SCN1", frames, len(events), 0)
@@ -230,28 +232,36 @@ def run_scenario(
     start_ini = write_debug_scripts(directory, symbols, listing)
 
     environment = dict(os.environ, SDL_VIDEODRIVER="dummy", SDL_AUDIODRIVER="dummy")
-    result = subprocess.run(
-        [
-            hatari,
-            "--machine", "falcon",
-            "--dsp", "emu",
-            "--tos", str(REPO / "third_party/f030dsp3d/tools/tos402.rom"),
-            "--patch-tos", "true",
-            "--fast-boot", "true",
-            "--fast-forward", "true",
-            "--sound", "off",
-            "--confirm-quit", "false",
-            "--run-vbls", str(run_vbls),
-            "--log-file", str(directory / "hatari.log"),
-            "--parse", str(start_ini),
-            str(directory / "F030MXDRV.TOS"),
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        env=environment,
-        cwd=REPO,
-    )
+    command = [
+        hatari,
+        "--machine", "falcon",
+        "--dsp", "emu",
+        "--tos", str(REPO / "third_party/f030dsp3d/tools/tos402.rom"),
+        "--patch-tos", "true",
+        "--fast-boot", "true",
+        "--fast-forward", "true",
+        "--sound", "off",
+        "--confirm-quit", "false",
+        "--run-vbls", str(run_vbls),
+        "--log-file", str(directory / "hatari.log"),
+        "--parse", str(start_ini),
+        str(directory / "F030MXDRV.TOS"),
+    ]
+    # Hatari occasionally exits silently while the preceding headless instance
+    # is releasing its Cocoa process state. One immediate retry makes the
+    # multi-scenario gate deterministic; real debugger or guest failures emit
+    # output and continue to the strict dump-count check below.
+    for _ in range(2):
+        result = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=environment,
+            cwd=REPO,
+        )
+        if result.stdout:
+            break
     (directory / "dumps.txt").write_text(result.stdout, encoding="utf-8")
 
     records = parse_dumps(result.stdout)
@@ -301,7 +311,7 @@ def dsp_state_to_ymfm(state: int) -> int:
 def schedule_events(
     events: list[TraceEvent], frames: int
 ) -> tuple[list[tuple[int, int, int]], list[int]]:
-    """Oracle-identical 1280:1007 schedule: per frame (native, count, hash)."""
+    """Oracle-identical 2560:1007 schedule: per frame (native, count, hash)."""
     schedule: list[tuple[int, int, int]] = []
     natives: list[int] = []
     event_index = 0
@@ -349,7 +359,7 @@ class Boundary:
     pm_scale: int  # decoded signed PM depth for the block PM offset
     lfo_waveform: int  # waveform bits; bit 0 flips the block PM sign
     noise_threshold: int  # (ymfm frequency+1)*1007; zero while disabled
-    noise_counter: int  # 2560-per-frame latch DDA position
+    noise_counter: int  # 5120-per-frame latch DDA position
     noise_snap: int  # LFSR snapshot at the last latch
 
 
@@ -536,7 +546,7 @@ def channel_increments(
         mul = dtmul & 15
         mul2 = mul * 2 if mul else 1
         product = (step * mul2) >> 1
-        inc = (product * PITCH_DDA_SCALE) >> 19
+        inc = (product * PITCH_DDA_SCALE) >> 18
         inc = (inc + pm_offset) & 0xFFFFFF
         if inc & 0x800000:
             inc -= 0x1000000
@@ -751,7 +761,7 @@ def reconstruct_rows(
         # Per-frame noise replays the same Galois steps the block jump or
         # the substitution pass composes; bit 16 is the output bit. With
         # noise enabled the reported state is the bit resampled by the
-        # kernel's 2560-per-frame latch DDA against the decoded period,
+        # kernel's 5120-per-frame latch DDA against the decoded period,
         # seeded from the dumped counter and snapshot at the block entry.
         lfsr = entry.lfsr
         if entry.noise_threshold:
@@ -759,7 +769,7 @@ def reconstruct_rows(
             snap = entry.noise_snap
             for _ in range(offset):
                 lfsr = lfsr_step(lfsr)
-                counter += 2560
+                counter += 5120
                 while counter >= entry.noise_threshold:
                     counter -= entry.noise_threshold
                     snap = lfsr

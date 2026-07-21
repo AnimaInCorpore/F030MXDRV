@@ -12,7 +12,7 @@ constexpr std::array<std::uint8_t, 8> kEncoded = {
     0x70, 0xf1, 0x27, 0x8e, 0x45, 0xab, 0xcd, 0xef,
 };
 constexpr std::array<int, 8> kIndexShift = {-1, -1, -1, -1, 2, 4, 6, 8};
-constexpr std::array<int, 5> kRatePhase = {240, 320, 480, 640, 960};
+constexpr std::array<int, 5> kRatePhase = {480, 640, 960, 1280, 1920};
 constexpr std::array<int, 16> kVolumeQ12 = {
     649, 817, 1029, 1295, 1631, 2053, 2584, 3254,
     4096, 5157, 6492, 8173, 10289, 12953, 16306, 20529,
@@ -56,24 +56,38 @@ private:
 class Voice {
 public:
     Voice(unsigned rate, unsigned volume)
-        : phase_increment_(kRatePhase[rate]), gain_(kVolumeQ12[volume]), current_(stream_.next()) {}
+        : phase_increment_(kRatePhase[rate]), gain_(kVolumeQ12[volume]),
+          current_(stream_.next()), next_(stream_.next()) {
+        scaled_current_ = scale(current_);
+        scaled_next_ = scale(next_);
+    }
 
     std::int32_t mix_frame() {
-        const std::int32_t result = (static_cast<std::int32_t>(current_) * gain_) >> 12;
+        std::int32_t result = scaled_current_;
         phase_ += phase_increment_;
         if (phase_ >= kPhaseDenominator) {
             phase_ -= kPhaseDenominator;
-            current_ = stream_.next();
+            current_ = next_;
+            scaled_current_ = scaled_next_;
+            next_ = stream_.next();
+            scaled_next_ = scale(next_);
         }
         return result;
     }
 
 private:
+    std::int32_t scale(std::int16_t sample) const {
+        return (static_cast<std::int32_t>(sample) * gain_) >> 12;
+    }
+
     Stream stream_;
     int phase_ = 0;
     int phase_increment_;
     int gain_;
     std::int16_t current_;
+    std::int16_t next_;
+    std::int32_t scaled_current_;
+    std::int32_t scaled_next_;
 };
 
 } // namespace
@@ -108,5 +122,11 @@ int main(int argc, char **argv) {
         else
             std::printf("PDX_REF_MIX_PAN_LEFT equ   $%08x\n", value);
     }
+    Voice probe(4, 8);
+    std::int32_t first_nonzero_stereo = 0;
+    while (first_nonzero_stereo == 0)
+        first_nonzero_stereo = probe.mix_frame() * 2;
+    std::printf("PDX_REF_FAST_FIRST_NONZERO equ $%08x\n",
+        static_cast<std::uint32_t>(first_nonzero_stereo));
     return 0;
 }

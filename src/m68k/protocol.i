@@ -1,6 +1,6 @@
 ; Host/DSP protocol. Keep in sync with src/dsp/protocol.inc.
 
-DSP_PROTOCOL_VERSION equ     22
+DSP_PROTOCOL_VERSION equ     23
 
 DSP_CMD_PING        equ     $010000
 DSP_CMD_WRITE_REG   equ     $020000
@@ -29,8 +29,10 @@ DSP_CMD_START_RT_MIXED equ  $180000
 DSP_CMD_REFILL_RT_MIXED equ $190000
 
 DSP_MIX_FRAME_COUNT equ    1007
-DSP_RT_MIX_FRAME_COUNT equ 1024
-DSP_RT_PCM_WORD_COUNT equ   1025
+; Production quality mode runs the Falcon codec at 24.585 kHz. A 512-frame
+; period therefore retains the original 20.83 ms host/DSP refill cadence.
+DSP_RT_MIX_FRAME_COUNT equ 512
+DSP_RT_PCM_WORD_COUNT equ   513
 DSP_RT_EVENT_MAX equ        32
 DSP_RT_BATCH_MAX equ        64
 DSP_RT_PROFILE_FRAMES equ  2048
@@ -43,10 +45,10 @@ DSP_RT4_ALG3_CHECKSUM equ   $184eaf
 DSP_RT4_ALG4_CHECKSUM equ   $19054b
 DSP_RT4_ALG5_CHECKSUM equ   $ffc6a7
 DSP_RT4_ALG6_CHECKSUM equ   $662549
-DSP_RT5_PROFILE_CHECKSUM equ $09c4b8
-DSP_RT_MIX_CHECKSUM equ      $c57f58
+DSP_RT5_PROFILE_CHECKSUM equ $1ce79e
+DSP_RT_MIX_CHECKSUM equ      $98e818
 
-DSP_REPLY_HELLO     equ     $4d5816
+DSP_REPLY_HELLO     equ     $4d5817
 DSP_REPLY_BLOCK_READY equ  $524459
 DSP_REPLY_OK        equ     $000000
 DSP_REPLY_ERROR     equ     $ffffff

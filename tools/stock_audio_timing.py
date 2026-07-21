@@ -3,7 +3,8 @@
 
 Boots the dedicated Xevious player at 16 MHz with the DSP at its normal
 32 MHz, streams Hatari's SSI trace through a FIFO, and verifies that every
-completed 1024-frame production buffer hands off on the next boundary.
+completed 512-frame production buffer hands off on the next boundary while
+the emitted samples stay below the clipping ceiling.
 """
 
 import argparse
@@ -23,13 +24,15 @@ TOS_ROM = os.path.join(
 )
 
 PDX_PATTERN = "GEMDOS: XEVIOUS.PDX"
-SSI_WORD_PATTERN = "Dsp SSI transmit value to crossbar:"
+SSI_WORD_RE = re.compile(
+    r"Dsp SSI transmit value to crossbar: 0x([0-9a-fA-F]+)"
+)
 SWITCH_PATTERN = "Dsp SSI CRB write: 0x005a00"
 REFILL_PATTERN = "Direct Transfer 0x190000"
 HOST_DIRECT_RE = re.compile(r"\(Host->DSP\): Direct Transfer 0x([0-9a-fA-F]+)")
 PROTOCOL_ERROR_PATTERN = "Transfer 0xffffff"
 PROTOCOL_ERROR_CONTEXT = "DSP->Host"
-WORDS_PER_PERIOD = 1024 * 2
+WORDS_PER_PERIOD = 512 * 2
 
 
 class TraceScorer(threading.Thread):
@@ -40,6 +43,7 @@ class TraceScorer(threading.Thread):
         self.fifo_path = fifo_path
         self.production = False
         self.ssi_words = 0
+        self.clipped_words = 0
         self.switch_words = []
         self.refills = 0
         self.awaiting_refill_payload = False
@@ -53,8 +57,13 @@ class TraceScorer(threading.Thread):
                 for line in fifo:
                     if PDX_PATTERN in line:
                         self.production = True
-                    if SSI_WORD_PATTERN in line:
+                    ssi_match = SSI_WORD_RE.search(line)
+                    if ssi_match:
                         self.ssi_words += 1
+                        if self.production:
+                            sample = int(ssi_match.group(1), 16) & 0xffff
+                            if sample in (0x7fff, 0x8000):
+                                self.clipped_words += 1
                     if not self.production:
                         continue
                     if SWITCH_PATTERN in line:
@@ -83,6 +92,8 @@ def main():
                         help="minimum production buffer handoffs (default: 600)")
     parser.add_argument("--min-batch-words", type=int, default=33,
                         help="minimum observed YM burst size (default: 33)")
+    parser.add_argument("--max-clipped-words", type=int, default=64,
+                        help="maximum saturated production SSI words (default: 64)")
     parser.add_argument("--wall-timeout", type=int, default=180,
                         help="Hatari wall-time cap in seconds (default: 180)")
     args = parser.parse_args()
@@ -133,6 +144,11 @@ def main():
             reasons.append("Xevious PDX load was not observed")
         if scorer.protocol_error:
             reasons.append("protocol error: " + scorer.protocol_error)
+        if scorer.clipped_words > args.max_clipped_words:
+            reasons.append(
+                f"{scorer.clipped_words} clipped production SSI words; "
+                f"allow at most {args.max_clipped_words}"
+            )
         if len(scorer.switch_words) < args.min_switches:
             reasons.append(
                 f"only {len(scorer.switch_words)} buffer handoffs; "
@@ -145,7 +161,7 @@ def main():
         ]
         # Hatari can log the cold-start CRB write on the opposite side of the
         # simultaneous first SSI transfer. That affects only the first measured
-        # interval by one trace word; every warm handoff must be exactly 2048.
+        # interval by one trace word; every warm handoff must be exactly 1024.
         if intervals and intervals[0] not in (WORDS_PER_PERIOD,
                                                WORDS_PER_PERIOD + 1):
             reasons.append(f"cold-start interval is {intervals[0]} SSI words")
@@ -178,6 +194,7 @@ def main():
         print(
             "Stock Falcon SSI timing: OK "
             f"({len(scorer.switch_words)} handoffs, {scorer.refills} refills, "
+            f"{scorer.clipped_words} clipped SSI words, "
             f"largest YM burst {largest_batch} words, "
             f"cold interval {first}, {len(intervals) - 1} steady intervals "
             f"at {WORDS_PER_PERIOD} words)"

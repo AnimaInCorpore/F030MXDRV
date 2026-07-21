@@ -14,7 +14,7 @@ PLAYER_SOUND_STEREO16  equ     1
 PLAYER_SOUND_DSP_XMIT  equ     1
 PLAYER_SOUND_DAC       equ     8
 PLAYER_SOUND_CLK25M    equ     0
-PLAYER_SOUND_CLK50K    equ     1
+PLAYER_SOUND_CLK25K    equ     3
 PLAYER_SOUND_NO_SHAKE  equ     1
 PLAYER_SOUND_LTATTEN   equ     0
 PLAYER_SOUND_RTATTEN   equ     1
@@ -342,7 +342,7 @@ player_files_loaded:
         Setmode #PLAYER_SOUND_STEREO16
         Settracks #0,#0
         Dsptristate #1,#0
-        Devconnect #PLAYER_SOUND_DSP_XMIT,#PLAYER_SOUND_DAC,#PLAYER_SOUND_CLK25M,#PLAYER_SOUND_CLK50K,#PLAYER_SOUND_NO_SHAKE
+        Devconnect #PLAYER_SOUND_DSP_XMIT,#PLAYER_SOUND_DAC,#PLAYER_SOUND_CLK25M,#PLAYER_SOUND_CLK25K,#PLAYER_SOUND_NO_SHAKE
 
         moveq   #4,d0
         bsr     mxdrv_call
@@ -375,8 +375,9 @@ player_start_audio:
         bsr     mxdrv_ym_batch_enable
 
 player_loop:
-        ; The blocking realtime refill is the playback cadence. Waiting for a
-        ; VBL here would add 16.7 ms to every 20.8 ms audio period.
+        ; The blocking realtime refill is the playback cadence. At 24.585 kHz,
+        ; 512 frames retain the original 20.8 ms period; a VBL wait here would
+        ; still miss the following buffer boundary.
         bsr     mxdrv_mdx_clock_pump
         tst.w   d0
         beq     player_finished

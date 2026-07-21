@@ -5,9 +5,9 @@
 
 ; Codec-vector capture mode. When CAPTURE.SCN exists beside the TTP, the
 ; no-argument launch replays that compiled scenario through the production
-; protocol-v22 realtime transport instead of the conformance suite, so an
+; protocol-v23 realtime transport instead of the conformance suite, so an
 ; external harness can observe block-boundary DSP state. The file is
-; big-endian: 'SCN1', frame count (a multiple of the 1024-frame buffer),
+; big-endian: 'SCN1', frame count (a multiple of the 512-frame buffer),
 ; an event count of at most the 32 FIFO slots, then time.w/reg.b/data.b
 ; events in nondecreasing order. Every event is queued before the stream
 ; starts; the validated scenarios stay inside one FIFO ring.
@@ -20,7 +20,7 @@ CAPTURE_SOUND_STEREO16 equ     1
 CAPTURE_SOUND_DSP_XMIT equ     1
 CAPTURE_SOUND_DAC      equ     8
 CAPTURE_SOUND_CLK25M   equ     0
-CAPTURE_SOUND_CLK50K   equ     1
+CAPTURE_SOUND_CLK25K   equ     3
 CAPTURE_SOUND_NO_SHAKE equ     1
 
         text
@@ -48,7 +48,7 @@ capture_try_run:
         move.l  d5,d0
         divu    #DSP_RT_MIX_FRAME_COUNT,d0
         swap    d0
-        tst.w   d0                     ; whole 1024-frame buffers only
+        tst.w   d0                     ; whole 512-frame buffers only
         bne     capture_failed
         moveq   #0,d4
         move.w  (a4)+,d4               ; event count
@@ -69,7 +69,7 @@ capture_try_run:
         Setmode #CAPTURE_SOUND_STEREO16
         Settracks #0,#0
         Dsptristate #1,#0
-        Devconnect #CAPTURE_SOUND_DSP_XMIT,#CAPTURE_SOUND_DAC,#CAPTURE_SOUND_CLK25M,#CAPTURE_SOUND_CLK50K,#CAPTURE_SOUND_NO_SHAKE
+        Devconnect #CAPTURE_SOUND_DSP_XMIT,#CAPTURE_SOUND_DAC,#CAPTURE_SOUND_CLK25M,#CAPTURE_SOUND_CLK25K,#CAPTURE_SOUND_NO_SHAKE
 
         ; Native time zero and a clean register image for every scenario.
         bsr     mxdrv_reset

@@ -8,15 +8,16 @@ X68000's canonical MDX/PDX music driver. The Falcon 68030 runs the
 MXDRV-compatible driver and timing, the Falcon DSP56001 emulates the X68000's
 Yamaha YM2151 (OPM), and the Falcon crossbar/codec receives the stereo result.
 
-To our knowledge this is a world first: a register- and sample-exact YM2151
-running on the Falcon's DSP56001, verified against MAME's ymfm down to
-individual stereo samples — surrounded by the complete MXDRV call-table, a
+The DSP contains a register- and sample-exact YM2151 conformance core, verified
+against MAME's ymfm down to individual stereo samples. Playback uses a measured
+24.585 kHz quality kernel that preserves musical clocks and register semantics
+within the stock Falcon's realtime budget — surrounded by the complete MXDRV call-table, a
 complete bounded MDX executor, X68000-exact MSM6258 ADPCM (PDX) decoding, and
 interrupt-fed DAC transport, all on stock Falcon hardware.
 
 ## Highlights
 
-- **Bit-exact OPM synthesis on the DSP56001.** Phase accumulation, ADSR
+- **Bit-exact OPM conformance on the DSP56001.** Phase accumulation, ADSR
   envelopes, logarithmic sine/power lookup, operator feedback, all eight
   algorithms, panning, and YM3012 output rounding — every table and expected
   sample generated mechanically from the vendored ymfm implementation.
@@ -24,12 +25,12 @@ interrupt-fed DAC transport, all on stock Falcon hardware.
   depth and sensitivity, operator AM gating, the channel-7 noise generator,
   Timer A/B status and reload semantics, CSM keying, and the 64-clock busy
   flag.
-- **Real time on the Falcon's 32 MHz DSP.** A perceptual codec-rate kernel
+- **Real time on the Falcon's 32 MHz DSP.** A 24.585 kHz quality kernel
   renders all eight FM channels — decoded envelope curvature, per-operator
   DT1/DT2, true block AM/PM, channel-7 noise substitution, timers, mid-block
-  event splitting, and planar PDX mixing — in **326.17 of the 326.27
-  instruction cycles** available per 49.17 kHz frame, with exact write
-  ordering and 0.009 ppm pitch drift.
+  event splitting, independent feedback-history depth, and planar PDX mixing —
+  in **364.14 of the 652.53 instruction cycles** available per frame, with
+  exact write ordering and effectively drift-free musical pitch.
 - **A real MXDRV, not a shim.** The original 32-entry call-table shape, owned
   MDX/PDX buffers, an `OPMBuf`-compatible mirror, a DSP-backed `WriteOPM`,
   and a bounded standard-file MDX executor covering the full command set:
@@ -41,10 +42,12 @@ interrupt-fed DAC transport, all on stock Falcon hardware.
 - **X68000-exact ADPCM.** Validated 96-entry PDX sample lookup and eight
   streaming decoder voices matching the MSM6258 predictor, step, clamping,
   and nibble order, with all five playback rates, 16 volume steps, hardware
-  pan, and saturating stereo mixing at the Falcon codec cadence.
+  pan, saturating stereo mixing, and a DSP-side two-tap anti-image filter. The legacy
+  pre-E8 IOCS ADPCM path retains its original fixed gain instead of applying
+  PCM8's volume table.
 - **Continuous DAC transport.** The DSP SSI transmit interrupt feeds 16-bit
-  stereo at 49.17 kHz into the Falcon DAC. Production playback is double-
-  buffered in 1024-frame periods, with sequencer writes batched into the next
+  stereo at 24.585 kHz into the Falcon DAC. Production playback is double-
+  buffered in 512-frame periods, with sequencer writes batched into the next
   refill and each prepared buffer switched only at a complete boundary.
 - **Verified, measured, reproducible.** A native ymfm oracle, golden oracle
   traces, an 18-scenario perceptual capture gate replayed through the
@@ -57,23 +60,14 @@ The driver is player-complete under emulation. What remains before a release
 is the real-hardware pass: soak testing on a physical Falcon, the MXDRV
 option-call semantics, and packaging.
 
-- **The perceptual capture gate passes all 18 scenarios.** Pitch holds
-  0.009 ppm drift with at most 7 counts of phase error, DT1/DT2 detune lands
-  within 1.9–5.8 ppm, the complete LFO scenario scores 0.9973 spectral
-  cosine, envelope transitions land within 9 frames (mid-block key-ons
-  attack at their landing frame via segmented rendering), channel-7 noise is
-  decoded and substituted, and all eight algorithms plus feedback pass under
-  the two-tier gate of
+- **The perceptual gate covers all 19 scenarios.** Its independent 24.585 kHz
+  projection retains exact pitch/control timing, all eight algorithms, both
+  feedback extremes, LFO, envelopes, detune, noise, and sustained-feedback
+  stability. The realtime DSP now computes audible serial modulation and
+  feedback history as separate products, eliminating the former coupled-gain
+  fold for feedback levels 1–7. Sustained feedback level 7 is fenced on two
+  independent topologies (algorithms 4 and 5). See
   [`docs/perceptual-compatibility.md`](docs/perceptual-compatibility.md).
-  The documented compromises — one shared feedback depth with per-level
-  folding, and two measurement-bounded margins where maximal-depth
-  quantization chaos makes trajectories irreproducible — are recorded there
-  with their bounds. Feedback level 7 dispatches to history-precise stage
-  twins that land the self-feedback path exactly on ymfm's depth: the
-  coupled fold's doubled loop gain otherwise sustains a slow frame-rate
-  limit cycle that splices sustained mixes after tens of periods, invisible
-  to the short gate scenarios but eliminated (1,173 splices/s to zero on the
-  40-period repro) by the decoupled stage.
 - **Every corpus song plays end to end.** `make endurance-batch` plays all
   17 real MDX/PDX songs in `release/` through the argument-less autoplay
   path under Hatari — sustained refills as the only cadence, live ADPCM
@@ -82,7 +76,8 @@ option-call semantics, and packaging.
 - **Stock-clock refill timing is gated.** `make stock-audio` runs the dedicated
   Xevious player with a 16 MHz 68030 and normal 32 MHz DSP, then verifies from
   Hatari's raw SSI trace that every steady A/B handoff occurs after exactly
-  2048 stereo words (one 1024-frame, 20.83 ms period).
+  1024 stereo words (one 512-frame, 20.83 ms period) and rejects excessive
+  saturated output words.
 - The sample-exact renderer (12,024.34 instruction cycles per native
   62.5 kHz sample against the 256.68-cycle budget — 46.85x real time) is
   retained as the conformance reference that anchors the perceptual kernel.
@@ -91,7 +86,7 @@ option-call semantics, and packaging.
 
 - The 68030 executable embeds everything the DSP needs: packed immutable
   ymfm tables, plus the complete sparse DSP program behind a 111-word
-  `Dsp_ExecBoot` first stage that receives 6,584 initialized P-memory words
+  `Dsp_ExecBoot` first stage that receives 7,862 initialized P-memory words
   through the host port — removing the 8 KiB converted-LOD ceiling.
 - The DSP kernel caches all 32 unmodulated phase increments across register
   writes in internal Y RAM and advances them with parallel X/Y fetches.
@@ -100,8 +95,8 @@ option-call semantics, and packaging.
   Terminal release envelopes and fully silent channels bypass work that
   cannot affect chip state or output; hot scalar state lives in
   short-addressable internal X RAM.
-- Protocol v22 retains the exact 1007-frame conformance transport and adds a
-  1024-frame production transport aligned to sixteen 64-frame synthesis
+- Protocol v23 retains the exact 1007-frame conformance transport and adds a
+  512-frame production transport aligned to sixteen 32-frame synthesis
   blocks. The 68030 mixes PDX voice-major into one mono block, uploads it once
   with the global PCM8 pan and coalesced ordered YM writes, then prepares the
   following period while the DSP renders. The DSP expands PDX to planar

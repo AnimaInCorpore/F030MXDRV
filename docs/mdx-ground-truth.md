@@ -14,6 +14,9 @@ unsigned relative track words. All offsets are relative to the sequence base.
 The first track offset encodes the table width: `(offset - 2) / 2` is 9 or 16.
 Channels 0-7 are YM2151 FM tracks; channel 8 is the legacy PDX track, and
 channels 8-15 map to eight PDX/PCM voices in a 16-track file.
+The `$e8` command is the runtime backend switch: before it executes, track 8
+uses the original single IOCS ADPCM-channel semantics; afterward the PCM8
+volume and multi-voice semantics apply.
 
 The port scans the variable header and resolves the voice and active track
 offsets against the owned MDX copy before playback. A track fetch or operand
@@ -46,14 +49,15 @@ The PCM defaults recovered from channel initialization are rate code 4
 | `fe rr dd` | raw OPM write | sends the exact register/data pair to the DSP |
 | `fd vv` | voice | finds and loads a 26-byte FM voice body, or selects a PCM bank |
 | `fc pp` | pan | updates FM register `$20+channel`, or the PCM start parameters |
-| `fb vv` | volume | sets indexed FM/PCM volume; FM also accepts raw `$80`-`$ff` attenuation |
+| `fb vv` | volume | sets indexed FM/PCM volume; legacy ADPCM caches but does not apply it, and FM also accepts raw `$80`-`$ff` attenuation |
 | `fa` / `f9` | volume down/up | steps indexed or raw volume with the original endpoint clamps |
 | `f8 ll` | note length | updates the key-gate scale |
-| `f7` | legato | consumed; full legato state is not implemented yet |
+| `f7` | legato | suppresses the current gate key-off so the following note slurs without retriggering held slots |
 | `f6 cc ww` | repeat start | copies count `cc` into mutable work byte `ww` |
 | `f5 oo oo` | repeat end | decrements target-minus-one and takes the signed branch while nonzero |
 | `f4 oo oo` | repeat escape | follows a future F5 displacement and skips it when the counter is one |
-| `f1 00` / `f1 oo oo` | performance end | retires the standalone track; loop targets are pending |
+| `f1 00` / `f1 oo oo` | performance end | retires the standalone track or jumps to the bounded loop target and increments the loop count |
+| `e8` | enable PCM8 | switches subsequent PDX playback from fixed-gain legacy ADPCM to PCM8 gain/multi-voice semantics |
 
 An FM FD record is one ID byte followed by algorithm/feedback, PMS/AMS, four
 DT1/MUL bytes, four TL bytes, and sixteen envelope/DT2 bytes. `LoadVoice` maps
@@ -65,8 +69,11 @@ modulator's base TL, then rewrites carrier TL as base plus MXDRV's indexed
 attenuation table. FM volume bytes `$80`-`$ff` instead encode attenuation
 0-127 directly. Both forms saturate at YM TL `$7f`; FA/F9 preserve the
 different byte directions and endpoint behavior of indexed versus raw volume.
-PCM FB/FA/F9 changes update an already-running decoder voice without resetting
-its ADPCM or rate-conversion state.
+After E8, PCM FB/FA/F9 changes update an already-running decoder voice without
+resetting its ADPCM or rate-conversion state. Before E8, MXDRV routes track 8
+through IOCS ADPCM output, whose call has no volume operand. The port therefore
+keeps the parsed volume byte but renders that legacy path at PCM8 code 8
+(unity), including during fades; the fade's terminal stop still silences it.
 
 F6-F5-F4 control flow preserves MXDRV's unusual in-stream mutable counter. F5
 uses a signed displacement relative to the byte after its operands; the work
@@ -75,10 +82,9 @@ displacement to the future F5 operands, then follows F5's signed displacement
 to inspect the same counter. Both the counter and every control target are
 checked against the owned MDX copy before use.
 
-Detune, portamento, synchronization, modulation, OPM LFO, fade, PCM8-enable,
-and full legato remain to be ported. Encountering
-one of those commands currently retires only the affected track and sets the
-parser error byte.
+The remaining unsupported E7 host-extension operand forms retire only the
+affected track and set the parser error byte; the standard sequencing,
+modulation, PCM8-enable, loop, and fade commands are implemented.
 
 ## Timer service seam
 
@@ -107,10 +113,13 @@ is deliberately deferred out of interrupt context.
 
 ## Integration fixture
 
-The Hatari harness copies a standard raw 16-track MDX through call `$02`
+The Hatari harness first copies a nine-track legacy MDX whose PCM track issues
+`fb $0f` without E8 and proves that voice 0 starts at fixed unity gain. It then
+copies a standard raw 16-track MDX through call `$02`
 and starts it through call `$04`. Its FM track selects a standard voice,
-executes FE/FF, starts note 0, and keys it off one tick later. PCM track 8
-starts PDX entry 0 for two ticks. The test checks the OPM mirror, MDX active
+executes FE/FF/E8, starts note 0, and keys it off one tick later. PCM track 8
+starts PDX entry 0 for two ticks at volume 15, proving that E8 enables the
+PCM8 gain table. The test checks the OPM mirror, MDX active
 mask, PDX active mask, stopped playback flags, and exact Timer-B periods. A
 carrier-volume fixture checks algorithm-0 modulator TL preservation, normal
 indexed attenuation, raw `$80` stepping through FA/F9, and `$ff` saturation.

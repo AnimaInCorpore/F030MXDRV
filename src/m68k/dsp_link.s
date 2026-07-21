@@ -63,10 +63,10 @@ dsp_refill_mixed_audio:
         move.w  #DSP_MIX_FRAME_COUNT-1,d4
         bra     dsp_render_mixed_audio
 
-; Start/refill the codec-rate 64-frame-block renderer. Its 1024-frame period
+; Start/refill the 24.585 kHz, 32-frame-block renderer. Its 512-frame period
 ; is exactly sixteen synthesis blocks. The production payload is one event
 ; count, the ordered packed writes accumulated by the sequencer pump, then a
-; mono PCM pan header and 1024 samples.
+; mono PCM pan header and 512 samples.
 dsp_start_realtime_audio:
         move.l  d5,-(sp)
         move.l  #DSP_CMD_START_RT_MIXED,d0

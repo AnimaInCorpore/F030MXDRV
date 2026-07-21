@@ -17,10 +17,6 @@ GENERATED_BUILD := build/generated
 REFERENCE_BUILD := build/reference
 YM2151_PERCEPTUAL_DIR := $(REFERENCE_BUILD)/ym2151-perceptual
 YM2151_PERCEPTUAL_MODEL_DIR := $(REFERENCE_BUILD)/ym2151-perceptual-model
-YM2151_PERCEPTUAL_FOLDED_DIR := $(REFERENCE_BUILD)/ym2151-perceptual-model-folded
-# The kernel's feedback fold: half fold with the per-algorithm bias table
-# rt5_fold_bias in src/dsp/ym2151.asm (digits are bias plus five).
-YM2151_FOLD_BIAS := 56655525
 YM2151_PERCEPTUAL_REPORT := $(YM2151_PERCEPTUAL_DIR)/reference-report.txt
 YM2151_PERCEPTUAL_MODEL_REPORT := $(YM2151_PERCEPTUAL_MODEL_DIR)/comparison-report.txt
 YM2151_PERCEPTUAL_STAMP := $(YM2151_PERCEPTUAL_DIR)/.validated
@@ -148,22 +144,15 @@ $(YM2151_PERCEPTUAL_STAMP): $(YM2151_ORACLE) \
 		tests/traces/perceptual_timing.trace \
 		tests/traces/perceptual_envelope.trace \
 		tests/traces/perceptual_lfo.trace \
-		tests/traces/bisect_two_bom_fb7.trace
-	@rm -rf $(YM2151_PERCEPTUAL_DIR) $(YM2151_PERCEPTUAL_MODEL_DIR) \
-		$(YM2151_PERCEPTUAL_FOLDED_DIR)
-	@mkdir -p $(YM2151_PERCEPTUAL_DIR) $(YM2151_PERCEPTUAL_MODEL_DIR) \
-		$(YM2151_PERCEPTUAL_FOLDED_DIR)
+		tests/traces/bisect_two_bom_fb7.trace \
+		tests/traces/bisect_two_bom_alg5_fb7.trace
+	@rm -rf $(YM2151_PERCEPTUAL_DIR) $(YM2151_PERCEPTUAL_MODEL_DIR)
+	@mkdir -p $(YM2151_PERCEPTUAL_DIR) $(YM2151_PERCEPTUAL_MODEL_DIR)
 	@for mode_and_dir in \
 		"--codec-vectors:$(YM2151_PERCEPTUAL_DIR)" \
-		"--perceptual-vectors:$(YM2151_PERCEPTUAL_MODEL_DIR)" \
-		"--perceptual-vectors:$(YM2151_PERCEPTUAL_FOLDED_DIR):folded"; do \
+		"--perceptual-vectors:$(YM2151_PERCEPTUAL_MODEL_DIR)"; do \
 		mode=$${mode_and_dir%%:*}; rest=$${mode_and_dir#*:}; \
 		output_dir=$${rest%%:*}; \
-		if [ "$${rest#*:}" = "folded" ]; then \
-			export YM_MODEL_FOLD_MODE=3 YM_MODEL_FOLD_BIAS=$(YM2151_FOLD_BIAS); \
-		else \
-			unset YM_MODEL_FOLD_MODE YM_MODEL_FOLD_BIAS; \
-		fi; \
 		$(YM2151_ORACLE) $$mode tests/traces/perceptual_pitch.trace 8192 \
 			> $$output_dir/pitch.tsv || exit 1; \
 		$(YM2151_ORACLE) $$mode tests/traces/perceptual_detune.trace 8192 \
@@ -190,6 +179,8 @@ $(YM2151_PERCEPTUAL_STAMP): $(YM2151_ORACLE) \
 		done; \
 		$(YM2151_ORACLE) $$mode tests/traces/bisect_two_bom_fb7.trace 40960 \
 			> $$output_dir/feedback-7-long.tsv || exit 1; \
+		$(YM2151_ORACLE) $$mode tests/traces/bisect_two_bom_alg5_fb7.trace 40960 \
+			> $$output_dir/feedback-7-long-algorithm-5.tsv || exit 1; \
 	done
 	python3 tools/compare_ym2151_realtime.py validate \
 		--reference $(YM2151_PERCEPTUAL_DIR) \
@@ -282,7 +273,7 @@ check: all reference
 	@rg -q "^DSP_STAGE2_PROGRAM_WORDS equ " $(DSP_STAGE2_IMAGE)
 	@file $(RELEASE_DIR)/f030mxdrv.tos $(RELEASE_DIR)/ym2151.lod
 
-# Replay every perceptual scenario through the protocol-v22 realtime stream
+# Replay every perceptual scenario through the protocol-v23 realtime stream
 # in Hatari, reconstruct per-frame vectors from the block-boundary dumps, and
 # feed them through the exact-to-perceptual comparator.
 capture-realtime: check
@@ -301,7 +292,7 @@ compare-realtime: $(YM2151_PERCEPTUAL_STAMP)
 	python3 tools/compare_ym2151_realtime.py compare \
 		--reference $(YM2151_PERCEPTUAL_DIR) \
 		--candidate "$(REALTIME_CANDIDATE_DIR)" \
-		--fold-model $(YM2151_PERCEPTUAL_FOLDED_DIR) \
+		--implementation-model $(YM2151_PERCEPTUAL_MODEL_DIR) \
 		--output $(REFERENCE_BUILD)/ym2151-realtime-comparison.txt
 
 smoke: check
@@ -322,7 +313,7 @@ smoke: check
 	@rg -q "XBIOS 0x6E Dsp_ExecBoot" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x4d584c" build/hatari-smoke.trace
 	@rg -q "Transfer 0x4c4f41" build/hatari-smoke.trace
-	@rg -q "Transfer 0x4d5816" build/hatari-smoke.trace
+	@rg -q "Transfer 0x4d5817" build/hatari-smoke.trace
 	@rg -q "Transfer 0x01dc19" build/hatari-smoke.trace
 	@rg -q "Transfer 0x524459" build/hatari-smoke.trace
 	@rg -q "GEMDOS 0x42 Fseek\\(0, [0-9]+, 2\\)" build/hatari-smoke.trace
@@ -379,11 +370,11 @@ smoke: check
 	@rg -q "Direct Transfer 0x01c5de" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x01c6c0" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x170000" build/hatari-smoke.trace
-	@rg -q "Transfer 0x09c4b8" build/hatari-smoke.trace
+	@rg -q "Transfer 0x1ce79e" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x01c6de" build/hatari-smoke.trace
 	@rg -q "XBIOS 0x80 Locksnd" build/hatari-smoke.trace
 	@rg -q "XBIOS 0x89 Dsptristate\\(0x1, 0x0\\)" build/hatari-smoke.trace
-	@rg -q "XBIOS 0x8B Devconnect\\(1, 0x8, 0, 1, 1\\)" build/hatari-smoke.trace
+	@rg -q "XBIOS 0x8B Devconnect\\(1, 0x8, 0, 3, 1\\)" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x110000" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x120000" build/hatari-smoke.trace
 	@rg -q "Transfer 0x0003c0" build/hatari-smoke.trace
@@ -407,8 +398,9 @@ smoke: check
 	@rg -q "Direct Transfer 0x130000" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x0e0a00" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x0e0a40" build/hatari-smoke.trace
-	@rg -q "Transfer 0x000f00" build/hatari-smoke.trace
-	@rg -q "Transfer 0x000bcd" build/hatari-smoke.trace
+	@rg -q "Transfer 0x000f40" build/hatari-smoke.trace
+	@rg -q "Transfer 0x000600" build/hatari-smoke.trace
+	@rg -q "Transfer 0x98e818" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x01db10" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x0c0000" build/hatari-smoke.trace
 	@rg -q "XBIOS 0x89 Dsptristate\\(0x0, 0x0\\)" build/hatari-smoke.trace
@@ -416,9 +408,10 @@ smoke: check
 	@echo "Hatari MXDRV MDX/PDX + DSP YM2151 interrupt-buffered smoke test: OK"
 
 # Exercise the dedicated player at the stock 16 MHz 68030 clock and prove from
-# the SSI trace that every prepared 1024-frame block replaces the active block
-# at the next 20.83 ms stereo boundary. The 600-handoff floor runs past both
-# former stalls and requires a >32-write burst to exercise the expanded stage.
+# the SSI trace that every prepared 512-frame block replaces the active block
+# at the next 20.83 ms stereo boundary without sustained output clipping. The
+# 600-handoff floor runs past both former stalls and requires a >32-write burst
+# to exercise the expanded stage.
 stock-audio: xevious
 	@python3 tools/stock_audio_timing.py
 
@@ -688,7 +681,7 @@ profile-dsp-rt5: check tools/profile_dsp.py
 		--profile $(DSP_RT5_PROFILE_DIR)/profile.txt \
 		--output $(DSP_RT5_PROFILE_DIR)/report.txt \
 		--samples $(DSP_RT5_PROFILE_FRAMES) \
-		--sample-rate 49169.921875 \
+		--sample-rate 24584.9609375 \
 		--unit-label "codec frame" \
 		--title "DSP56001 live-SSI eight-channel decoded ALG/PAN/AM/PM/TL profile"
 

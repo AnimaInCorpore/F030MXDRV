@@ -2,14 +2,14 @@
 """Generate the realtime block envelope tables from the vendored ymfm source.
 
 The realtime block engine advances every envelope-active operator once per
-64-frame block with one affine step, level' = a*level + b, in 10.13 fixed
+32-frame quality block with one affine step, level' = a*level + b, in 10.13 fixed
 point; the capture harness derives mid-block levels analytically from the
 same recurrence. The per-rate constants compose the exact per-tick YM2151
 recurrence over the average number of envelope ticks in one block:
 
-- one 64-frame block spans 64*1280/1007 native samples and the envelope
+- one 32-frame block spans 32*2560/1007 native samples and the envelope
   divider ticks every third native sample, so a block averages
-  64*1280/1007/3 = 27.117... ticks;
+  32*2560/1007/3 = 27.117... ticks;
 - rates with shift = rate>>2 below 11 qualify only every 2^(11-shift) ticks;
 - attack composes the exact per-tick affine env' = env*(1-inc/16) - inc/16
   over the rate's eight-entry increment pattern, then takes the fractional
@@ -29,8 +29,8 @@ import sys
 from pathlib import Path
 
 FRAC = 13
-BLOCK_FRAMES = 64
-BLOCK_TICKS = BLOCK_FRAMES * 1280 / 1007 / 3
+BLOCK_FRAMES = 32
+BLOCK_TICKS = BLOCK_FRAMES * 2560 / 1007 / 3
 UNITY = (1 << 23) - 1
 
 
