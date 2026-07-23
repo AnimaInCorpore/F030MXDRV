@@ -90,10 +90,11 @@ def run_song(mdx_name, pdx_name, keep_dir):
     os.makedirs(work)
     shutil.copy(os.path.join(RELEASE, "f030mxdrv.tos"), work)
     shutil.copy(os.path.join(RELEASE, mdx_name), work)
+    # Leave the PDX off the command tail so this gate exercises the player's
+    # MDX-header resolver. The file is still copied beside the MDX.
     tokens = mdx_name
     if pdx_name:
         shutil.copy(os.path.join(RELEASE, pdx_name), work)
-        tokens += " " + pdx_name
     with open(os.path.join(work, "AUTOPLAY.INF"), "w", newline="") as inf:
         inf.write(tokens + "\r\n")
 

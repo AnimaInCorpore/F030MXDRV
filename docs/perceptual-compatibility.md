@@ -211,5 +211,6 @@ every captured topology even when the implementation tier is decisive.
 The phase, event, and accumulator boundaries are intentionally stricter than
 the timbre boundary: long-term pitch and control timing are chip semantics,
 whereas the 256-step sine ROM, codec-rate feedback, and YM3012 approximation
-are the selected perceptual compromise. The comparator does not replace the
-exact command-clocked conformance suite or the later real-MDX/PDX corpus.
+are the selected perceptual compromise. The comparator complements the exact
+command-clocked conformance suite and the separate real-MDX/PDX endurance
+corpus; it does not replace either one.

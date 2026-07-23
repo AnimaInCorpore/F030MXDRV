@@ -1,4 +1,6 @@
         include "protocol.i"
+        include "xbios.i"
+        include "verbose.i"
 
         global  mxdrv_pdx_lookup
         global  mxdrv_pdx_start
@@ -275,6 +277,7 @@ mxdrv_pdx_precache:
         clr.l   pdx_decoded_capacity
         clr.l   pdx_decoded_cache_ptr
 
+        VBV     vb_txt_precache,mxdrv_pdx_size
         move.l  mxdrv_pdx_size,d0
         beq     pdx_precache_clear_index
         move.l  d0,d1
@@ -298,6 +301,15 @@ mxdrv_pdx_precache:
         move.l  mxdrv_pdx_size,d0
         add.l   d0,d0
         move.l  d0,pdx_decoded_capacity  ; capacity in samples (words)
+
+        ifd     VERBOSE_BOOT
+        VB      vb_txt_cache_ptr
+        move.l  pdx_decoded_cache_ptr,d0
+        VBH
+        VB      vb_txt_cache_cap
+        move.l  pdx_decoded_capacity,d0
+        VBH
+        endc
 
         movea.l pdx_decoded_cache_ptr,a5
         moveq   #0,d6
@@ -342,6 +354,7 @@ pdx_precache_next:
 ; No bank loaded or the allocation failed: every entry decodes to nothing,
 ; which the realtime path already renders as silence.
 pdx_precache_clear_index:
+        VB      vb_txt_nocache
         lea     pdx_decoded_offset,a0
         moveq   #0,d0
         move.w  #PDX_SAMPLE_COUNT*2-1,d1
@@ -791,6 +804,14 @@ pdx_mix_source_tail:
 pdx_mix_source_done:
         moveq   #0,d1
         rts
+
+        ifd     VERBOSE_BOOT
+vb_txt_precache:  dc.b  'PDX bank bytes   ',0
+vb_txt_cache_ptr: dc.b  'cache at         ',0
+vb_txt_cache_cap: dc.b  'cache samples    ',0
+vb_txt_nocache:   dc.b  'NO CACHE - decoding live',13,10,0
+        even
+        endc
 
 ; floor(16 * 1.1^step), step 0-48, from MAME's OKIM6258 decoder.
 pdx_adpcm_steps:

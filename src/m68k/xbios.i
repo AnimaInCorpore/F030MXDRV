@@ -105,6 +105,22 @@
         addq.l  #6,sp
         endm
 
+        macro   Setbuffer region,begin,end
+        move.l  \3,-(sp)
+        move.l  \2,-(sp)
+        move.w  \1,-(sp)
+        move.w  #131,-(sp)
+        trap    #14
+        lea     12(sp),sp
+        endm
+
+        macro   Buffoper mode
+        move.w  \1,-(sp)
+        move.w  #136,-(sp)
+        trap    #14
+        addq.l  #4,sp
+        endm
+
         macro   Dsptristate transmit,receive
         move.w  \2,-(sp)
         move.w  \1,-(sp)
@@ -112,6 +128,7 @@
         trap    #14
         addq.l  #6,sp
         endm
+
 
         macro   Devconnect source,destinations,clock,prescale,protocol
         move.w  \5,-(sp)

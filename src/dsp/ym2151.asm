@@ -861,7 +861,12 @@ rt5_env_transition_reload:
 
 start:
         movep   #1,x:m_pbc              ; enable the Falcon host port
+        movep   #$1f8,x:m_pcc           ; Port C pins to SSI function; they
+                                        ; reset to GPIO, leaving the slave
+                                        ; SSI clockless on real hardware
         movep   #$3000,x:m_ipr          ; SSI interrupt priority level 2
+        andi    #$fc,mr                 ; reset leaves I1:I0=11 masking IPL 2;
+                                        ; the SSI ISR needs the mask lowered
         move    #>-1,m0                 ; linear addressing for ym_regdata
 
         jsr     ym_initialize_slot_offsets

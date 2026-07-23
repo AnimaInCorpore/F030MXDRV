@@ -50,25 +50,36 @@ interrupt-fed DAC transport, all on stock Falcon hardware.
   buffered in 512-frame periods, with sequencer writes batched into the next
   refill and each prepared buffer switched only at a complete boundary.
 - **Verified, measured, reproducible.** A native ymfm oracle, golden oracle
-  traces, an 18-scenario perceptual capture gate replayed through the
+  traces, a 19-scenario perceptual capture gate replayed through the
   production player in Hatari, a corpus-wide end-to-end endurance gate, and
-  eleven DSP cycle profiles gate every change.
+  eleven DSP cycle profiles gate the implementation.
 
-## Status
+## Current state
 
-The driver is player-complete under emulation. What remains before a release
-is the real-hardware pass: soak testing on a physical Falcon, the MXDRV
-option-call semantics, and packaging.
+The driver is functionally complete under Hatari. The standard MDX executor,
+PDX decoder/mixer, codec-rate DSP renderer, interrupt-fed SSI transport, TTP
+player, automatic MDX-header PDX lookup, perceptual capture gate, and real-song
+endurance gates are implemented and exercised in the repository.
 
-- **The perceptual gate covers all 19 scenarios.** Its independent 24.585 kHz
-  projection retains exact pitch/control timing, all eight algorithms, both
+The remaining release work is outside the emulated functional path:
+
+- Physical Falcon validation of the SSI clock/DMA arrangement, underrun
+  behavior, buffer handoff timing, and long-duration playback.
+- Completion of the remaining public MXDRV option-call and edge-case error
+  semantics.
+- Release packaging and documentation for the tested hardware configuration.
+
+The current emulation gates include:
+
+- **Nineteen perceptual scenarios.** The independent 24.585 kHz projection
+  retains exact pitch/control timing, all eight algorithms, both
   feedback extremes, LFO, envelopes, detune, noise, and sustained-feedback
   stability. The realtime DSP now computes audible serial modulation and
   feedback history as separate products, eliminating the former coupled-gain
   fold for feedback levels 1–7. Sustained feedback level 7 is fenced on two
   independent topologies (algorithms 4 and 5). See
   [`docs/perceptual-compatibility.md`](docs/perceptual-compatibility.md).
-- **Every corpus song plays end to end.** `make endurance-batch` plays all
+- **The complete corpus plays end to end.** `make endurance-batch` plays all
   17 real MDX/PDX songs in `release/` through the argument-less autoplay
   path under Hatari — sustained refills as the only cadence, live ADPCM
   decoding, two full loops, the automatic fade, and a clean CODEC/DSP
@@ -78,9 +89,14 @@ option-call semantics, and packaging.
   Hatari's raw SSI trace that every steady A/B handoff occurs after exactly
   1024 stereo words (one 512-frame, 20.83 ms period) and rejects excessive
   saturated output words.
-- The sample-exact renderer (12,024.34 instruction cycles per native
-  62.5 kHz sample against the 256.68-cycle budget — 46.85x real time) is
-  retained as the conformance reference that anchors the perceptual kernel.
+- **The exact renderer remains the oracle.** It costs 12,024.34 instruction
+  cycles per native 62.5 kHz sample against the 256.68-cycle budget — 46.85x
+  real time — and is retained as the conformance reference that anchors the
+  perceptual kernel.
+
+The normal and dedicated Xevious object rules do not currently list
+`src/m68k/verbose.i` as an incremental-build prerequisite. After changing that
+include, use `make -B all xevious`; the verbose targets track it directly.
 
 ## How it fits together
 
@@ -123,7 +139,7 @@ make check
 
 This also compiles a native MAME/ymfm oracle, mechanically generates
 compressed DSP lookup tables, emits the exact 256-sample conformance trace,
-validates an 18-scenario codec-rate perceptual corpus, and gates an independent
+validates a 19-scenario codec-rate perceptual corpus, and gates an independent
 256-step/codec-feedback projection against it under `build/reference/`.
 
 ## Verify
@@ -216,15 +232,19 @@ executable with a Desktop command-line entry point:
 F030MXDRV.TTP song.mdx [bank.pdx]
 ```
 
-For a quick playback test, `xevious.tos` starts `XEVIOUS.MDX` with
-`XEVIOUS.PDX` when launched without arguments. Keep both files beside the
-executable. An explicit command line still overrides this built-in default;
-`make xevious` rebuilds the dedicated executable.
+The second filename is an optional PDX override. If it is omitted, the player
+reads the PDX name embedded in the MDX, adds `.PDX` when the header omits the
+suffix, and looks beside the MDX when the header contains only a basename.
+For a quick playback test, `xevious.tos` starts `XEVIOUS.MDX` and resolves its
+embedded `XEVIOUS.PDX` automatically when launched without arguments. Keep
+both files beside the executable. An explicit command line still overrides
+this built-in default; `make xevious` rebuilds the dedicated executable.
 
 Without arguments, an `AUTOPLAY.INF` file beside the program supplies the
-same two-token command line, so Desktop launches and unattended runs start
-playback directly. The MDX is limited to 65,536 bytes and the optional raw
-PDX bank to 319,488 bytes. Filenames are whitespace-delimited TOS paths.
+same command line, so Desktop launches and unattended runs start playback
+directly. It may contain just the MDX filename when the embedded PDX should be
+used. The MDX is limited to 65,536 bytes and the optional raw PDX bank to
+319,488 bytes. Filenames are whitespace-delimited TOS paths.
 
 Playback fades out after two full loops of the song or on the first
 keypress; a second keypress stops immediately. The player uses the
@@ -248,7 +268,7 @@ conformance mode in Hatari.
   real-time kernel.
 - `tools/ym2151_oracle.cpp`: native executable built against vendored ymfm.
 - `tools/capture_ym2151_realtime.py`: Hatari capture orchestrator for the
-  18-scenario perceptual gate.
+  19-scenario perceptual gate.
 - `tools/compare_ym2151_realtime.py`: codec-rate vector validator and
   exact-to-perceptual comparator.
 - `tools/generate_ym2151_tables.py`: mechanical ymfm-to-DSP table generator.

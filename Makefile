@@ -56,13 +56,15 @@ M68K_SOURCES := \
 	src/m68k/pdx.s
 M68K_OBJECTS := $(patsubst src/m68k/%.s,$(M68K_BUILD)/%.o,$(M68K_SOURCES))
 XEVIOUS_M68K_OBJECTS := $(patsubst $(M68K_BUILD)/player.o,$(XEVIOUS_M68K_BUILD)/player.o,$(M68K_OBJECTS))
+VERBOSE_M68K_BUILD := build/m68k-xevious-verbose
+VERBOSE_M68K_OBJECTS := $(patsubst src/m68k/%.s,$(VERBOSE_M68K_BUILD)/%.o,$(M68K_SOURCES))
 
 DOSBOX ?= $(shell command -v dosbox-staging 2>/dev/null || command -v dosbox 2>/dev/null)
 DOSBOX_FLAGS ?= --noprimaryconf --set output=texture
 
 .PHONY: all host xevious dsp reference check capture-realtime compare-realtime smoke stock-audio endurance endurance-batch profile-dsp profile-dsp-rt \
 	profile-dsp-rt2 profile-dsp-rt3 profile-dsp-rt4 profile-dsp-rt5 \
-	clean run tools
+	clean run tools xevious-verbose xevious-verbose50
 
 all: host dsp
 
@@ -218,6 +220,46 @@ $(RELEASE_DIR)/xevious.tos: $(XEVIOUS_M68K_OBJECTS) $(VLINK)
 	@mkdir -p $(RELEASE_DIR)
 	$(VLINK) $(XEVIOUS_M68K_OBJECTS) -b ataritos -s -e start -o $@
 
+# Real-hardware bring-up build: the Xevious player with every XBIOS/DSP
+# handshake traced to the console. Each step prints its label before the
+# call and its result after, so a hang leaves a dangling label naming the
+# call that never returned. Not built by `all`; see `make xevious-verbose`.
+$(VERBOSE_M68K_BUILD)/%.o: src/m68k/%.s src/m68k/xbios.i src/m68k/verbose.i \
+		src/m68k/protocol.i $(YM2151_REFERENCE) $(PDX_ADPCM_REFERENCE) \
+		$(YM2151_HOST_TABLES) $(DSP_STAGE2_IMAGE) $(VASM)
+	@mkdir -p $(VERBOSE_M68K_BUILD)
+	$(VASM) $< -quiet -Felf -m68030 -DVERBOSE_BOOT -DPLAYER_DEFAULT_XEVIOUS \
+		-Isrc/m68k -I$(GENERATED_BUILD) -o $@ \
+		-L $(VERBOSE_M68K_BUILD)/$*.lst
+
+$(RELEASE_DIR)/xevverb.tos: $(VERBOSE_M68K_OBJECTS) $(VLINK)
+	@mkdir -p $(RELEASE_DIR)
+	$(VLINK) $(VERBOSE_M68K_OBJECTS) -b ataritos -s -e start -o $@
+
+xevious-verbose: $(RELEASE_DIR)/xevverb.tos
+	@file $(RELEASE_DIR)/xevverb.tos
+
+# Same verbose player, but reconnecting the codec at the pre-rework 49.17 kHz
+# prescaler. Only useful for isolating whether prescaler 3 is what stops the
+# SSI on real hardware; the rest of the kernel still assumes 24.585 kHz.
+VERBOSE50_M68K_BUILD := build/m68k-xevious-verbose50
+VERBOSE50_M68K_OBJECTS := $(patsubst src/m68k/%.s,$(VERBOSE50_M68K_BUILD)/%.o,$(M68K_SOURCES))
+
+$(VERBOSE50_M68K_BUILD)/%.o: src/m68k/%.s src/m68k/xbios.i src/m68k/verbose.i \
+		src/m68k/protocol.i $(YM2151_REFERENCE) $(PDX_ADPCM_REFERENCE) \
+		$(YM2151_HOST_TABLES) $(DSP_STAGE2_IMAGE) $(VASM)
+	@mkdir -p $(VERBOSE50_M68K_BUILD)
+	$(VASM) $< -quiet -Felf -m68030 -DVERBOSE_BOOT -DPLAYER_DEFAULT_XEVIOUS \
+		-DFORCE_CLK50K -Isrc/m68k -I$(GENERATED_BUILD) -o $@ \
+		-L $(VERBOSE50_M68K_BUILD)/$*.lst
+
+$(RELEASE_DIR)/xevv50.tos: $(VERBOSE50_M68K_OBJECTS) $(VLINK)
+	@mkdir -p $(RELEASE_DIR)
+	$(VLINK) $(VERBOSE50_M68K_OBJECTS) -b ataritos -s -e start -o $@
+
+xevious-verbose50: $(RELEASE_DIR)/xevv50.tos
+	@file $(RELEASE_DIR)/xevv50.tos
+
 $(DSP_BUILD)/BUILD.BAT: tools/BUILD_DSP.BAT src/dsp/ym2151.asm \
 		src/dsp/stage2_loader.asm src/dsp/protocol.inc $(YM2151_TABLES) \
 		$(ENVELOPE_TABLES)
@@ -370,7 +412,7 @@ smoke: check
 	@rg -q "Direct Transfer 0x01c5de" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x01c6c0" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x170000" build/hatari-smoke.trace
-	@rg -q "Transfer 0x1ce79e" build/hatari-smoke.trace
+	@rg -q "Transfer 0x1ce7a1" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x01c6de" build/hatari-smoke.trace
 	@rg -q "XBIOS 0x80 Locksnd" build/hatari-smoke.trace
 	@rg -q "XBIOS 0x89 Dsptristate\\(0x1, 0x0\\)" build/hatari-smoke.trace
@@ -620,7 +662,7 @@ endurance: check
 	@mkdir -p build/endurance
 	@cp $(RELEASE_DIR)/f030mxdrv.tos build/endurance/
 	@cp $(RELEASE_DIR)/XEVIOUS.MDX $(RELEASE_DIR)/XEVIOUS.PDX build/endurance/
-	@printf 'XEVIOUS.MDX XEVIOUS.PDX\r\n' > build/endurance/AUTOPLAY.INF
+	@printf 'XEVIOUS.MDX\r\n' > build/endurance/AUTOPLAY.INF
 	@SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy hatari \
 		--machine falcon --dsp emu \
 		--tos third_party/f030dsp3d/tools/tos402.rom --patch-tos true \

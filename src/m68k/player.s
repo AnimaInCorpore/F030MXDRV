@@ -1,4 +1,5 @@
         include "xbios.i"
+        include "verbose.i"
         include "protocol.i"
 
         global  player_parse_tail
@@ -15,6 +16,7 @@ PLAYER_SOUND_DSP_XMIT  equ     1
 PLAYER_SOUND_DAC       equ     8
 PLAYER_SOUND_CLK25M    equ     0
 PLAYER_SOUND_CLK25K    equ     3
+PLAYER_SOUND_CLK50K    equ     1
 PLAYER_SOUND_NO_SHAKE  equ     1
 PLAYER_SOUND_LTATTEN   equ     0
 PLAYER_SOUND_RTATTEN   equ     1
@@ -27,8 +29,9 @@ PLAYER_FADE_SPEED      equ     8
 
 ; Parse a TOS basepage command tail into one required MDX filename and one
 ; optional PDX filename. TOS paths cannot normally contain spaces, so the
-; initial player deliberately keeps the grammar to two whitespace-delimited
-; tokens. in: a0=basepage+$80; out: d0=0 empty, 1 valid, -1 malformed
+; player deliberately keeps the grammar to two whitespace-delimited tokens.
+; When the second token is absent, player_run resolves the PDX name embedded
+; in the loaded MDX. in: a0=basepage+$80; out: d0=0 empty, 1 valid, -1 malformed
 player_parse_tail:
         movem.l d1-d7/a0-a6,-(sp)
         clr.b   player_autoplay_tried
@@ -146,9 +149,9 @@ player_parse_empty:
         endc
 
         ; No command tail: an AUTOPLAY.INF beside the program supplies the
-        ; same two-token grammar, so desktop launches and unattended test
-        ; runs start playback without arguments. Control bytes and line
-        ; endings read as separators before the reparse.
+        ; same MDX-plus-optional-PDX grammar, so desktop launches and
+        ; unattended test runs start playback without arguments. Control
+        ; bytes and line endings read as separators before the reparse.
         tst.b   player_autoplay_tried
         bne     player_parse_none
         move.b  #1,player_autoplay_tried
@@ -213,6 +216,43 @@ player_selftest:
         tst.l   d0
         bne     player_selftest_error
 
+        ; Verify the one-token path that production playback uses: read the
+        ; PDX name from the loaded MDX, preserve the MDX directory, and add
+        ; the conventional extension omitted by many standard headers.
+        lea     player_test_auto_tail,a0
+        bsr     player_parse_tail
+        cmpi.l  #1,d0
+        bne     player_selftest_error
+        lea     player_test_auto_mdx,a1
+        moveq   #2,d0
+        move.l  #player_test_auto_mdx_end-player_test_auto_mdx,d1
+        bsr     mxdrv_call
+        tst.l   d0
+        bne     player_selftest_error
+        bsr     player_resolve_embedded_pdx
+        tst.l   d0
+        bne     player_selftest_error
+        lea     player_pdx_filename,a0
+        lea     player_test_auto_pdx,a1
+        bsr     player_compare_string
+        tst.l   d0
+        bne     player_selftest_error
+
+        ; An empty embedded name is a valid MDX header and must not turn into
+        ; a spurious directory/.PDX lookup.
+        lea     player_test_no_pdx_mdx,a1
+        moveq   #2,d0
+        move.l  #player_test_no_pdx_mdx_end-player_test_no_pdx_mdx,d1
+        bsr     mxdrv_call
+        tst.l   d0
+        bne     player_selftest_error
+        clr.b   player_pdx_filename
+        bsr     player_resolve_embedded_pdx
+        tst.l   d0
+        bne     player_selftest_error
+        tst.b   player_pdx_filename
+        bne     player_selftest_error
+
         ; Reopen the emitted DSP reference image through the exact player file
         ; path. Runtime bootstrap is embedded, but this artifact is small enough
         ; for the MDX buffer and keeps GEMDOS seek/read coverage in conformance
@@ -250,6 +290,128 @@ player_compare_string_loop:
         rts
 player_compare_string_error:
         moveq   #-1,d0
+        rts
+
+; Select the PDX named by the loaded MDX when the command tail did not provide
+; an override. MXDRV call $09 returns the MDX's NUL-terminated name. Standard
+; files commonly omit the .PDX suffix, so add it when the name has no suffix.
+; A basename-only embedded name is looked up beside the MDX path; embedded
+; names that already contain a path are used as-is. in: player_mdx_filename
+; and mxdrv_mdx_buffer are populated; out: d0=0 on success/no PDX, -1 bad
+player_resolve_embedded_pdx:
+        movem.l d1-d7/a0-a6,-(sp)
+        moveq   #9,d0
+        bsr     mxdrv_call
+        tst.l   d0
+        beq     player_resolve_pdx_none
+        move.l  d0,d7
+
+        ; Scan the returned name inside the owned MDX image. Besides keeping
+        ; the copy bounded, this rejects a truncated MDX before the string
+        ; scan can run into unrelated BSS.
+        movea.l d0,a1
+        lea     mxdrv_mdx_buffer,a2
+        move.l  mxdrv_mdx_size,d4
+        adda.l  d4,a2
+        moveq   #0,d5
+        moveq   #0,d6                  ; bit 0: path, bit 1: basename suffix
+player_resolve_pdx_scan:
+        cmpa.l  a2,a1
+        bcc     player_resolve_pdx_error
+        moveq   #0,d0
+        move.b  (a1)+,d0
+        beq     player_resolve_pdx_scanned
+        addq.l  #1,d5
+        cmpi.l  #127,d5
+        bhi     player_resolve_pdx_error
+        cmpi.b  #$5c,d0               ; '\\'
+        beq     player_resolve_pdx_separator
+        cmpi.b  #$2f,d0               ; '/'
+        beq     player_resolve_pdx_separator
+        cmpi.b  #$3a,d0               ; ':' (drive-qualified path)
+        beq     player_resolve_pdx_separator
+        cmpi.b  #'.',d0
+        beq     player_resolve_pdx_suffix
+        bra     player_resolve_pdx_scan
+player_resolve_pdx_separator:
+        ori.w   #1,d6
+        andi.w  #$fffd,d6
+        bra     player_resolve_pdx_scan
+player_resolve_pdx_suffix:
+        ori.w   #2,d6
+        bra     player_resolve_pdx_scan
+
+player_resolve_pdx_scanned:
+        tst.l   d5
+        beq     player_resolve_pdx_none
+        lea     player_pdx_filename,a2
+        lea     player_pdx_filename+128,a5
+        btst    #0,d6
+        bne     player_resolve_pdx_copy_name
+
+        ; No path in the MDX header: retain the directory component of the
+        ; command-line MDX path so "MUSIC\\SONG.MDX" finds "MUSIC\\SONG.PDX".
+        lea     player_mdx_filename,a1
+        movea.l a1,a4
+player_resolve_mdx_path_scan:
+        moveq   #0,d0
+        move.b  (a1)+,d0
+        beq     player_resolve_mdx_path_copy
+        cmpi.b  #$5c,d0
+        beq     player_resolve_mdx_path_mark
+        cmpi.b  #$2f,d0
+        beq     player_resolve_mdx_path_mark
+        cmpi.b  #$3a,d0
+        bne     player_resolve_mdx_path_scan
+player_resolve_mdx_path_mark:
+        movea.l a1,a4
+        bra     player_resolve_mdx_path_scan
+player_resolve_mdx_path_copy:
+        lea     player_mdx_filename,a1
+player_resolve_mdx_path_copy_loop:
+        cmpa.l  a4,a1
+        bcc     player_resolve_pdx_copy_name
+        cmpa.l  a5,a2
+        bcc     player_resolve_pdx_error
+        move.b  (a1)+,(a2)+
+        bra     player_resolve_mdx_path_copy_loop
+
+player_resolve_pdx_copy_name:
+        movea.l d7,a1
+player_resolve_pdx_copy_loop:
+        moveq   #0,d0
+        move.b  (a1)+,d0
+        beq     player_resolve_pdx_copy_done
+        cmpa.l  a5,a2
+        bcc     player_resolve_pdx_error
+        move.b  d0,(a2)+
+        bra     player_resolve_pdx_copy_loop
+
+player_resolve_pdx_copy_done:
+        btst    #1,d6
+        bne     player_resolve_pdx_finish
+        ; Five bytes are needed for ".PDX" plus the terminator.
+        movea.l a2,a3
+        adda.l  #5,a3
+        cmpa.l  a5,a3
+        bhi     player_resolve_pdx_error
+        move.b  #'.',(a2)+
+        move.b  #'P',(a2)+
+        move.b  #'D',(a2)+
+        move.b  #'X',(a2)+
+player_resolve_pdx_finish:
+        clr.b   (a2)
+        moveq   #0,d0
+        bra     player_resolve_pdx_return
+
+player_resolve_pdx_none:
+        moveq   #0,d0
+        bra     player_resolve_pdx_return
+player_resolve_pdx_error:
+        clr.b   player_pdx_filename
+        moveq   #-1,d0
+player_resolve_pdx_return:
+        movem.l (sp)+,d1-d7/a0-a6
         rts
 
 ; Load an exact regular file into an MXDRV-owned buffer and publish it through
@@ -307,27 +469,40 @@ player_run:
         clr.b   player_audio_started
         clr.b   player_fading
         Cconws  player_loading_text
+        VB      vb_txt_run
 
+        VB      vb_txt_loadmdx
         lea     player_mdx_filename,a0
         lea     mxdrv_mdx_buffer,a1
         move.l  #PLAYER_MDX_CAPACITY,d1
         moveq   #2,d2
         bsr     player_load_file
+        VBH
         tst.l   d0
         bne     player_mdx_error
 
         tst.b   player_pdx_filename
+        bne     player_explicit_pdx
+        bsr     player_resolve_embedded_pdx
+        tst.l   d0
+        bne     player_pdx_error
+        tst.b   player_pdx_filename
         beq     player_files_loaded
+player_explicit_pdx:
+        VB      vb_txt_loadpdx
         lea     player_pdx_filename,a0
         lea     mxdrv_pdx_buffer,a1
         move.l  #PLAYER_PDX_CAPACITY,d1
         moveq   #3,d2
         bsr     player_load_file
+        VBH
         tst.l   d0
         bne     player_pdx_error
 
 player_files_loaded:
+        VB      vb_txt_locksnd
         Locksnd
+        VBH
         cmpi.l  #1,d0
         bne     player_sound_error
         move.b  #1,player_sound_owned
@@ -339,20 +514,38 @@ player_files_loaded:
         move.w  d0,player_old_right_atten
         Soundcmd #PLAYER_SOUND_LTATTEN,#PLAYER_SOUND_FULL
         Soundcmd #PLAYER_SOUND_RTATTEN,#PLAYER_SOUND_FULL
+        VB      vb_txt_setmode
         Setmode #PLAYER_SOUND_STEREO16
+        VB      vb_txt_settracks
         Settracks #0,#0
+        VB      vb_txt_tristate
         Dsptristate #1,#0
+        ifd     FORCE_CLK50K
+        ; Bring-up A/B only: the former 49.17 kHz prescaler. Everything else
+        ; still assumes 24.585 kHz, so playback runs at the wrong pitch and
+        ; tempo - the only question this build answers is whether the SSI
+        ; clocks at all, i.e. whether prescaler 3 is what stops it.
+        VB      vb_txt_devconnect50
+        Devconnect #PLAYER_SOUND_DSP_XMIT,#PLAYER_SOUND_DAC,#PLAYER_SOUND_CLK25M,#PLAYER_SOUND_CLK50K,#PLAYER_SOUND_NO_SHAKE
+        else
+        VB      vb_txt_devconnect
         Devconnect #PLAYER_SOUND_DSP_XMIT,#PLAYER_SOUND_DAC,#PLAYER_SOUND_CLK25M,#PLAYER_SOUND_CLK25K,#PLAYER_SOUND_NO_SHAKE
+        endc
+        VB      vb_txt_sounddone
 
+        VB      vb_txt_mdxplay
         moveq   #4,d0
         bsr     mxdrv_call
+        VBH
         tst.l   d0
         bne     player_play_error
 
         ; Prime the tracks before rendering the first block so their initial
         ; voices, notes, and PDX triggers populate the exact register mirror
         ; before the realtime decoder initializes from it.
+        VB      vb_txt_prime
         bsr     mxdrv_mdx_timer_service
+        VBH
         tst.w   d0
         beq     player_finished
 
@@ -365,11 +558,14 @@ player_files_loaded:
         beq     player_start_audio
         Cconws  player_pdx_warning
 player_start_audio:
+        VB      vb_txt_audiostart
         bsr     dsp_start_realtime_audio
+        VBH
         cmp.l   #DSP_REPLY_OK,d0
         bne     player_dsp_error
         bsr     mxdrv_mdx_clock_resync
         move.b  #1,player_audio_started
+        VB      vb_txt_looping
         ; Once SSI is live, ordered pump writes ride with the PCM refill that
         ; consumes them, avoiding dozens of per-write XBIOS handshakes.
         bsr     mxdrv_ym_batch_enable
@@ -463,6 +659,24 @@ player_cleanup_return:
 
         data
 
+        ifd     VERBOSE_BOOT
+vb_txt_run:        dc.b 'player_run entered',13,10,0
+vb_txt_loadmdx:    dc.b 'load MDX         ',0
+vb_txt_loadpdx:    dc.b 'load PDX (call 3)',0
+vb_txt_locksnd:    dc.b 'Locksnd          ',0
+vb_txt_setmode:    dc.b 'Setmode',13,10,0
+vb_txt_settracks:  dc.b 'Settracks',13,10,0
+vb_txt_tristate:   dc.b 'Dsptristate',13,10,0
+vb_txt_devconnect: dc.b 'Devconnect 24.585k (prescale 3)',13,10,0
+vb_txt_devconnect50: dc.b 'Devconnect 49.17k (prescale 1) A/B',13,10,0
+vb_txt_sounddone:  dc.b 'sound path ready',13,10,0
+vb_txt_mdxplay:    dc.b 'MDX play (call 4)',0
+vb_txt_prime:      dc.b 'prime tracks     ',0
+vb_txt_audiostart: dc.b 'start realtime   ',0
+vb_txt_looping:    dc.b 'entering play loop',13,10,0
+        even
+        endc
+
 player_loading_text:
         dc.b    'Loading MDX/PDX files...',13,10,0
 player_autoplay_name:
@@ -500,16 +714,28 @@ player_test_extra_tail:
 player_test_extra_tail_end:
 player_test_empty_tail:
         dc.b    0
+player_test_auto_tail:
+        dc.b    player_test_auto_tail_end-player_test_auto_tail-1
+        dc.b    'MUSIC',$5c,'TEST.MDX'
+player_test_auto_tail_end:
         ifd     PLAYER_DEFAULT_XEVIOUS
 player_xevious_tail:
         dc.b    player_xevious_tail_end-player_xevious_tail-1
-        dc.b    'XEVIOUS.MDX XEVIOUS.PDX'
+        dc.b    'XEVIOUS.MDX'
 player_xevious_tail_end:
         endc
 player_test_mdx:
         dc.b    'TEST.MDX',0
 player_test_pdx:
         dc.b    'TEST.PDX',0
+player_test_auto_pdx:
+        dc.b    'MUSIC',$5c,'TEST.PDX',0
+player_test_auto_mdx:
+        dc.b    'MDX auto-load test',13,10,$1a,'TEST',0
+player_test_auto_mdx_end:
+player_test_no_pdx_mdx:
+        dc.b    'MDX no PDX test',13,10,$1a,0
+player_test_no_pdx_mdx_end:
 player_test_filename:
         dc.b    'ym2151.lod',0
         even
@@ -536,6 +762,13 @@ player_old_left_atten:
         ds.w    1
 player_old_right_atten:
         ds.w    1
+        even
+
+; Silent DMA playback region. Nothing is connected to the DMA source, so this
+; is never heard; it exists only so the sound engine that supplies the SSI
+; clock has a defined buffer to cycle. BSS is zeroed by the loader, which is
+; exactly the silence we want.
+        even
         even
 
         end

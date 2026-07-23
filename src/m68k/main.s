@@ -1,10 +1,15 @@
         include "xbios.i"
+        include "verbose.i"
         include "protocol.i"
         include "ym2151_reference.i"
         include "pdx_adpcm_reference.i"
 
         global  start
         global  mxdrv_basepage
+        ifd     VERBOSE_BOOT
+        global  vb_hex
+        global  vb_string
+        endc
 
 DSP_X_WORDS     equ     8192
 DSP_Y_WORDS     equ     8192
@@ -27,13 +32,37 @@ start:
         move.l  4(sp),mxdrv_basepage
         Cconws  banner
 
+        VBV     vb_txt_basepage,mxdrv_basepage
+        ifd     VERBOSE_BOOT
+        VB      vb_txt_bss
+        movea.l mxdrv_basepage,a0
+        move.l  $18(a0),d0
+        add.l   $1c(a0),d0
+        VBH
+        endc
+        ifd     VERBOSE_BOOT
+        VB      vb_txt_hitpa
+        movea.l mxdrv_basepage,a0
+        move.l  $04(a0),d0
+        VBH
+        endc
+
         movea.l 4(sp),a0              ; TOS basepage pointer at process entry
         lea     $80(a0),a0            ; length-prefixed command tail
+        VB      vb_txt_parse
         bsr     player_parse_tail
         move.l  d0,player_mode
+        VBH
+        VBN     vb_txt_mdxname,player_mdx_filename
+        VBN     vb_txt_pdxname,player_pdx_filename
+        ifd     VERBOSE_BOOT
+        move.l  player_mode,d0        ; the traces above clobbered the flags
+        endc
         bmi     usage_failed
 
+        VB      vb_txt_reserve
         Dsp_Reserve #DSP_X_WORDS,#DSP_Y_WORDS
+        VBH
         tst.l   d0
         bmi     reserve_failed
 
@@ -41,35 +70,67 @@ start:
         ; embedded loader there, then stream the complete sparse program as
         ; unpacked 24-bit words. The loader acknowledges only after every
         ; section is resident and immediately enters the final reset vector.
+        VBV     vb_txt_bootwords,#DSP_BOOT_WORDS
+        VB      vb_txt_execboot
         Dsp_ExecBoot dsp_bootstrap_image,#DSP_BOOT_WORDS,#DSP_ABILITY
+        VBH
+        VBV     vb_txt_stagewords,#DSP_STAGE2_TRANSFER_WORDS
         clr.l   dsp_stage2_reply
+        VB      vb_txt_stage2
         Dsp_BlkUnpacked dsp_program_image,#DSP_STAGE2_TRANSFER_WORDS,dsp_stage2_reply,#1
         move.l  dsp_stage2_reply,d0
+        VBH
         cmp.l   #DSP_STAGE2_REPLY_OK,d0
         bne     load_failed
 
+        VB      vb_txt_ping
         move.l  #DSP_CMD_PING,d0
         bsr     dsp_exchange
+        VBH
         cmp.l   #DSP_REPLY_HELLO,d0
         bne     protocol_failed
 
         ; TOS's Dsp_BlkUnpacked handshakes only its first word, so ask for
         ; the DSP's parked-receiver token before releasing the table block.
+        VB      vb_txt_tabcmd
         move.l  #DSP_CMD_LOAD_TABLES,d0
         bsr     dsp_exchange
+        VBH
         cmp.l   #DSP_REPLY_BLOCK_READY,d0
         bne     protocol_failed
         clr.l   dsp_table_reply
-        Dsp_BlkUnpacked ym2151_table_upload+4,#YM_TABLE_UPLOAD_WORDS-1,dsp_table_reply,#1
+        VB      vb_txt_tabup
+        ; One word per call, not one blind block. TOS 4.02's Dsp_BlkUnpacked
+        ; polls TXDE only before the first word of a block and then writes the
+        ; rest blind. The stage2 bootstrap survives that because Dsp_ExecBoot
+        ; puts its receive loop in internal P RAM, but command_load_tables runs
+        ; from external P with wait states, falls behind the 16 MHz host, and
+        ; loses a word - after which the DSP waits for a word that never comes
+        ; and the host waits for a reply that never comes. Hatari's DSP has no
+        ; such wait states, so this only ever hung on real hardware. Splitting
+        ; the block restores a TXDE poll in front of every word; 329 extra
+        ; XBIOS calls cost a few milliseconds once, at load time.
+        lea     ym2151_table_upload+4,a3
+        move.w  #YM_TABLE_UPLOAD_WORDS-3,d3
+table_upload_word:
+        Dsp_BlkUnpacked (a3),#1,dsp_table_reply,#0
+        addq.l  #4,a3
+        dbra    d3,table_upload_word
+        ; Only the final word carries the handler's single completion reply.
+        Dsp_BlkUnpacked (a3),#1,dsp_table_reply,#1
         move.l  dsp_table_reply,d0
+        VBH
         cmp.l   #DSP_REPLY_OK,d0
         bne     protocol_failed
 
+        VB      vb_txt_reset
         moveq   #0,d0                  ; MXDRV call $00: reset
         bsr     mxdrv_call
+        VBH
         cmp.l   #DSP_REPLY_OK,d0
         bne     protocol_failed
 
+        VB      vb_txt_dispatch
         tst.l   player_mode
         beq     conformance_mode
         bsr     player_run
@@ -1501,7 +1562,68 @@ clock_samples:
         bne     clock_samples
         rts
 
+        ifd     VERBOSE_BOOT
+; Print d0.l as eight hex digits and a newline. Every register survives, so
+; a VBH can sit between a call and the test of its own result.
+vb_hex:
+        movem.l d0-d3/a0-a2,-(sp)
+        move.l  d0,d1
+        lea     vb_hex_buffer,a0
+        moveq   #7,d2
+vb_hex_digit:
+        rol.l   #4,d1
+        move.b  d1,d3
+        andi.b  #$0f,d3
+        cmpi.b  #10,d3
+        bcc     vb_hex_alpha
+        addi.b  #'0',d3
+        bra     vb_hex_store
+vb_hex_alpha:
+        addi.b  #'A'-10,d3
+vb_hex_store:
+        move.b  d3,(a0)+
+        dbra    d2,vb_hex_digit
+        move.b  #13,(a0)+
+        move.b  #10,(a0)+
+        clr.b   (a0)
+        Cconws  vb_hex_buffer
+        movem.l (sp)+,d0-d3/a0-a2
+        rts
+
+; Print the NUL-terminated string at a0 and a newline, preserving registers.
+vb_string:
+        movem.l d0-d2/a0-a2,-(sp)
+        move.l  a0,-(sp)
+        move.w  #9,-(sp)
+        trap    #1
+        addq.l  #6,sp
+        Cconws  vb_crlf
+        movem.l (sp)+,d0-d2/a0-a2
+        rts
+        endc
+
         data
+
+        ifd     VERBOSE_BOOT
+vb_crlf:        dc.b    13,10,0
+vb_txt_basepage:  dc.b  'basepage  ',0
+vb_txt_bss:       dc.b  'bss end   ',0
+vb_txt_hitpa:     dc.b  'hitpa     ',0
+vb_txt_parse:     dc.b  'parse     ',0
+vb_txt_mdxname:   dc.b  'mdx file  ',0
+vb_txt_pdxname:   dc.b  'pdx file  ',0
+vb_txt_reserve:   dc.b  'Dsp_Reserve      ',0
+vb_txt_bootwords: dc.b  'boot words       ',0
+vb_txt_execboot:  dc.b  'Dsp_ExecBoot     ',0
+vb_txt_stagewords: dc.b 'stage2 words     ',0
+vb_txt_stage2:    dc.b  'stage2 upload    ',0
+vb_txt_ping:      dc.b  'PING             ',0
+vb_txt_tabcmd:    dc.b  'LOAD_TABLES      ',0
+vb_txt_tabup:     dc.b  'table upload     ',0
+vb_txt_reset:     dc.b  'MXDRV reset      ',0
+vb_txt_dispatch:  dc.b  'dispatch to player',13,10,0
+        even
+        endc
 
 banner:
         dc.b    27,'E','F030MXDRV DSP core',13,10
@@ -1515,7 +1637,7 @@ audio_text:
         dc.b    'Playing a three-second DSP YM2151 SSI burst...',13,10,0
 
 usage_text:
-        dc.b    'Usage: F030MXDRV.TTP song.mdx [bank.pdx]',13,10,0
+        dc.b    'Usage: F030MXDRV.TTP song.mdx [bank.pdx override]',13,10,0
 
 reserve_error_text:
         dc.b    'Error: unable to reserve the Falcon DSP.',13,10,0
@@ -1797,5 +1919,10 @@ player_mode:
         ds.l    1
 mxdrv_basepage:
         ds.l    1
+        ifd     VERBOSE_BOOT
+vb_hex_buffer:
+        ds.b    12
+        even
+        endc
 
         end

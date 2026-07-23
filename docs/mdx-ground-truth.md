@@ -24,6 +24,15 @@ fetch at/past the copied end retires that track with `mxdrv_mdx_error` set. At
 most 64 consecutive commands may execute before a duration-producing byte;
 this bounds corrupt command-only streams.
 
+## TTP file resolution
+
+The TTP accepts an MDX filename followed by an optional PDX override. When the
+override is omitted, the player uses the NUL-terminated PDX name from this
+header, appends `.PDX` when the header omits an extension, and resolves a
+basename beside the supplied MDX path. An empty embedded name means that no PDX
+file is loaded. This lookup is a player convenience; it does not change the
+raw MDX layout or the driver's PDX table semantics.
+
 ## Durations and notes
 
 - `00`-`7f` is a rest of encoded value plus one timer ticks.

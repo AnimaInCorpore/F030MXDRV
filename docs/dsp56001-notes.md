@@ -235,15 +235,14 @@ The four distinct gain multipliers exercise the carrier floor; the checksum is
 `$6c679b` and the normal smoke suite checks it. Command cleanup unmaps the ROM
 and rebuilds the exact-renderer phase cache outside the measured bracket.
 
-This is deliberately a strict floor: it omits envelope evolution,
-feedback, modulation routing, LFO/noise, write-event service, panning, SSI, and
-PDX/FM saturation. Consequently the result does not establish that a complete
-scalar engine fits. It establishes that drift-free oscillator/table arithmetic
-is viable only when organized around DSP parallel moves. The next feasibility
-kernel must be block-oriented and specialized by YM algorithm, allowing gain,
-modulation, carrier accumulation, and buffer traffic to share those parallel
-memory slots; a generic feature-by-feature extension of this loop has no
-credible cycle margin.
+This is deliberately a strict floor: it omits envelope evolution, feedback,
+modulation routing, LFO/noise, write-event service, panning, SSI, and PDX/FM
+saturation. It does not establish that a complete scalar engine fits; it
+establishes that drift-free oscillator/table arithmetic is viable only when
+organized around DSP parallel moves. The integrated production path described
+above is the block-oriented, algorithm-specialized implementation that closes
+that feasibility gap; this lower-bound spike remains useful as a historical
+cost reference.
 
 ### Algorithm-0 block spike
 
@@ -397,7 +396,7 @@ fill — so no noise-table words occupy the bounded P-memory image. Cleanup
 disables SSI, reads SSISR and writes TX to clear a latched underrun,
 restores the external Y map, and rebuilds the exact phase cache, including
 the internal-Y frequency-cache words the decoded multiplier/increment arrays
-overlay. The deterministic reply is `$1ce79e`.
+overlay. The deterministic reply is `$1ce7a1`.
 
 Decoded envelope curvature runs as a block-boundary pass at `P:$0080` in
 internal P RAM, where instruction fetches avoid the external-memory penalty.
