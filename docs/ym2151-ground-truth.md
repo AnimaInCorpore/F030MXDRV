@@ -20,6 +20,9 @@ result without intermediate clipping, then performs a YM3012 external-DAC
 
 The Falcon cannot silently substitute its codec rate. Its audio stage must
 either resample 62.5 kHz explicitly or prove an equivalent phase/time mapping.
+The current production kernel uses a drift-free 2560:1007 DDA to map this
+native clock onto 24,584.9609375 Hz codec frames; the conformance kernel keeps
+the native rate.
 
 After a data-port write ymfm marks the chip busy for
 `32 * clock_prescale = 64` input clocks. Busy is bit 7 of status. Timer A and B
@@ -112,7 +115,6 @@ it in four ways:
   included by the TOS smoke program;
 - `--vectors TRACE SAMPLES` produces stereo output plus phase, phase step,
   envelope attenuation, and envelope state for all four channel operators;
-  and
 - `--codec-vectors TRACE FRAMES [--algorithm N] [--feedback N]` emits exact
   output and operator/control state at the Falcon codec cadence, including the
   native-sample and ordered-write marker consumed by every frame; and

@@ -494,8 +494,9 @@ through `Dsp_BlkUnpacked`.
 The generated stream starts with magic `$4d584c`, followed by a section count
 and address/count/data records. The low program sections end below `P:$1400`
 and the stream carries both islands as additional sparse sections through
-`P:$2ba6`. The current image contains 7,862 initialized program words in
-fourteen sections. After installing them, the loader replies `$4c4f41` and jumps through
+`P:$2ba6`. The current image contains 7,865 initialized program words in
+fourteen merged sections. After installing them, the loader replies `$4c4f41`
+and jumps through
 the replaced reset vector at `P:$0000`. The build generator rejects a bootstrap
 above the 512-word XBIOS limit, any overlap with the reserved loader gap, non-P
 sections, sections outside 16-bit P memory, and any section that neither

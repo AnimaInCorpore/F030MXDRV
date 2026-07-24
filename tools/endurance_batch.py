@@ -3,8 +3,9 @@
 
 Runs the same scenario as `make endurance` (argument-less AUTOPLAY.INF
 autoplay, blocking refill cadence, two loops + fade + clean shutdown) for
-each release/*.MDX song. The Hatari trace is streamed through a FIFO and
-scored on the fly -- refill count, Dsp_Unlock shutdown, protocol-error
+each uppercase *.MDX song in the local corpus directory. The Hatari trace is
+streamed through a FIFO and scored on the fly -- refill count, Dsp_Unlock
+shutdown, protocol-error
 replies -- so no multi-gigabyte trace file is ever written to disk. Only a
 small rolling tail is kept, and saved just for failing songs.
 
@@ -22,7 +23,8 @@ import threading
 import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-RELEASE = os.path.join(REPO, "release")
+PLAYER = os.path.join(REPO, "release", "f030mxdrv.tos")
+DEFAULT_CORPUS = os.path.join(REPO, "corpus")
 BATCH_DIR = os.path.join(REPO, "build", "endurance-batch")
 TOS_ROM = os.path.join(REPO, "third_party", "f030dsp3d", "tools", "tos402.rom")
 
@@ -38,22 +40,25 @@ UNLOCK_GRACE = 3.0         # keep reading after unlock to catch late errors
 TAIL_LINES = 4000
 
 
-def read_pdx_name(mdx_path):
+def read_pdx_name(mdx_path, corpus_dir):
     """Return the PDX filename requested by an MDX header, or None."""
-    data = open(mdx_path, "rb").read(512)
+    with open(mdx_path, "rb") as mdx:
+        data = mdx.read(512)
     eot = data.find(b"\x1a")
     if eot < 0:
-        return None
+        raise ValueError(f"{os.path.basename(mdx_path)} has no MDX title terminator")
     end = data.find(b"\x00", eot + 1)
+    if end < 0:
+        raise ValueError(f"{os.path.basename(mdx_path)} has no PDX-name terminator")
     name = data[eot + 1 : end].decode("ascii", errors="replace").strip()
     if not name:
         return None
     stem = name.rsplit(".", 1)[0].upper()
     candidate = stem + ".PDX"
-    if os.path.exists(os.path.join(RELEASE, candidate)):
+    if os.path.exists(os.path.join(corpus_dir, candidate)):
         return candidate
     raise FileNotFoundError(f"{os.path.basename(mdx_path)} wants PDX {name!r}"
-                            f" but {candidate} is not in release/")
+                            f" but {candidate} is not in {corpus_dir}")
 
 
 class TraceScorer(threading.Thread):
@@ -83,18 +88,18 @@ class TraceScorer(threading.Thread):
                     self.protocol_error = line.strip()
 
 
-def run_song(mdx_name, pdx_name, keep_dir):
+def run_song(mdx_name, pdx_name, corpus_dir, keep_dir):
     song = os.path.splitext(mdx_name)[0]
     work = os.path.join(BATCH_DIR, song)
     shutil.rmtree(work, ignore_errors=True)
     os.makedirs(work)
-    shutil.copy(os.path.join(RELEASE, "f030mxdrv.tos"), work)
-    shutil.copy(os.path.join(RELEASE, mdx_name), work)
+    shutil.copy(PLAYER, work)
+    shutil.copy(os.path.join(corpus_dir, mdx_name), work)
     # Leave the PDX off the command tail so this gate exercises the player's
     # MDX-header resolver. The file is still copied beside the MDX.
     tokens = mdx_name
     if pdx_name:
-        shutil.copy(os.path.join(RELEASE, pdx_name), work)
+        shutil.copy(os.path.join(corpus_dir, pdx_name), work)
     with open(os.path.join(work, "AUTOPLAY.INF"), "w", newline="") as inf:
         inf.write(tokens + "\r\n")
 
@@ -166,31 +171,50 @@ def run_song(mdx_name, pdx_name, keep_dir):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("songs", nargs="*",
-                        help="MDX basenames to run (default: every release/*.MDX)")
+                        help=("MDX basenames to run (default: every uppercase "
+                              "*.MDX in the corpus)"))
+    parser.add_argument("--corpus-dir", default=DEFAULT_CORPUS,
+                        help=("local MDX/PDX directory "
+                              f"(default: {DEFAULT_CORPUS})"))
     parser.add_argument("--keep-workdirs", action="store_true",
                         help="keep per-song work directories even on PASS")
     args = parser.parse_args()
+    corpus_dir = os.path.abspath(args.corpus_dir)
 
     if not shutil.which("hatari"):
         sys.exit("error: endurance batch needs Hatari")
+    if not os.path.isfile(PLAYER):
+        sys.exit("error: build release/f030mxdrv.tos before running endurance")
+    if not os.path.isdir(corpus_dir):
+        sys.exit(f"error: corpus directory does not exist: {corpus_dir}")
     if args.songs:
         corpus = [s if s.upper().endswith(".MDX") else s + ".MDX"
                   for s in args.songs]
         corpus = [s.upper() for s in corpus]
     else:
-        corpus = sorted(f for f in os.listdir(RELEASE) if f.endswith(".MDX"))
+        corpus = sorted(f for f in os.listdir(corpus_dir) if f.endswith(".MDX"))
         # Known-good reference song first, as the canary.
         if "XEVIOUS.MDX" in corpus:
             corpus.remove("XEVIOUS.MDX")
             corpus.insert(0, "XEVIOUS.MDX")
+    if not corpus:
+        sys.exit(f"error: no uppercase *.MDX files found in {corpus_dir}")
 
     os.makedirs(BATCH_DIR, exist_ok=True)
     scoreboard_path = os.path.join(BATCH_DIR, "scoreboard.txt")
     results = []
     with open(scoreboard_path, "w", buffering=1) as scoreboard:
         for mdx_name in corpus:
-            pdx_name = read_pdx_name(os.path.join(RELEASE, mdx_name))
-            result = run_song(mdx_name, pdx_name, args.keep_workdirs)
+            mdx_path = os.path.join(corpus_dir, mdx_name)
+            if not os.path.isfile(mdx_path):
+                sys.exit(f"error: missing corpus file: {mdx_path}")
+            try:
+                pdx_name = read_pdx_name(mdx_path, corpus_dir)
+            except (OSError, ValueError) as error:
+                sys.exit(f"error: {error}")
+            result = run_song(
+                mdx_name, pdx_name, corpus_dir, args.keep_workdirs
+            )
             results.append(result)
             line = (f"{result['verdict']}  {result['song']:<10}"
                     f" refills={result['refills']:<6}"

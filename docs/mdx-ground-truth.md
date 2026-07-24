@@ -65,8 +65,21 @@ The PCM defaults recovered from channel initialization are rate code 4
 | `f6 cc ww` | repeat start | copies count `cc` into mutable work byte `ww` |
 | `f5 oo oo` | repeat end | decrements target-minus-one and takes the signed branch while nonzero |
 | `f4 oo oo` | repeat escape | follows a future F5 displacement and skips it when the counter is one |
+| `f3 dd dd` | detune | stores a signed 1/64-semitone offset for following notes |
+| `f2 pp pp` | portamento | applies the signed per-tick pitch delta to the next note |
 | `f1 00` / `f1 oo oo` | performance end | retires the standalone track or jumps to the bounded loop target and increments the loop count |
+| `f0 dd` | key-on delay | delays the next note's key edge by `dd` ticks |
+| `ef cc` / `ee` | sync send/wait | raises a bounded channel flag or parks until that track's flag is raised |
+| `ed dd` | noise / PCM frequency | writes YM noise control on FM tracks or selects the PCM rate on PCM tracks |
+| `ec ...` | software pitch LFO | programs saw/square/triangle/random period and depth; `$80`/`$81` disable/re-enable |
+| `eb ...` | software volume LFO | programs carrier-TL modulation; `$80`/`$81` disable/re-enable |
+| `ea ...` | OPM LFO | programs waveform, rate, PMD, AMD, PMS/AMS, and optional key-on phase reset; `$80`/`$81` disable/re-enable sensitivity |
+| `e9 dd` | LFO delay | holds and restarts the software LFOs after key-on |
 | `e8` | enable PCM8 | switches subsequent PDX playback from fixed-gain legacy ADPCM to PCM8 gain/multi-voice semantics |
+| `e7 00` | extension end | retires the track |
+| `e7 01 ww` | extension fade | starts fadeout with wait reload `ww` |
+| `e7 03 dd` | extension damp | enables/disables forced key-off before every key-on |
+| `e0`–`e6` | performance end | retires the track |
 
 An FM FD record is one ID byte followed by algorithm/feedback, PMS/AMS, four
 DT1/MUL bytes, four TL bytes, and sixteen envelope/DT2 bytes. `LoadVoice` maps
@@ -91,9 +104,10 @@ displacement to the future F5 operands, then follows F5's signed displacement
 to inspect the same counter. Both the counter and every control target are
 checked against the owned MDX copy before use.
 
-The remaining unsupported E7 host-extension operand forms retire only the
-affected track and set the parser error byte; the standard sequencing,
-modulation, PCM8-enable, loop, and fade commands are implemented.
+Other E7 host-extension forms retire only the affected track and set the
+parser error byte. The same bounded failure applies to a truncated operand,
+invalid repeat target, missing FM voice, or failed DSP write; other tracks may
+continue.
 
 ## Timer service seam
 

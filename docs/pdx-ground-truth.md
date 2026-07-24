@@ -58,7 +58,7 @@ lowest and highest rates and at -16 dB and unity gain. Hatari checks 20 stereo
 frames, global left-only pan, active masks, explicit stops, and parameter
 bounds against that vector.
 
-## Current boundary
+## Current implementation
 
 `src/m68k/pdx.s` provides validated lookup plus the eight-voice host mixer. It
 renders 512 Falcon codec frames for each protocol-v23 realtime transaction.
@@ -72,3 +72,9 @@ start and refill path. The older 1007-frame exact FM/PCM stream remains as a
 conformance gate. Hatari's stock-clock SSI gate covers refill contention and
 rejects excessive saturated SSI words; a physical Falcon soak remains required
 before release.
+
+The real-song gates use an optional, ignored local corpus directory rather
+than tracked music files. By default `make stock-audio`, `make endurance`, and
+`make endurance-batch` read `corpus/`; set `CORPUS_DIR=/path/to/corpus` to use
+another location. Generated executables remain under `release/`, so `make
+clean` cannot delete the local source material.

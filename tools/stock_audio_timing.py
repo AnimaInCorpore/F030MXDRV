@@ -19,6 +19,7 @@ import threading
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PLAYER = os.path.join(REPO, "release", "xevious.tos")
+DEFAULT_CORPUS = os.path.join(REPO, "corpus")
 TOS_ROM = os.path.join(
     REPO, "third_party", "f030dsp3d", "tools", "tos402.rom"
 )
@@ -96,17 +97,27 @@ def main():
                         help="maximum saturated production SSI words (default: 64)")
     parser.add_argument("--wall-timeout", type=int, default=180,
                         help="Hatari wall-time cap in seconds (default: 180)")
+    parser.add_argument("--corpus-dir", default=DEFAULT_CORPUS,
+                        help=("directory containing XEVIOUS.MDX/PDX "
+                              f"(default: {DEFAULT_CORPUS})"))
     args = parser.parse_args()
+    corpus_dir = os.path.abspath(args.corpus_dir)
 
     if not shutil.which("hatari"):
         sys.exit("error: stock audio timing gate needs Hatari")
-    for path in (PLAYER, TOS_ROM):
+    mdx_path = os.path.join(corpus_dir, "XEVIOUS.MDX")
+    pdx_path = os.path.join(corpus_dir, "XEVIOUS.PDX")
+    for path in (PLAYER, TOS_ROM, mdx_path, pdx_path):
         if not os.path.isfile(path):
             sys.exit(f"error: missing required file: {path}")
 
     build_dir = os.path.join(REPO, "build")
     os.makedirs(build_dir, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="stock-audio-", dir=build_dir) as work:
+        player = os.path.join(work, "xevious.tos")
+        shutil.copy(PLAYER, player)
+        shutil.copy(mdx_path, work)
+        shutil.copy(pdx_path, work)
         fifo_path = os.path.join(work, "trace.fifo")
         os.mkfifo(fifo_path)
         scorer = TraceScorer(fifo_path)
@@ -121,7 +132,7 @@ def main():
             "--log-file", os.path.join(work, "hatari.log"),
             "--trace-file", fifo_path,
             "--trace", "gemdos,dsp_host_interface,dsp_host_ssi,xbios",
-            PLAYER,
+            player,
         ]
         try:
             completed = subprocess.run(

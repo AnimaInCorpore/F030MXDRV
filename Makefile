@@ -33,6 +33,7 @@ DSP_RT4_PROFILE_FRAMES := 2048
 DSP_RT5_PROFILE_FRAMES := 8192
 DSP_RT4_PROFILE_TARGETS := $(addprefix profile-dsp-rt4-alg,1 2 3 4 5 6)
 RELEASE_DIR := release
+CORPUS_DIR ?= corpus
 
 YM2151_ORACLE := $(NATIVE_BUILD)/ym2151_oracle
 PDX_ADPCM_ORACLE := $(NATIVE_BUILD)/pdx_adpcm_oracle
@@ -62,11 +63,26 @@ VERBOSE_M68K_OBJECTS := $(patsubst src/m68k/%.s,$(VERBOSE_M68K_BUILD)/%.o,$(M68K
 DOSBOX ?= $(shell command -v dosbox-staging 2>/dev/null || command -v dosbox 2>/dev/null)
 DOSBOX_FLAGS ?= --noprimaryconf --set output=texture
 
-.PHONY: all host xevious dsp reference check capture-realtime compare-realtime smoke stock-audio endurance endurance-batch profile-dsp profile-dsp-rt \
+.PHONY: all help host xevious dsp reference check capture-realtime compare-realtime smoke stock-audio endurance endurance-batch profile-dsp profile-dsp-rt \
 	profile-dsp-rt2 profile-dsp-rt3 profile-dsp-rt4 profile-dsp-rt5 \
 	clean run tools xevious-verbose xevious-verbose50
 
 all: host dsp
+
+help:
+	@echo "Build targets:"
+	@echo "  all              build the Falcon executables and DSP image"
+	@echo "  check            build everything and validate generated references"
+	@echo "  smoke            run the full non-interactive Hatari integration test"
+	@echo "  capture-realtime capture and compare all 19 perceptual scenarios"
+	@echo "  stock-audio      gate stock-clock SSI timing (needs Xevious corpus files)"
+	@echo "  endurance        play Xevious through two loops and fade under Hatari"
+	@echo "  endurance-batch  play every uppercase MDX in CORPUS_DIR under Hatari"
+	@echo "  profile-dsp*     capture DSP cycle profiles under Hatari"
+	@echo "  run              launch the conformance executable in Hatari"
+	@echo "  clean            remove generated build/ and release/ directories"
+	@echo
+	@echo "Optional corpus directory: $(CORPUS_DIR) (override with CORPUS_DIR=path)"
 
 host: $(RELEASE_DIR)/f030mxdrv.tos $(RELEASE_DIR)/f030mxdrv.ttp \
 		$(RELEASE_DIR)/xevious.tos
@@ -193,7 +209,8 @@ $(YM2151_PERCEPTUAL_STAMP): $(YM2151_ORACLE) \
 		--output $(YM2151_PERCEPTUAL_MODEL_REPORT)
 	@touch $@
 
-$(M68K_BUILD)/%.o: src/m68k/%.s src/m68k/xbios.i src/m68k/protocol.i \
+$(M68K_BUILD)/%.o: src/m68k/%.s src/m68k/xbios.i src/m68k/verbose.i \
+		src/m68k/protocol.i \
 		$(YM2151_REFERENCE) $(PDX_ADPCM_REFERENCE) $(YM2151_HOST_TABLES) \
 		$(DSP_STAGE2_IMAGE) $(VASM)
 	@mkdir -p $(M68K_BUILD)
@@ -201,7 +218,7 @@ $(M68K_BUILD)/%.o: src/m68k/%.s src/m68k/xbios.i src/m68k/protocol.i \
 		-o $@ -L $(M68K_BUILD)/$*.lst
 
 $(XEVIOUS_M68K_BUILD)/player.o: src/m68k/player.s src/m68k/xbios.i \
-		src/m68k/protocol.i $(VASM)
+		src/m68k/verbose.i src/m68k/protocol.i $(VASM)
 	@mkdir -p $(XEVIOUS_M68K_BUILD)
 	$(VASM) $< -quiet -Felf -m68030 -DPLAYER_DEFAULT_XEVIOUS \
 		-Isrc/m68k -I$(GENERATED_BUILD) -o $@ \
@@ -455,7 +472,7 @@ smoke: check
 # 600-handoff floor runs past both former stalls and requires a >32-write burst
 # to exercise the expanded stage.
 stock-audio: xevious
-	@python3 tools/stock_audio_timing.py
+	@python3 tools/stock_audio_timing.py --corpus-dir "$(abspath $(CORPUS_DIR))"
 
 profile-dsp: check tools/profile_dsp.py
 	@if ! command -v hatari >/dev/null 2>&1; then \
@@ -658,10 +675,16 @@ endurance: check
 		echo "error: endurance target needs Hatari" >&2; \
 		exit 1; \
 	fi
+	@if [ ! -s "$(CORPUS_DIR)/XEVIOUS.MDX" ] || \
+		[ ! -s "$(CORPUS_DIR)/XEVIOUS.PDX" ]; then \
+		echo "error: endurance needs XEVIOUS.MDX and XEVIOUS.PDX in $(CORPUS_DIR)/" >&2; \
+		echo "       override with: make endurance CORPUS_DIR=/path/to/corpus" >&2; \
+		exit 1; \
+	fi
 	@rm -rf build/endurance build/hatari-endurance.trace build/hatari-endurance.log
 	@mkdir -p build/endurance
 	@cp $(RELEASE_DIR)/f030mxdrv.tos build/endurance/
-	@cp $(RELEASE_DIR)/XEVIOUS.MDX $(RELEASE_DIR)/XEVIOUS.PDX build/endurance/
+	@cp "$(CORPUS_DIR)/XEVIOUS.MDX" "$(CORPUS_DIR)/XEVIOUS.PDX" build/endurance/
 	@printf 'XEVIOUS.MDX\r\n' > build/endurance/AUTOPLAY.INF
 	@SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy hatari \
 		--machine falcon --dsp emu \
@@ -682,13 +705,13 @@ endurance: check
 ENDURANCE_VBLS := 9000
 ENDURANCE_MIN_REFILLS := 200
 
-# The same end-to-end gate over every corpus song in release/. The driver
+# The same end-to-end gate over every corpus song in CORPUS_DIR. The driver
 # streams each Hatari trace through a FIFO and scores it in flight (refill
 # volume, clean Dsp_Unlock shutdown, no protocol error replies), so no
 # trace file lands on disk; failing songs keep a rolling trace tail in
 # build/endurance-batch/.
 endurance-batch: check
-	@python3 tools/endurance_batch.py
+	@python3 tools/endurance_batch.py --corpus-dir "$(abspath $(CORPUS_DIR))"
 
 profile-dsp-rt5: check tools/profile_dsp.py
 	@if ! command -v hatari >/dev/null 2>&1; then \

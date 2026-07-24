@@ -85,9 +85,16 @@ A DSP capture directory must contain the same 19 filenames and columns. Run:
 make compare-realtime REALTIME_CANDIDATE_DIR=path/to/capture
 ```
 
+`make check` builds and validates the exact reference plus the independent
+native projection; it does not claim to have executed the Falcon kernel. A
+production-kernel result is generated only by `make capture-realtime` or by
+passing an existing capture directory to `make compare-realtime`.
+
 ## Capture harness
 
-`make capture-realtime` produces and gates that directory automatically. For
+`make capture-realtime` requires Hatari and produces and gates that directory
+automatically. Candidate vectors land under `build/capture/vectors/`; the
+final report is `build/reference/ym2151-realtime-comparison.txt`. For
 each scenario the harness compiles the exact trace into a `CAPTURE.SCN`
 (every scenario fits the 32-entry FIFO ring and its 32,767-sample horizon),
 which switches the TTP's no-argument launch into capture mode: reset, queue

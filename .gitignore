@@ -1,4 +1,7 @@
 /build/
+/corpus/
 /release/
+/.claude/
 __pycache__/
+*.py[cod]
 .DS_Store

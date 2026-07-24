@@ -17,8 +17,9 @@ MXDRV_PDX_CAPACITY      equ     319488
         text
 
 ; Resident-trap-independent MXDRV 2.06+17 API dispatcher. The public call
-; numbers and register convention match the original 32-entry table; playback
-; parsing/timer service is filled in behind these stable entries in stages.
+; numbers and register convention match the original 32-entry table. The
+; playback path is implemented behind these stable entries; unsupported
+; option/extension calls return -1.
 ; in:  d0.b = call number, other arguments follow the original MXDRV ABI
 ; out: d0.l = call result
 mxdrv_call:

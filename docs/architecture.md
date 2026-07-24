@@ -1,4 +1,10 @@
-# Architecture and staged port plan
+# Architecture and implementation status
+
+The player path described here is implemented and gated under Hatari. The
+remaining project work is physical-Falcon validation, the unsupported and
+state-only MXDRV API cases listed in [`mxdrv-api.md`](mxdrv-api.md), and release
+packaging. The numbered implementation areas below are a status record, not a
+future port plan.
 
 ## Ownership
 
@@ -232,13 +238,14 @@ The constants are duplicated in `src/m68k/protocol.i` and
 `src/dsp/protocol.inc` because the two assemblers do not share syntax. Keep the
 protocol version in the ping reply whenever either side changes incompatibly.
 
-## Stages
+## Implementation status
 
 1. **Scaffold (done):** build both CPUs, load/ping/reset, mirror OPM registers,
    and expose the MXDRV `WriteOPM` seam.
-2. **Driver API and MDX executor (done under emulation):** preserve the 32-call table and
-   Trap #4 register convention, own bounded MDX/PDX copies, expose OPM/PCM work
-   buffers, and implement reset/play/stop/pause/fade/mask state. Playback now
+2. **Driver foundation and MDX executor (playback path done under emulation):**
+   preserve the 32-call table and Trap #4 register-preservation convention,
+   own bounded MDX/PDX copies, expose OPM/PCM work buffers, and implement
+   reset/play/stop/pause/fade/mask state. Playback now
    parses standard raw MDX title/PDX headers, accepts both 9- and 16-track
    tables, validates the sequence, voice table, and every track offset, then
    advances bounded waits and notes one explicit tick at a time. FF/FE tempo
@@ -312,8 +319,9 @@ protocol version in the ping reply whenever either side changes incompatibly.
    buffers the result through Falcon SSI. The
    1007-frame exact integration gate remains as a conformance check. MDX PCM
    notes bind tracks 8-15 to PDX voices 0-7 with encoded durations and default
-   rate/gain/pan. The corpus gate exercises real MDX/PDX pairs under Hatari. The
-   TTP player loads an explicit PDX override or resolves the embedded MDX PDX
+   rate/gain/pan. The optional local-corpus gate exercises real MDX/PDX pairs
+   under Hatari. The TTP player loads an explicit PDX override or resolves the
+   embedded MDX PDX
    name, then includes its decoded PCM in every realtime inactive-buffer refill.
    Transport is continuous because the
    previous block repeats if a refill is late; fresh PDX time advances only when
@@ -405,9 +413,9 @@ is deliberately narrow:
 1. **Validate on a physical Falcon.** Confirm the SSI clock/DMA arrangement,
    transmit-underrun recovery, A/B handoff timing, host/DSP contention, and
    long-duration mixed FM/PDX playback at the target machine clock.
-2. **Finish public API compatibility.** Complete the remaining MXDRV option
-   calls and tighten edge-case error semantics beyond the exercised MDX/PDX
-   playback path.
+2. **Finish public API compatibility.** Complete the unsupported and state-only
+   calls listed in [`mxdrv-api.md`](mxdrv-api.md), then tighten edge-case error
+   semantics beyond the exercised MDX/PDX playback path.
 3. **Package a release.** Document the tested Falcon configuration, provide
    the final distribution layout, and repeat the hardware soak against that
    packaged build.

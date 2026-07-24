@@ -3,7 +3,7 @@
 	url = https://github.com/vampirefrog/x68kd11s.git
 [submodule "third_party/mame"]
 	path = third_party/mame
-	url = git@github.com:AnimaInCorpore/mame.git
+	url = https://github.com/AnimaInCorpore/mame.git
 [submodule "third_party/f030dsp3d"]
 	path = third_party/f030dsp3d
 	url = git@bitbucket.org:AnimaInCorpore/f030dsp3d.git
