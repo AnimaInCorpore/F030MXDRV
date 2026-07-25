@@ -15,7 +15,7 @@ the full historical MXDRV ABI.
 | `$00` | stop/reset the timer, driver, MDX, PDX, and YM state |
 | `$01` | unsupported (`-1`) |
 | `$02` | copy MDX data from `a1`, length `d1`; maximum 65,536 bytes |
-| `$03` | copy and precache raw PDX data from `a1`, length `d1`; maximum 319,488 bytes |
+| `$03` | copy and precache raw PDX data from `a1`, length `d1`; maximum 327,680 bytes |
 | `$04` | stop the current song, parse the owned MDX, start playback, and claim MFP Timer A |
 | `$05` | stop playback, release MFP Timer A, reset PDX, and key off all FM channels |
 | `$06` | pause sequencer advancement |

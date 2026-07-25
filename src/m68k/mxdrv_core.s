@@ -10,9 +10,10 @@
         global  mxdrv_fade_wait
         global  mxdrv_fade_active
         global  mxdrv_fade_counter
+        global  mxdrv_pdx_sample_count
 
 MXDRV_MDX_CAPACITY      equ     65536
-MXDRV_PDX_CAPACITY      equ     319488
+MXDRV_PDX_CAPACITY      equ     327680
 
         text
 
@@ -75,6 +76,7 @@ mxdrv_api_reset:
         bsr     mxdrv_mdx_clock_stop
         clr.l   mxdrv_mdx_size
         clr.l   mxdrv_pdx_size
+        clr.l   mxdrv_pdx_sample_count
         clr.w   mxdrv_channel_mask
         clr.b   mxdrv_playing
         move.b  #1,mxdrv_paused
@@ -113,6 +115,7 @@ mxdrv_api_set_pdx:
         move.l  d1,d2
         bsr     mxdrv_copy_data
         move.l  d1,mxdrv_pdx_size
+        bsr     mxdrv_pdx_detect_table
         bsr     mxdrv_pdx_precache
         moveq   #0,d0
         rts
@@ -327,6 +330,8 @@ mxdrv_api_error:
 mxdrv_mdx_size:
         ds.l    1
 mxdrv_pdx_size:
+        ds.l    1
+mxdrv_pdx_sample_count:
         ds.l    1
 mxdrv_channel_mask:
         ds.w    1

@@ -17,8 +17,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-CODEC_RATE = 25_175_000.0 / 4.0 / 256.0
+CODEC_RATE = 25_175_000.0 / 4.0 / 192.0
 PHASE_MODULUS = 1 << 22
+SLOW_NOISE_LATCH_NATIVE_SAMPLES = 8
 BASE_SCENARIOS = (
     "pitch", "detune", "timing", "envelope", "lfo", "noise", "noise-slow"
 )
@@ -223,7 +224,7 @@ def validate_schedule(vector: Vector) -> list[str]:
     phase = 0
     native_sample = 0
     for frame, row in enumerate(vector.rows):
-        phase += 2560
+        phase += 1920
         last_native = native_sample
         while phase >= 1007:
             phase -= 1007
@@ -459,7 +460,27 @@ def compare_suites(
         noise_candidate = candidate[scenario].column("noise_state")
         reference_transitions = len(transitions(noise_reference))
         candidate_transitions = len(transitions(noise_candidate))
-        noise_rate_error = abs(candidate_transitions - reference_transitions) / max(reference_transitions, 1)
+        if scenario == "noise-slow":
+            # The production renderer deliberately uses a different
+            # maximum-length LFSR from ymfm. Comparing two finite,
+            # uncorrelated bit sequences adds their random transition-count
+            # deviations and can reject a correct latch frequency. Register
+            # $0f=$90 latches every eight native samples, and an unbiased
+            # sequence changes sign on half of those latches, so grade the
+            # decoded rate directly over the longer statistical window.
+            native_samples = reference[scenario].column("native_sample")[-1] + 1
+            expected_transitions = (
+                native_samples / SLOW_NOISE_LATCH_NATIVE_SAMPLES / 2.0
+            )
+            noise_rate_error = (
+                abs(candidate_transitions - expected_transitions)
+                / expected_transitions
+            )
+        else:
+            noise_rate_error = (
+                abs(candidate_transitions - reference_transitions)
+                / max(reference_transitions, 1)
+            )
         noise_cosine, _, _ = spectral_metrics(noise_reference, noise_candidate)
         # The substituted audio must carry the noise: without it channel 7
         # emits a sine and the spectra separate immediately.

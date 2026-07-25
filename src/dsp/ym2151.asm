@@ -326,7 +326,7 @@ rt5_mix_written:
 
 ; 48-bit LFO accumulator holding ymfm's 32-bit counter times 2^18, so the
 ; true waveform index (counter bits 22-29) is the top byte of the high word.
-; The exact per-tick and per-81-tick advances are decoded into matching
+; The exact per-tick and per-61-tick advances are decoded into matching
 ; high/low pairs when register $18 is written.
 rt5_lfo_acc_hi:
         ds      1
@@ -337,10 +337,9 @@ rt5_lfo_acc_lo:
 ; one channel slot; the POST offsets compensate for that advance. The @cvs
 ; wrapper only strips the Y-memory attribute so the X-space feedback anchor
 ; can be subtracted; the numeric offset is unchanged.
-; A 24.585 kHz quality frame spans twice the former native-chip time. Keep the
-; signed 24-bit 49.17 kHz scale constant and shift its product one bit less;
-; doubling the literal would cross $7fffff and become a negative multiplier.
-RT5_PITCH_DDA_SCALE equ 5352297
+; The 32.780 kHz prescale-2 frame advances native time by 1920/1007. This
+; signed 24-bit multiplier encodes the corresponding per-frame phase scale.
+RT5_PITCH_DDA_SCALE equ 4014223
 
 RT5_INC_BASE     equ @cvs(x,rt5_operator_increment)-rt5_feedback_1
 RT5_INC_OP1_PRE  equ RT5_INC_BASE+0
@@ -482,7 +481,7 @@ rt5_pitch_dt1:
 
 ; Channel-7 noise substitution state. The threshold is the decoded latch
 ; period (ymfm frequency+1, in 1007ths of a double-rate tick) and doubles
-; as the enable flag; the counter is the per-frame 5120-step DDA; the
+; as the enable flag; the counter is the per-frame 3840-step DDA; the
 ; snapshot holds the LFSR at the last latch so the sign survives block
 ; boundaries; the gain is the block-held signed magnitude (1023-att)<<9.
 rt5_noise_threshold:
@@ -816,8 +815,8 @@ rt5_env_gain_shifted:
         move    a1,y0                   ; output-scale gain
         ; Quality mode always retains ymfm's exact out>>1 onward-modulation
         ; depth. A feedback-active M1 receives a second independently scaled
-        ; product in its stage loop; lowering SSI to 24.585 kHz buys the cycles
-        ; that the former coupled fold could not afford.
+        ; product in its stage loop; the 32.780 kHz production cadence retains
+        ; enough cycles for the independently scaled feedback product.
         move    #>$001000,x1
 rt5_env_gain_mod_scale:
         move    y0,x0
@@ -2500,11 +2499,10 @@ rt5_runtime_stereo_done:
         move    #>63,m5
         rts
 
-; Update one 32-frame quality block of global control state. At 24.585 kHz it
-; spans the same wall and native-chip time as the former 64-frame block. Every
-; due FIFO event is
+; Update one 32-frame quality block of global control state at 32.780 kHz.
+; Every due FIFO event is
 ; decoded first so its state lands in this block. Native-time, LFO, and timer
-; state advance with the exact 2560:1007 frame DDA instead of repeating its
+; state advance with the exact 1920:1007 frame DDA instead of repeating its
 ; quotient work in every frame; the LFO rate and both timer reloads are the
 ; decoded values, and the 17-bit maximum-length Galois LFSR still advances
 ; exactly once per frame. The tail scales the low control bits by the decoded
@@ -2514,32 +2512,31 @@ rt5_runtime_stereo_done:
 rt5_update_support_block:
         jsr     rt5_service_event
 
-        ; Over 32 quality frames the native-time DDA always advances by 81
-        ; native ticks plus a possible 82nd. Subtracting 17*1007 up front
-        ; leaves only one conditional correction while preserving the exact
-        ; remainder and boundary state.
+        ; Over 32 quality frames the native-time DDA advances by 61 native
+        ; ticks plus a possible 62nd. The block product is
+        ; 32*1920 = 61*1007 + 13, leaving one conditional correction.
         move    x:rt5_native_phase,a
-        move    #>353,x0
+        move    #>DSP_RT_BLOCK_NATIVE_REMAINDER,x0
         add     x0,a
-        move    #>81,y0
-        move    #>1007,x0
+        move    #>DSP_RT_BLOCK_NATIVE_BASE,y0
+        move    #>DSP_RT_NATIVE_DENOMINATOR,x0
         cmp     x0,a
         jlt     rt5_native_phase_ready
         sub     x0,a
-        move    #>82,y0
+        move    #>DSP_RT_BLOCK_NATIVE_BASE+1,y0
 rt5_native_phase_ready:
         move    a1,x:rt5_native_phase
 
         ; The 48-bit LFO accumulator (ymfm counter times 2^18) advances by
-        ; the decoded 81-tick pair, plus the per-tick pair when the native
-        ; DDA consumed an 82nd tick; the true waveform index is then the
+        ; the decoded 61-tick pair, plus the per-tick pair when the native
+        ; DDA consumed a 62nd tick; the true waveform index is then the
         ; high word's top byte.
         move    y:rt5_lfo_acc_lo,a0
         move    y:rt5_lfo_acc_hi,a1
         move    x:rt5_lfo_step_block_lo,b0
         move    x:rt5_lfo_step_block,b1
         add     b,a
-        move    #>81,b
+        move    #>DSP_RT_BLOCK_NATIVE_BASE,b
         cmp     y0,b
         jeq     rt5_lfo_acc_ready
         move    x:rt5_lfo_step_tick_lo,b0
@@ -6179,7 +6176,7 @@ rt5_commit_runtime_events_done:
         org     p:$28c0
 ; Start the production-shaped codec-rate path. Host PCM remains signed
 ; 16-bit on the wire and is expanded into planar 0.23 accumulators; sixteen
-; Sixteen 32-frame blocks fill one 512-frame, 24.585 kHz SSI buffer.
+; Sixteen 32-frame blocks fill one 512-frame, 32.780 kHz SSI buffer.
 command_start_realtime_mixed:
         movep   #0,x:m_crb
         movep   #$4100,x:m_cra
@@ -6243,7 +6240,7 @@ command_rt_start_buffer_ready:
 ; compute_noise_volume law under the kernel's 2^21 amplitude convention,
 ; with the attenuation block-held like every other realtime control. The
 ; sign resamples the LFSR output bit (bit 16 of the right-shifting
-; Galois form) at the decoded frequency through a 5120-per-frame DDA
+; Galois form) at the decoded frequency through a 3840-per-frame DDA
 ; against the (freq+1)*1007 latch period, and the pass steps the LFSR
 ; through the 32 frames the support block skipped, so boundary dumps
 ; stay exactly 32 Galois steps apart. The value lands in channel 7's
@@ -6309,7 +6306,7 @@ rt5_noise_sign_ready:
         move    x:rt5_noise_lfsr,y1
         move    x:rt5_noise_counter,b
         move    x:rt5_noise_threshold,x0
-        move    #>5120,x1
+        move    #>DSP_RT_NOISE_FRAME_STEP,x1
 
         ; channel 7 pan bits pick the target: bit 6 is ymfm's first
         ; output (reference left), bit 7 the second
@@ -6349,7 +6346,7 @@ rt5_noise_ring_pass:
         jcc     rt5_noise_ring_stepped
         move    #>$012000,x1
         eor     x1,a
-        move    #>5120,x1
+        move    #>DSP_RT_NOISE_FRAME_STEP,x1
 rt5_noise_ring_stepped:
         move    a1,y1
 rt5_noise_ring_drain:
@@ -6376,7 +6373,7 @@ rt5_noise_stream_pass:
         jcc     rt5_noise_stream_stepped
         move    #>$012000,x1
         eor     x1,a
-        move    #>5120,x1
+        move    #>DSP_RT_NOISE_FRAME_STEP,x1
 rt5_noise_stream_stepped:
         move    a1,y1
 rt5_noise_stream_drain:
@@ -6400,7 +6397,7 @@ rt5_noise_stream_done:
 ; Register $0f: noise enable in bit 7 plus the 5-bit frequency field,
 ; decoded to the latch period (ymfm frequency = field^$1f; the period is
 ; frequency+1 double-rate ticks, held in 1007ths so one codec frame adds
-; 2560). Enabling mutes operator 31's decoded sine base through the same
+; 3840). Enabling mutes operator 31's decoded sine base through the same
 ; gain rebuild a TL write uses; disabling re-decodes the true TL.
 rt5_event_decode_noise:
         move    y1,a
@@ -6410,7 +6407,7 @@ rt5_event_decode_noise:
         move    #>1,x0
         add     x0,a
         move    a1,x1
-        move    #>1007,x0
+        move    #>DSP_RT_NATIVE_DENOMINATOR,x0
         mpy     x0,x1,b
         asr     b
         move    b0,a
@@ -6443,18 +6440,18 @@ rt5_noise_decode_off:
 ; the boundary dumps stay exactly where the whole-block path leaves them.
 rt5_render_split_block:
         ; Recover the block-start clock and DDA remainder from the advanced
-        ; state: the support pass added 353 mod 1007 to the remainder and
-        ; 81 or 82 to the clock.
+        ; state: the support pass added 13 mod 1007 to the remainder and
+        ; 61 or 62 to the clock.
         move    x:rt5_native_phase,a
-        move    #>353,x0
+        move    #>DSP_RT_BLOCK_NATIVE_REMAINDER,x0
         sub     x0,a
-        jge     rt5_split_advanced_81
-        move    #>1007,x0
+        jge     rt5_split_advanced_61
+        move    #>DSP_RT_NATIVE_DENOMINATOR,x0
         add     x0,a
-        move    #>82,b
+        move    #>DSP_RT_BLOCK_NATIVE_BASE+1,b
         jmp     rt5_split_phase_ready
-rt5_split_advanced_81:
-        move    #>81,b
+rt5_split_advanced_61:
+        move    #>DSP_RT_BLOCK_NATIVE_BASE,b
 rt5_split_phase_ready:
         move    a1,x:rt5_seg_walk_phase
         move    b1,x:rt5_seg_adv
@@ -6489,7 +6486,7 @@ rt5_split_pm_ready:
 rt5_split_segment_loop:
         ; Map the queue head onto its landing frame. An empty queue or a
         ; head at or past the block end leaves the tail as the final
-        ; segment; otherwise the walk advances the 2560:1007 cursor until
+        ; segment; otherwise the walk advances the 1920:1007 cursor until
         ; the consumed native count reaches the head's block offset.
         move    #>DSP_RT5_BLOCK_FRAMES,a
         move    a1,x:rt5_seg_walk_frame
@@ -6512,8 +6509,8 @@ rt5_split_segment_loop:
         move    a1,r1                   ; walking frame cursor
         move    x:rt5_seg_walk_phase,a
         move    x:rt5_seg_walk_consumed,b
-        move    #>2560,x1
-        move    #>1007,x0
+        move    #>DSP_RT_NATIVE_NUMERATOR,x1
+        move    #>DSP_RT_NATIVE_DENOMINATOR,x0
         move    #>1,y0
         ; Invariant: a/b hold the DDA remainder and native count through
         ; the frames before r1, committed to memory before each peek. The
@@ -7227,8 +7224,8 @@ rt5_pitch_dt1_ready:
         ; Exact block-DDA conversion. The render's per-frame mac multiplies
         ; each increment by $ff and doubles, and one sine-ROM cycle spans
         ; 256*2^24 accumulator units, so the increment that reproduces the
-        ; 10.10 native step at the 2560:1007 quality rate is
-        ; step*MUL * 2^20/(51*1007); the scale constant carries 0.04 ppm and
+        ; 10.10 native step at the 1920:1007 quality rate is
+        ; step*MUL * 2^20/(68*1007); the scale constant carries sub-ppm error and
         ; the pitch fixture lands within 0.05 ppm. Only tones already past
         ; the codec Nyquist wrap into the signed alias domain.
         move    #>RT5_PITCH_DDA_SCALE,x0
@@ -7246,7 +7243,7 @@ rt5_pitch_ops_done:
         rts
 
         ; LFO writes: $18 stores the decoded per-tick rate beside its
-        ; precomputed 81-tick block product, $19 banks PM depth (bit 7 set)
+        ; precomputed 61-tick block product, $19 banks PM depth (bit 7 set)
         ; or AM depth, and $1b keeps the two waveform bits whose low bit
         ; flips the block PM sign.
 rt5_event_decode_lfo:
@@ -7272,7 +7269,7 @@ rt5_lfo_rate_decode:
 rt5_lfo_rate_shifted:
         ; The 48-bit accumulator holds ymfm's counter times 2^18, so both
         ; decoded advances become high/low pairs at that scale: the raw
-        ; per-tick step shifted up, and its 81-tick block product from the
+        ; per-tick step shifted up, and its 61-tick block product from the
         ; doubling multiply plus seventeen more shifts.
         move    a1,x0                   ; per-tick step
         move    a,b
@@ -7280,8 +7277,8 @@ rt5_lfo_rate_shifted:
         asl     b
         move    b1,x:rt5_lfo_step_tick
         move    b0,x:rt5_lfo_step_tick_lo
-        move    #>81,y0
-        mpy     x0,y0,b                 ; step * 81 * 2
+        move    #>DSP_RT_BLOCK_NATIVE_BASE,y0
+        mpy     x0,y0,b                 ; step * 61 * 2
         rep     #17
         asl     b
         move    b1,x:rt5_lfo_step_block
@@ -7783,7 +7780,7 @@ rt5_receive_runtime_events_done:
         move    x:rt5_pcm_previous,b
         move    a1,x:rt5_pcm_previous
         add     b,a
-        asr     a                       ; 2-tap anti-image FIR at 24.585 kHz
+        asr     a                       ; 2-tap anti-image FIR at 32.780 kHz
         rep     #8
         asl     a
         clr     b

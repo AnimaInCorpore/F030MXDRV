@@ -20,8 +20,13 @@ SOUND_DSP_XMIT  equ     1
 SOUND_DAC       equ     8
 SOUND_CLK25M    equ     0
 SOUND_CLK50K    equ     1
-SOUND_CLK25K    equ     3
+SOUND_CLK33K    equ     2
 SOUND_NO_SHAKE  equ     1
+SOUND_ADDERIN   equ     4
+SOUND_MATRIXIN  equ     2
+SOUND_MONPAIR0  equ     0
+SOUND_DMA_STOP  equ     0
+SNDSTAT_RESET   equ     1
 
         text
 
@@ -149,8 +154,8 @@ run_conformance:
         tst.l   d0
         bne     protocol_failed
 
-        ; Load a standard 96-entry PDX bank through MXDRV call $03, validate
-        ; its table, then decode one entry against the vendored MSM6258 oracle.
+        ; Load a standard one-bank PDX through MXDRV call $03, validate its
+        ; table, then decode one entry against the vendored MSM6258 oracle.
         moveq   #3,d0
         move.l  #pdx_test_bank_end-pdx_test_bank,d1
         lea     pdx_test_bank(pc),a1
@@ -1221,11 +1226,18 @@ run_conformance:
         Locksnd
         cmpi.l  #1,d0
         bne     sound_failed
+        ; Matrix state outlives the program that set it, so pin every route
+        ; this harness depends on instead of inheriting it. See the audio-path
+        ; constraints in docs/architecture.md.
+        Buffoper #SOUND_DMA_STOP
+        Sndstatus #SNDSTAT_RESET
+        Soundcmd #SOUND_ADDERIN,#SOUND_MATRIXIN
         Setmode #SOUND_STEREO16
         Settracks #0,#0
+        Setmontracks #SOUND_MONPAIR0
         Dsptristate #1,#0
         ; The command-$11/$13 exact conformance transport is still 1007 frames
-        ; at 49.17 kHz. Production reconnects at 24.585 kHz below.
+        ; at 49.17 kHz. Production reconnects at 32.780 kHz below.
         Devconnect #SOUND_DSP_XMIT,#SOUND_DAC,#SOUND_CLK25M,#SOUND_CLK50K,#SOUND_NO_SHAKE
 
         bsr     dsp_start_mixed_audio
@@ -1401,10 +1413,10 @@ run_conformance:
         bne     audio_protocol_failed
 
         ; Promote the command-$17 block engine into its production-shaped
-        ; 512-frame, 24.585 kHz A/B transport. Reconnect only after the exact
+        ; 512-frame, 32.780 kHz A/B transport. Reconnect only after the exact
         ; 49.17 kHz stream above has stopped. Sixteen 32-frame quality blocks
-        ; retain the same 20.83 ms period and 1301/1302-native-sample clock.
-        Devconnect #SOUND_DSP_XMIT,#SOUND_DAC,#SOUND_CLK25M,#SOUND_CLK25K,#SOUND_NO_SHAKE
+        ; form a 15.62 ms period and advance exactly 976 native samples.
+        Devconnect #SOUND_DSP_XMIT,#SOUND_DAC,#SOUND_CLK25M,#SOUND_CLK33K,#SOUND_NO_SHAKE
         bsr     mxdrv_reset
         tst.l   d0
         bne     audio_protocol_failed
@@ -1438,7 +1450,7 @@ run_conformance:
         bne     audio_protocol_failed
         move.l  #DSP_CMD_QUERY_TIME,d0
         bsr     dsp_exchange
-        cmpi.l  #1301,d0
+        cmpi.l  #976,d0
         bne     audio_protocol_failed
 
         moveq   #$7f,d1                ; direct live TL write
@@ -1451,13 +1463,13 @@ run_conformance:
         bsr     mxdrv_write_ym2151
         cmp.l   #DSP_REPLY_OK,d0
         bne     audio_protocol_failed
-        move.l  #1301,d0
+        move.l  #976,d0
         moveq   #$28,d1
         moveq   #$4a,d2
         bsr     dsp_queue_write
         tst.l   d0
         bne     audio_protocol_failed
-        move.l  #1365,d0
+        move.l  #1040,d0
         moveq   #$28,d1
         moveq   #$4c,d2
         bsr     dsp_queue_write
@@ -1469,7 +1481,7 @@ run_conformance:
         bne     audio_protocol_failed
         move.l  #DSP_CMD_QUERY_TIME,d0
         bsr     dsp_exchange
-        cmpi.l  #2603,d0
+        cmpi.l  #1952,d0
         bne     audio_protocol_failed
 
         bsr     dsp_refill_realtime_audio
@@ -1477,7 +1489,7 @@ run_conformance:
         bne     audio_protocol_failed
         move.l  #DSP_CMD_QUERY_TIME,d0
         bsr     dsp_exchange
-        cmpi.l  #3904,d0
+        cmpi.l  #2928,d0
         bne     audio_protocol_failed
 
         move.l  #DSP_CMD_STOP_AUDIO,d0
@@ -1858,8 +1870,9 @@ mdx_volume_voice:
 mdx_volume_song_end:
         even
 
-; Standard PDX table: 96 big-endian offset/length pairs. Entry 0 is valid,
-; entry 1 is empty, and entries 2/3 deliberately exercise validation errors.
+; Standard one-bank PDX table: 96 big-endian offset/length pairs. Entry 0 is
+; valid, entry 1 is empty, and entries 2/3 deliberately exercise validation
+; errors.
 pdx_test_bank:
         dc.l    768,8
         dc.l    0,0

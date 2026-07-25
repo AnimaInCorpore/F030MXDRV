@@ -122,6 +122,26 @@
         addq.l  #6,sp
         endm
 
+; Select which pair out of the crossbar's eight 16-bit frame slots reaches the
+; DAC. The value survives across programs, so a player that fills slots 0/1
+; must pin it rather than inherit it.
+        macro   Setmontracks track
+        move.w  \1,-(sp)
+        move.w  #134,-(sp)
+        trap    #14
+        addq.l  #4,sp
+        endm
+
+; reset=1 reinitializes the converters and clears the latched overflow bits;
+; reset=0 returns the current status, whose bits 4 and 5 report left and right
+; codec clipping.
+        macro   Sndstatus reset
+        move.w  \1,-(sp)
+        move.w  #140,-(sp)
+        trap    #14
+        addq.l  #4,sp
+        endm
+
         macro   Setbuffer region,begin,end
         move.l  \3,-(sp)
         move.l  \2,-(sp)

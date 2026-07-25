@@ -168,6 +168,8 @@ $(YM2151_PERCEPTUAL_STAMP): $(YM2151_ORACLE) \
 		tests/traces/bisect_two_bom_alg5_fb7.trace
 	@rm -rf $(YM2151_PERCEPTUAL_DIR) $(YM2151_PERCEPTUAL_MODEL_DIR)
 	@mkdir -p $(YM2151_PERCEPTUAL_DIR) $(YM2151_PERCEPTUAL_MODEL_DIR)
+	# A 16,384-frame slow-noise window keeps the 3% transition-rate gate
+	# statistically meaningful at the faster 32.780 kHz output cadence.
 	@for mode_and_dir in \
 		"--codec-vectors:$(YM2151_PERCEPTUAL_DIR)" \
 		"--perceptual-vectors:$(YM2151_PERCEPTUAL_MODEL_DIR)"; do \
@@ -185,7 +187,7 @@ $(YM2151_PERCEPTUAL_STAMP): $(YM2151_ORACLE) \
 			> $$output_dir/lfo.tsv || exit 1; \
 		$(YM2151_ORACLE) $$mode tests/traces/noise_channel7.trace 8192 \
 			> $$output_dir/noise.tsv || exit 1; \
-		$(YM2151_ORACLE) $$mode tests/traces/noise_channel7_slow.trace 8192 \
+		$(YM2151_ORACLE) $$mode tests/traces/noise_channel7_slow.trace 16384 \
 			> $$output_dir/noise-slow.tsv || exit 1; \
 		for algorithm in 0 1 2 3 4 5 6 7; do \
 			$(YM2151_ORACLE) $$mode tests/traces/perceptual_topology.trace 4096 \
@@ -258,9 +260,8 @@ $(RELEASE_DIR)/xevverb.tos: $(VERBOSE_M68K_OBJECTS) $(VLINK)
 xevious-verbose: $(RELEASE_DIR)/xevverb.tos
 	@file $(RELEASE_DIR)/xevverb.tos
 
-# Same verbose player, but reconnecting the codec at the pre-rework 49.17 kHz
-# prescaler. Only useful for isolating whether prescaler 3 is what stops the
-# SSI on real hardware; the rest of the kernel still assumes 24.585 kHz.
+# Same verbose player, but reconnecting the codec at 49.17 kHz. Only useful
+# for isolating SSI clocking; the rest of the kernel assumes 32.780 kHz.
 VERBOSE50_M68K_BUILD := build/m68k-xevious-verbose50
 VERBOSE50_M68K_OBJECTS := $(patsubst src/m68k/%.s,$(VERBOSE50_M68K_BUILD)/%.o,$(M68K_SOURCES))
 
@@ -359,7 +360,7 @@ check: all reference
 	@rg -q "^RATETEST_BOOT_WORDS equ " $(RATETEST_BOOT_IMAGE)
 	@file $(RELEASE_DIR)/f030mxdrv.tos $(RELEASE_DIR)/ym2151.lod
 
-# Replay every perceptual scenario through the protocol-v23 realtime stream
+# Replay every perceptual scenario through the protocol-v24 realtime stream
 # in Hatari, reconstruct per-frame vectors from the block-boundary dumps, and
 # feed them through the exact-to-perceptual comparator.
 capture-realtime: check
@@ -399,7 +400,7 @@ smoke: check
 	@rg -q "XBIOS 0x6E Dsp_ExecBoot" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x4d584c" build/hatari-smoke.trace
 	@rg -q "Transfer 0x4c4f41" build/hatari-smoke.trace
-	@rg -q "Transfer 0x4d5817" build/hatari-smoke.trace
+	@rg -q "Transfer 0x4d5818" build/hatari-smoke.trace
 	@rg -q "Transfer 0x01dc19" build/hatari-smoke.trace
 	@rg -q "Transfer 0x524459" build/hatari-smoke.trace
 	@rg -q "GEMDOS 0x42 Fseek\\(0, [0-9]+, 2\\)" build/hatari-smoke.trace
@@ -456,11 +457,11 @@ smoke: check
 	@rg -q "Direct Transfer 0x01c5de" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x01c6c0" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x170000" build/hatari-smoke.trace
-	@rg -q "Transfer 0x1ce7a1" build/hatari-smoke.trace
+	@rg -q "Transfer 0xeed0f2" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x01c6de" build/hatari-smoke.trace
 	@rg -q "XBIOS 0x80 Locksnd" build/hatari-smoke.trace
 	@rg -q "XBIOS 0x89 Dsptristate\\(0x1, 0x0\\)" build/hatari-smoke.trace
-	@rg -q "XBIOS 0x8B Devconnect\\(1, 0x8, 0, 3, 1\\)" build/hatari-smoke.trace
+	@rg -q "XBIOS 0x8B Devconnect\\(1, 0x8, 0, 2, 1\\)" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x110000" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x120000" build/hatari-smoke.trace
 	@rg -q "Transfer 0x0003c0" build/hatari-smoke.trace
@@ -484,9 +485,12 @@ smoke: check
 	@rg -q "Direct Transfer 0x130000" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x0e0a00" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x0e0a40" build/hatari-smoke.trace
-	@rg -q "Transfer 0x000f40" build/hatari-smoke.trace
+	@rg -q "Transfer 0x000f00" build/hatari-smoke.trace
+	@rg -q "Transfer 0x0003d0" build/hatari-smoke.trace
+	@rg -q "Transfer 0x0007a0" build/hatari-smoke.trace
+	@rg -q "Transfer 0x000b70" build/hatari-smoke.trace
 	@rg -q "Transfer 0x000600" build/hatari-smoke.trace
-	@rg -q "Transfer 0x98e818" build/hatari-smoke.trace
+	@rg -q "Transfer 0xf8c040" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x01db10" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x0c0000" build/hatari-smoke.trace
 	@rg -q "XBIOS 0x89 Dsptristate\\(0x0, 0x0\\)" build/hatari-smoke.trace
@@ -495,7 +499,7 @@ smoke: check
 
 # Exercise the dedicated player at the stock 16 MHz 68030 clock and prove from
 # the SSI trace that every prepared 512-frame block replaces the active block
-# at the next 20.83 ms stereo boundary without sustained output clipping. The
+# at the next 15.62 ms stereo boundary without sustained output clipping. The
 # 600-handoff floor runs past both former stalls and requires a >32-write burst
 # to exercise the expanded stage.
 stock-audio: xevious
@@ -724,6 +728,15 @@ endurance: check
 		build/endurance/f030mxdrv.tos
 	@test $$(rg -c "Direct Transfer 0x190000" build/hatari-endurance.trace) -ge $(ENDURANCE_MIN_REFILLS)
 	@rg -q "Dsp_Unlock" build/hatari-endurance.trace
+	@# Matrix state survives across programs and Hatari always starts clean,
+	@# so the emulator cannot prove the hardening works - only that it still
+	@# runs. The exit Sndstatus reads the codec clipping bits, which only
+	@# mean something on hardware.
+	@for call in 'Buffoper(0x0)' 'Sndstatus(0x1)' 'Soundcmd(0x4, 0x2)' \
+		'Settracks(0x0, 0x0)' 'Setmontracks(0x0)' 'Sndstatus(0x0)'; do \
+		rg -qF "$$call" build/hatari-endurance.trace || \
+			{ echo "error: missing sound setup call $$call" >&2; exit 1; }; \
+	done
 	@if rg -q "DSP->Host.: Transfer 0xffffff" build/hatari-endurance.trace; then \
 		echo "error: protocol error reply during playback" >&2; exit 1; \
 	fi
@@ -804,9 +817,9 @@ profile-dsp-rt5: check tools/profile_dsp.py
 		--profile $(DSP_RT5_PROFILE_DIR)/profile.txt \
 		--output $(DSP_RT5_PROFILE_DIR)/report.txt \
 		--samples $(DSP_RT5_PROFILE_FRAMES) \
-		--sample-rate 24584.9609375 \
+		--sample-rate 32779.9479166667 \
 		--unit-label "codec frame" \
-		--title "DSP56001 live-SSI eight-channel decoded ALG/PAN/AM/PM/TL profile"
+		--title "DSP56001 32.780 kHz live-SSI eight-channel decoded ALG/PAN/AM/PM/TL profile"
 
 run: all
 	@if ! command -v hatari >/dev/null 2>&1; then \

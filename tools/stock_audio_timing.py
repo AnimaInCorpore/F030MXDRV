@@ -3,7 +3,8 @@
 
 Boots the dedicated Xevious player at 16 MHz with the DSP at its normal
 32 MHz, streams Hatari's SSI trace through a FIFO, and verifies that every
-completed 512-frame production buffer hands off on the next boundary while
+completed 512-frame, 32.780 kHz production buffer hands off on the next
+boundary while
 the emitted samples stay below the clipping ceiling.
 """
 

@@ -9,19 +9,27 @@
         global  player_pdx_filename
 
 PLAYER_MDX_CAPACITY     equ     65536
-PLAYER_PDX_CAPACITY     equ     319488
+PLAYER_PDX_CAPACITY     equ     327680
 
 PLAYER_SOUND_STEREO16  equ     1
 PLAYER_SOUND_DSP_XMIT  equ     1
 PLAYER_SOUND_DAC       equ     8
 PLAYER_SOUND_CLK25M    equ     0
-PLAYER_SOUND_CLK25K    equ     3
+PLAYER_SOUND_CLK33K    equ     2
 PLAYER_SOUND_CLK50K    equ     1
 PLAYER_SOUND_NO_SHAKE  equ     1
 PLAYER_SOUND_LTATTEN   equ     0
 PLAYER_SOUND_RTATTEN   equ     1
+PLAYER_SOUND_ADDERIN   equ     4
 PLAYER_SOUND_INQUIRE   equ     -1
 PLAYER_SOUND_FULL      equ     0
+PLAYER_SOUND_MATRIXIN  equ     2       ; adder takes the matrix, not the A/D
+PLAYER_SOUND_MONPAIR0  equ     0       ; DAC monitors frame slots 0 and 1
+PLAYER_SOUND_DMA_STOP  equ     0
+PLAYER_SNDSTAT_RESET   equ     1
+PLAYER_SNDSTAT_INQUIRE equ     0
+PLAYER_SNDSTAT_CLIPL   equ     4
+PLAYER_SNDSTAT_CLIPR   equ     5
 PLAYER_LOOP_BUDGET     equ     2
 PLAYER_FADE_SPEED      equ     8
 
@@ -512,24 +520,35 @@ player_files_loaded:
         move.w  d0,player_old_left_atten
         Soundcmd #PLAYER_SOUND_RTATTEN,#PLAYER_SOUND_INQUIRE
         move.w  d0,player_old_right_atten
+        ; The rest of the matrix also survives across programs, and TOS does
+        ; not reset it for a new Devconnect. Stop any inherited DMA playback
+        ; that would contend for the same DAC, reinitialize the converters,
+        ; and pin every route this player depends on instead of inheriting it.
+        ; None of this can be exercised under Hatari, which starts clean.
+        VB      vb_txt_sndreset
+        Buffoper #PLAYER_SOUND_DMA_STOP
+        Sndstatus #PLAYER_SNDSTAT_RESET
         Soundcmd #PLAYER_SOUND_LTATTEN,#PLAYER_SOUND_FULL
         Soundcmd #PLAYER_SOUND_RTATTEN,#PLAYER_SOUND_FULL
+        Soundcmd #PLAYER_SOUND_ADDERIN,#PLAYER_SOUND_MATRIXIN
         VB      vb_txt_setmode
         Setmode #PLAYER_SOUND_STEREO16
         VB      vb_txt_settracks
         Settracks #0,#0
+        ; The DSP fills frame slots 0 and 1; a stale monitor pair points the
+        ; DAC at slots this player never writes.
+        Setmontracks #PLAYER_SOUND_MONPAIR0
         VB      vb_txt_tristate
         Dsptristate #1,#0
         ifd     FORCE_CLK50K
-        ; Bring-up A/B only: the former 49.17 kHz prescaler. Everything else
-        ; still assumes 24.585 kHz, so playback runs at the wrong pitch and
-        ; tempo - the only question this build answers is whether the SSI
-        ; clocks at all, i.e. whether prescaler 3 is what stops it.
+        ; Bring-up A/B only: reconnect at 49.17 kHz while the production
+        ; engine still assumes 32.780 kHz. Playback therefore runs at the
+        ; wrong pitch and tempo; this build only isolates SSI clocking.
         VB      vb_txt_devconnect50
         Devconnect #PLAYER_SOUND_DSP_XMIT,#PLAYER_SOUND_DAC,#PLAYER_SOUND_CLK25M,#PLAYER_SOUND_CLK50K,#PLAYER_SOUND_NO_SHAKE
         else
         VB      vb_txt_devconnect
-        Devconnect #PLAYER_SOUND_DSP_XMIT,#PLAYER_SOUND_DAC,#PLAYER_SOUND_CLK25M,#PLAYER_SOUND_CLK25K,#PLAYER_SOUND_NO_SHAKE
+        Devconnect #PLAYER_SOUND_DSP_XMIT,#PLAYER_SOUND_DAC,#PLAYER_SOUND_CLK25M,#PLAYER_SOUND_CLK33K,#PLAYER_SOUND_NO_SHAKE
         endc
         VB      vb_txt_sounddone
 
@@ -571,9 +590,9 @@ player_start_audio:
         bsr     mxdrv_ym_batch_enable
 
 player_loop:
-        ; The blocking realtime refill is the playback cadence. At 24.585 kHz,
-        ; 512 frames retain the original 20.8 ms period; a VBL wait here would
-        ; still miss the following buffer boundary.
+        ; The blocking realtime refill is the playback cadence. At 32.780 kHz,
+        ; 512 frames form a 15.62 ms period; a VBL wait here would still miss
+        ; the following buffer boundary.
         bsr     mxdrv_mdx_clock_pump
         tst.w   d0
         beq     player_finished
@@ -648,6 +667,7 @@ player_cleanup_sound:
         tst.b   player_sound_owned
         beq     player_cleanup_return
         Dsptristate #0,#0
+        bsr     player_report_clipping
         Soundcmd #PLAYER_SOUND_LTATTEN,player_old_left_atten
         Soundcmd #PLAYER_SOUND_RTATTEN,player_old_right_atten
         Unlocksnd
@@ -657,6 +677,31 @@ player_cleanup_return:
         movem.l (sp)+,d1-d7/a0-a6
         rts
 
+; The codec latches left and right clipping in bits 4 and 5 of the sound
+; status; the setup path cleared them with Sndstatus reset. This is the one
+; headroom check the emulation gates cannot make for us, because it measures
+; the analog converter rather than the mix that fed it, so report it on every
+; exit rather than only on failure. Each channel gets its own message so the
+; report survives a GEMDOS console call that does not preserve data registers.
+player_report_clipping:
+        Sndstatus #PLAYER_SNDSTAT_INQUIRE
+        move.w  d0,d1
+        andi.w  #(1<<PLAYER_SNDSTAT_CLIPL)|(1<<PLAYER_SNDSTAT_CLIPR),d1
+        beq.s   player_clip_none
+        cmpi.w  #(1<<PLAYER_SNDSTAT_CLIPL),d1
+        beq.s   player_clip_left_only
+        cmpi.w  #(1<<PLAYER_SNDSTAT_CLIPR),d1
+        beq.s   player_clip_right_only
+        Cconws  player_clip_both_text
+        rts
+player_clip_left_only:
+        Cconws  player_clip_left_text
+        rts
+player_clip_right_only:
+        Cconws  player_clip_right_text
+player_clip_none:
+        rts
+
         data
 
         ifd     VERBOSE_BOOT
@@ -664,10 +709,11 @@ vb_txt_run:        dc.b 'player_run entered',13,10,0
 vb_txt_loadmdx:    dc.b 'load MDX         ',0
 vb_txt_loadpdx:    dc.b 'load PDX (call 3)',0
 vb_txt_locksnd:    dc.b 'Locksnd          ',0
+vb_txt_sndreset:   dc.b 'Buffoper/Sndstatus reset',13,10,0
 vb_txt_setmode:    dc.b 'Setmode',13,10,0
 vb_txt_settracks:  dc.b 'Settracks',13,10,0
 vb_txt_tristate:   dc.b 'Dsptristate',13,10,0
-vb_txt_devconnect: dc.b 'Devconnect 24.585k (prescale 3)',13,10,0
+vb_txt_devconnect: dc.b 'Devconnect 32.780k (prescale 2)',13,10,0
 vb_txt_devconnect50: dc.b 'Devconnect 49.17k (prescale 1) A/B',13,10,0
 vb_txt_sounddone:  dc.b 'sound path ready',13,10,0
 vb_txt_mdxplay:    dc.b 'MDX play (call 4)',0
@@ -693,10 +739,16 @@ player_finished_text:
         dc.b    'Song finished.',13,10,0
 player_stopped_text:
         dc.b    'Playback stopped.',13,10,0
+player_clip_both_text:
+        dc.b    'Warning: codec clipped both channels.',13,10,0
+player_clip_left_text:
+        dc.b    'Warning: codec clipped the left channel.',13,10,0
+player_clip_right_text:
+        dc.b    'Warning: codec clipped the right channel.',13,10,0
 player_mdx_error_text:
         dc.b    'Error: unable to load the MDX file (maximum 65536 bytes).',13,10,0
 player_pdx_error_text:
-        dc.b    'Error: unable to load the PDX file (maximum 319488 bytes).',13,10,0
+        dc.b    'Error: unable to load the PDX file (maximum 327680 bytes).',13,10,0
 player_sound_error_text:
         dc.b    'Error: unable to lock the Falcon sound system.',13,10,0
 player_dsp_error_text:

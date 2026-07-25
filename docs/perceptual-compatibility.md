@@ -1,7 +1,7 @@
 # YM2151 perceptual compatibility gate
 
 The real-time Falcon kernel targets perceptual compatibility at the quality
-clock's 24,584.9609375 Hz frame rate. The exact 62.5 kHz ymfm path remains the oracle,
+clock's 32,779.9479167 Hz frame rate. The exact 62.5 kHz ymfm path remains the oracle,
 but codec-rate output is not required to match its individual samples. This
 gate turns that relaxed boundary into deterministic data and pass/fail rules.
 
@@ -12,7 +12,8 @@ gate turns that relaxed boundary into deterministic data and pass/fail rules.
 
 - sustained pitch, non-aligned key/register-write timing, a complete ADSR
   contour, AM/PM LFO, channel-7 noise at the fastest and a slow latch
-  rate, and per-operator DT1/DT2 detune scenarios;
+  rate (the latter uses 16,384 frames for a stable transition-rate sample),
+  and per-operator DT1/DT2 detune scenarios;
 - algorithms 0-7 with operator-1 feedback level 4;
 - algorithm 0 at feedback levels 0 and 7; and
 - two real voices sustained at feedback level 7 for eighty 512-frame periods
@@ -36,7 +37,7 @@ and the gate discriminates real pitch, depth, routing, and envelope
 errors — which is its purpose. No requantized implementation can track
 the maximal-depth trajectories.
 
-The oracle advances exact ymfm native samples with the same 2560:1007
+The oracle advances exact ymfm native samples with the same 1920:1007
 zero-order schedule as `ssi_render_frame`. Writes are applied before their
 exact native sample. Each output row therefore describes the first codec frame
 that can contain the effect of every ordered write.
@@ -54,7 +55,7 @@ Every row contains:
 | `opN_env`, `opN_state` | exact logical-operator attenuation and ADSR state |
 
 `tools/compare_ym2151_realtime.py validate` also proves that the corpus itself
-has a drift-free 2560:1007 schedule, all required event markers, visible ADSR,
+has a drift-free 1920:1007 schedule, all required event markers, visible ADSR,
 AM/PM and noise activity, eight distinct algorithm fingerprints, and distinct
 feedback spectra. This prevents an accidentally silent or ineffective fixture
 from weakening the later candidate comparison.
@@ -71,8 +72,8 @@ and YM3012 round trip independently of ymfm's native-rate channel output.
 
 This isolates the chosen synthesis-rate/timbre compromise from control-state
 implementation errors. The checked projection has zero pitch/control drift,
-algorithm spectral cosine from 0.7731 to 0.9999, normalized log-spectrum RMSE
-from 2.58 to 9.30 dB, and RMS energy ratios from 0.974 to 1.032. Its generated
+algorithm spectral cosine from 0.7955 to 1.0000, normalized log-spectrum RMSE
+from 1.81 to 8.64 dB, and RMS energy ratios from 0.984 to 1.015. Its generated
 `comparison-report.txt` is a build gate. It is not a substitute for capturing
 the eventual DSP implementation, because it deliberately borrows exact
 frame-boundary control state.
@@ -99,15 +100,15 @@ each scenario the harness compiles the exact trace into a `CAPTURE.SCN`
 (every scenario fits the 32-entry FIFO ring and its 32,767-sample horizon),
 which switches the TTP's no-argument launch into capture mode: reset, queue
 every write through the real rolling FIFO, then start and refill the
-protocol-v23 realtime stream with silent PCM. Hatari debugger breakpoints
+protocol-v24 realtime stream with silent PCM. Hatari debugger breakpoints
 dump the rt5 phase accumulators, envelope state and block coefficients,
 LFO/noise/timer scalars, and native clock at every 32-frame block entry, and
 both SSI buffers after each completed 512-frame transaction; explicit
-post-render symbols anchor buffer completion because protocol v23 acknowledges
+post-render symbols anchor buffer completion because protocol v24 acknowledges
 host-buffer ownership before the DSP finishes rendering.
 
 Reconstruction refuses to guess: the dumped native clock must match the
-2560:1007 DDA at every boundary, consecutive LFSR dumps must be exactly 32
+1920:1007 DDA at every boundary, consecutive LFSR dumps must be exactly 32
 Galois steps apart, and every block's phase advance must equal its
 per-segment increments at 510 accumulator units per frame — modulo one sine-ROM cycle
 (2^32 accumulator units), because the independent-operator render path masks
@@ -140,7 +141,7 @@ The reported `lfo_am` is the kernel's own published block `m_lfo_am`
 shifted by the decoded channel sensitivity, block-held like every other
 realtime control.
 
-The checked report is regenerated at 24.585 kHz. Pitch, detune, ordered-write
+The checked report is regenerated at 32.780 kHz. Pitch, detune, ordered-write
 timing, LFO, noise, envelope state, all eight algorithms, feedback 0/7, and
 the sustained-feedback splice fixture are graded in two explicit tiers. The
 independent codec-rate model must first pass absolute exact-reference bounds.
@@ -153,12 +154,12 @@ published per-rate affine recurrence, so a capture reconstructs each
 operator's mid-block level analytically from the block-boundary dump and the
 same recurrence, then interpolates per-frame rows linearly between the
 32-frame points; ADSR state columns hold the boundary value. The checked DSP
-capture scores mean attenuation error 1.62/1023, correlation 0.9996, and a
-four-frame transition lag against the exact ADSR reference.
+capture scores mean attenuation error 1.41/1023, correlation 0.9987, and a
+23-frame transition lag against the exact ADSR reference.
 
 ## Feedback-depth record
 
-The 24.585 kHz budget allows M1 to produce two products per frame. One uses
+The 32.780 kHz budget allows M1 to produce two products per frame. One uses
 the normal serial gain for audible onward modulation; the other uses the
 feedback-level history gain, matching ymfm's
 `(out0 + out1) >> (10 - FB)` law independently for levels 1–7. Feedback zero
@@ -168,7 +169,7 @@ is not attenuated to obtain the requested history depth.
 
 This removes the former coupled fold, its per-algorithm bias table, and the
 special level-7 repair class. The integrated worst-case profile measures
-364.14 cycles per quality frame against a 652.53-cycle budget. Sustained FB7
+364.28 cycles per quality frame against a 489.40-cycle budget. Sustained FB7
 remains separately splice-gated because feedback trajectories are sensitive
 to waveform-table quantization even when their depth law is correct — the
 exact-arithmetic implementation model already carries the ROM/block
@@ -204,7 +205,7 @@ The comparator enforces these boundaries:
 | pitch | at most 20 ppm long-term drift between least-squares phase rates and less than one codec frame of phase error |
 | envelope | mean attenuation error at most 24/1023, correlation at least 0.95, state transitions within 32 frames |
 | LFO | AM range within 25%, dominant-rate error at most one FFT bin, spectral cosine at least 0.90 |
-| noise | transition-rate error at most 3%, state-spectrum cosine at least 0.70 |
+| noise | transition-rate error at most 3% (exact reference for fast noise; decoded 8-native-sample expectation for slow noise), state-spectrum cosine at least 0.70 |
 | model feedback and algorithms vs exact | spectral cosine at least 0.70, log-spectrum RMSE at most 12 dB, RMS energy within 0.20-5.0x |
 | DSP feedback and algorithms vs model | spectral cosine at least 0.60, log-spectrum RMSE at most 14 dB, RMS energy vs exact within 0.20-5.0x |
 
