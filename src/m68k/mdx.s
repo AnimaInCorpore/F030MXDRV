@@ -463,12 +463,12 @@ mdx_command_voice:
         moveq   #0,d0
         move.b  (a4)+,d0
         cmpi.w  #8,d7
-        bcc     .pcm_bank
+        bcc     mdx_command_pcm_bank
 
         movea.l mxdrv_mdx_voice_table,a0
 .find_voice:
         cmpa.l  a3,a0
-        bcc     mdx_track_invalid
+        bcc     mdx_voice_missing
         cmp.b   (a0)+,d0
         beq     .fm_voice
         lea     26(a0),a1              ; ID byte plus 26-byte voice record
@@ -483,7 +483,23 @@ mdx_command_voice:
         move.l  a0,MDX_TRACK_VOICE(a6)
         move.b  #1,MDX_TRACK_VOICE_DIRTY(a6)
         bra     mdx_command_more
-.pcm_bank:
+
+; Some real MDX files reference a voice ID that is not present in their
+; bounded voice table. Keep the last valid voice when possible; on a first
+; selection, use the first complete record so the track remains audible
+; without reading beyond the owned MDX image.
+mdx_voice_missing:
+        tst.l   MDX_TRACK_VOICE(a6)
+        bne     mdx_command_more
+        movea.l mxdrv_mdx_voice_table,a0
+        lea     27(a0),a1              ; ID byte plus 26-byte voice record
+        cmpa.l  a3,a1
+        bcc     mdx_track_invalid
+        addq.l  #1,a0                  ; track state stores the body pointer
+        move.l  a0,MDX_TRACK_VOICE(a6)
+        move.b  #1,MDX_TRACK_VOICE_DIRTY(a6)
+        bra     mdx_command_more
+mdx_command_pcm_bank:
         move.b  d0,MDX_TRACK_BANK(a6)
         bra     mdx_command_more
 

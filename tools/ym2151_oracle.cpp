@@ -422,11 +422,12 @@ void emit_codec_vectors(const std::string &trace_path, uint32_t frames,
     inspectable_ym2151 chip(intf);
     chip.reset();
 
-    // Match the Falcon quality clock exactly: 25.175 MHz / 4 / 256. The
-    // rational native-to-codec schedule is represented by 2560/1007.
-    constexpr uint32_t kCodecNumerator = 2560;
+    // Match the Falcon prescale-2 quality clock exactly:
+    // 25.175 MHz / 4 / 192. The rational native-to-codec schedule is
+    // represented by 1920/1007.
+    constexpr uint32_t kCodecNumerator = 1920;
     constexpr uint32_t kCodecDenominator = 1007;
-    constexpr double kCodecRate = 25'175'000.0 / 4.0 / 256.0;
+    constexpr double kCodecRate = 25'175'000.0 / 4.0 / 192.0;
     std::cout << "# ymfm YM2151 "
               << (perceptual ? "codec-rate perceptual projection" : "exact codec reference")
               << "; native_rate="

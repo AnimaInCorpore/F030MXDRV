@@ -20,8 +20,8 @@ result without intermediate clipping, then performs a YM3012 external-DAC
 
 The Falcon cannot silently substitute its codec rate. Its audio stage must
 either resample 62.5 kHz explicitly or prove an equivalent phase/time mapping.
-The current production kernel uses a drift-free 2560:1007 DDA to map this
-native clock onto 24,584.9609375 Hz codec frames; the conformance kernel keeps
+The current production kernel uses a drift-free 1920:1007 DDA to map this
+native clock onto 32,779.9479167 Hz codec frames; the conformance kernel keeps
 the native rate.
 
 After a data-port write ymfm marks the chip busy for

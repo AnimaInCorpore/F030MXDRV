@@ -4,7 +4,7 @@ F030MXDRV plays Sharp X68000 MDX/PDX music on an Atari Falcon. The 68030 runs
 an MXDRV-compatible sequencer and the Falcon DSP56001 emulates the Yamaha
 YM2151, mixes MSM6258 ADPCM, and feeds 16-bit stereo audio to the Falcon DAC.
 
-The normal player uses a measured 24,584.9609375 Hz DSP kernel that fits the
+The normal player uses a measured 32,779.9479167 Hz DSP kernel that fits the
 stock 32 MHz DSP budget. A separate 62.5 kHz, sample-exact YM2151 kernel is
 retained as the conformance oracle and is checked against the vendored MAME
 ymfm implementation.
@@ -40,17 +40,18 @@ The exact support boundary is documented in
   repeats and escapes, detune, portamento, legato, key-on delay, software
   pitch/volume LFOs, OPM LFO control, sync, noise/PCM frequency, PCM8 enable,
   loop counting, and fadeout.
-- X68000-compatible MSM6258 decoding for the standard 96-entry raw PDX layout,
+- X68000-compatible MSM6258 decoding for raw PDX banks with up to sixteen
+  96-entry tables,
   with eight voices, five rates, 16 PCM8 gain levels, global pan, saturation,
   and a DSP-side two-tap reconstruction filter.
-- A 512-frame, 20.83 ms production transport. The 68030 prepares the next
+- A 512-frame, 15.62 ms production transport. The 68030 prepares the next
   period while SSI repeats the last complete one; the DSP changes buffers only
   at a stereo-period boundary.
 - Reproducible native-oracle, perceptual, smoke, stock-clock timing, endurance,
   and DSP-cycle gates.
 
-The integrated worst-case DSP profile measures 364.14 instruction cycles per
-24.585 kHz frame against a 652.53-cycle budget. The exact scalar renderer costs
+The integrated worst-case DSP profile measures 364.28 instruction cycles per
+32.780 kHz frame against a 489.40-cycle budget. The exact scalar renderer costs
 12,024.34 cycles per native 62.5 kHz sample against a 256.68-cycle budget, so it
 is deliberately a test oracle rather than the production renderer.
 
@@ -62,6 +63,11 @@ The supported build flow expects a POSIX shell plus:
 - Python 3, a C++17 compiler, `make`, `tar`, `file`, and `rg`;
 - DOSBox Staging or DOSBox for Motorola's DSP assembler; and
 - Hatari for emulator integration, capture, endurance, and profiling targets.
+
+DOSBox is needed only to run Motorola's DOS `ASM56000` binary. The `dsptools`
+project carries `asm56000c`, the same 4.1.1 assembler ported to C under a 0BSD
+license, which would remove that dependency; it has not been evaluated here,
+and any swap must reproduce the tracked DSP image checksums exactly.
 
 Initialize the pinned dependencies and build the complete static validation
 set:
@@ -137,7 +143,7 @@ F030MXDRV.TTP song.mdx [bank.pdx]
 When the override is absent, the player reads the PDX name from the MDX
 header, appends `.PDX` if necessary, and resolves a basename beside the MDX.
 An empty embedded name means FM-only playback. Paths are whitespace-delimited;
-the MDX limit is 65,536 bytes and the raw PDX limit is 319,488 bytes.
+the MDX limit is 65,536 bytes and the raw PDX limit is 327,680 bytes.
 
 With no command tail, `AUTOPLAY.INF` beside the program may contain the same
 one- or two-token line. `xevious.tos` instead defaults to `XEVIOUS.MDX`; keep
@@ -176,11 +182,11 @@ The 68030 owns the MXDRV-compatible API, file validation, track state, timing,
 and PDX decoding. The DSP owns YM2151 state, realtime FM synthesis, final PCM
 mixing, saturation, and SSI transport.
 
-Protocol v23 uses 24-bit host words. Production refills batch up to 64
+Protocol v24 uses 24-bit host words. Production refills batch up to 64
 coalesced YM writes and 512 mono PDX frames; the DSP stages those writes into a
 32-entry rolling event FIFO, renders sixteen 32-frame blocks, and switches the
 inactive 1024-word stereo SSI buffer at the next complete boundary. A
-drift-free 2560:1007 DDA maps the native 62.5 kHz YM clock to the Falcon quality
+drift-free 1920:1007 DDA maps the native 62.5 kHz YM clock to the Falcon quality
 rate.
 
 The executable embeds a 111-word `Dsp_ExecBoot` loader and a sparse 7,865-word

@@ -12,7 +12,7 @@ constexpr std::array<std::uint8_t, 8> kEncoded = {
     0x70, 0xf1, 0x27, 0x8e, 0x45, 0xab, 0xcd, 0xef,
 };
 constexpr std::array<int, 8> kIndexShift = {-1, -1, -1, -1, 2, 4, 6, 8};
-constexpr std::array<int, 5> kRatePhase = {480, 640, 960, 1280, 1920};
+constexpr std::array<int, 5> kRatePhase = {360, 480, 720, 960, 1440};
 constexpr std::array<int, 16> kVolumeQ12 = {
     649, 817, 1029, 1295, 1631, 2053, 2584, 3254,
     4096, 5157, 6492, 8173, 10289, 12953, 16306, 20529,

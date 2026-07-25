@@ -18,13 +18,13 @@ routine receives the register in `d1.b` and data in `d2.b`, mirrors the byte in
 `OPMBuf`, then writes the X68000 OPM ports. `src/m68k/mxdrv_port.s` preserves
 those input conventions and replaces the hardware write with one DSP word.
 
-## Host/DSP protocol v23
+## Host/DSP protocol v24
 
 Every transport unit is one DSP/host 24-bit word. The upper byte is an opcode.
 
 | Word | Meaning | Reply |
 | --- | --- | --- |
-| `01 00 00` | ping/protocol query | `4d 58 17` (`MX`, version 23) |
+| `01 00 00` | ping/protocol query | `4d 58 18` (`MX`, version 24) |
 | `02 rr dd` | write YM2151 register `rr = dd`, including during SSI playback | `00 00 00` |
 | `03 00 00` | reset YM2151 state | `00 00 00` |
 | `04 00 00` | clock one native 62.5 kHz sample | signed left sample |
@@ -46,7 +46,7 @@ Every transport unit is one DSP/host 24-bit word. The upper byte is an opcode.
 | `14 00 00` | run the 2048-frame block-oriented algorithm-0 channel spike | deterministic checksum `0f 26 66` |
 | `15 00 00` | run the 2048-frame block-oriented algorithm-7 carrier spike | deterministic checksum `89 eb 00` |
 | `16 00 aa` | run the 2048-frame mixed-topology spike for algorithm `aa = 1..6` | per-algorithm deterministic checksum |
-| `17 00 00` | run the 256-block live-SSI decoded-control and envelope engine | deterministic checksum `1c e7 a1` |
+| `17 00 00` | run the 256-block live-SSI decoded-control and envelope engine | deterministic checksum `ee d0 f2` |
 | `18 00 00`, then an event count, 0–64 packed writes, PCM8 pan, and 512 mono PCM words after `52 44 59` | accept the first production period, render the realtime FM buffer, and start interrupt-fed SSI | ready token, then `00 00 00` when the upload is owned |
 | `19 00 00`, with the same variable payload | accept the next production period, render 16 32-frame FM blocks, and switch at the following whole-buffer boundary | ready token, then `00 00 00` when the upload is owned |
 | anything else | unsupported command | `ff ff ff` |
@@ -90,7 +90,7 @@ DSP56001 sine ROM. The DSP acknowledges once it owns the host payload; the
 waits for the next complete active-buffer boundary. Stop restores the packed
 tables, exact caches, external-Y mapping, and linear address modifiers.
 Command `12` returns the deterministic checksum of the first realtime buffer;
-the Hatari attack-trace fixture expects `98 e8 18`.
+the Hatari attack-trace fixture expects `f8 c0 40`.
 
 Active buffered audio accepts synchronous command `02` writes, `0e`
 transactions, `0f` queries, the refill matching its current mode (`13` or
@@ -101,8 +101,8 @@ into the exact register image and decoded into the persistent block state;
 queued writes are drained at their landing frames: a block whose FIFO head
 falls inside it renders as event-aligned segments, so every write takes
 effect on the first codec frame at or after its native timestamp. Its
-drift-free 2560:1007 DDA advances 512-frame refills by 1301 or 1302 native
-samples; the smoke sequence observes clocks 1301, 2603, and 3904. The rolling
+drift-free 1920:1007 DDA advances each 512-frame refill by 976 native
+samples; the smoke sequence observes clocks 976, 1952, and 2928. The rolling
 clock is not reset by start or refill; only chip reset returns it to zero.
 Command `0d` counts prepared frames, not the number replayed by SSI, and reads
 1536 after the start plus two realtime refills. This distinction keeps the
@@ -165,7 +165,7 @@ external-Y table storage, so the packed table is backed up in X and
 re-expanded after the measurement.
 
 The measured window also advances the complete decoded control state: a
-drift-free 2560:1007 native clock, a decoded-rate LFO, both decoded timers
+drift-free 1920:1007 native clock, a decoded-rate LFO, both decoded timers
 under their control bits, a maximum-length one-step-per-frame noise LFSR, and
 a profile-local 32-entry FIFO whose boundary service drains every due event:
 one write at each of the first 25 block boundaries, a seven-event burst —
@@ -205,11 +205,11 @@ output — and the command checksum — are bit-identical to the cleared-ring
 ordering. Algorithms 6/7 route their already-summed
 carrier rings through a separate decoded-pan path. The command explicitly
 clears a latched SSI underrun before restoring the external Y map and exact
-phase cache. Its checksum is `1c e7 a1`.
+phase cache. Its checksum is `ee d0 f2`.
 
-Hatari measures 364.14 cycles per codec frame over the 8,192-frame,
-256-block profile against the 652.53-cycle budget, leaving 288.39 cycles
-(44.2%). Dynamic topology/pan routing, planar PDX accumulation, final
+Hatari measures 364.28 cycles per codec frame over the 8,192-frame,
+256-block profile against the 489.40-cycle budget, leaving 125.12 cycles
+(25.6%). Dynamic topology/pan routing, planar PDX accumulation, final
 saturation, live SSI, the full decoded register control path, and decoded
 envelope curvature therefore fit the budget together. Envelope-active
 operators advance once per block by a composed full-block affine step from
@@ -278,7 +278,7 @@ protocol version in the ping reply whenever either side changes incompatibly.
    and the write-busy status bit are implemented.
 5. **Falcon audio (production path complete under emulation):** the exact DSP path converts 1280 native
    62.5 kHz samples into 1007 frames at the Falcon's 25.175 MHz / 4 / 128 codec
-   rate. Protocol v23 provides the production 512-frame, 24.585 kHz realtime path.
+   rate. Protocol v24 provides the production 512-frame, 32.780 kHz realtime path.
    Both feed 16-bit, two-word SSI network frames from a fast transmit
    interrupt using two aligned external-X buffers. The normal interrupt mutates
    only its dedicated `r6/m6` pair; a separate long exception path reads SSISR
@@ -287,7 +287,7 @@ protocol version in the ping reply whenever either side changes incompatibly.
    disables the transmit interrupt briefly to switch at a stereo boundary.
    The Hatari gate retains exact A-to-B/B-to-A coverage and now also exercises
    realtime A-to-B and B-to-A refills, real FIFO writes, direct live writes,
-   clock progression through 1301, 2603, and 3904 native samples, a 1536-frame
+   clock progression through 976, 1952, and 2928 native samples, a 1536-frame
    prepared count, deterministic first-buffer output, and clean table/cache
    restoration at stop.
 
@@ -299,21 +299,22 @@ protocol version in the ping reply whenever either side changes incompatibly.
    time by 46.85x before steady SSI and host-port overhead. That exact kernel is
    retained as the conformance reference. The production block kernel renders
    eight channels, mixed PDX, decoded controls, block envelopes, and live SSI
-   at 364.14 cycles per codec frame against a 652.53-cycle budget. Its relaxed
+   at 364.28 cycles per codec frame against a 489.40-cycle budget. Its relaxed
    boundary is block-rate envelope/LFO evolution and codec-rate synthesis;
    ordered writes split blocks at their first landing frame, and DT1/DT2 plus
    noise-frequency/output substitution are integrated. An embedded second-stage P-memory loader removes the
    former 8 KiB converted-LOD ceiling: a 111-word `Dsp_ExecBoot` program at
    `P:$0040` receives all sparse P sections, acknowledges completion, and enters
    the final program at its replaced reset vector.
-6. **PCM/PDX (done under emulation):** standard raw PDX banks have checked lookup for all
-   96 offset/length entries and eight independent streaming MSM6258 decoders. A
+6. **PCM/PDX (done under emulation):** raw PDX banks have checked lookup for one
+   or more 96-entry tables, bounded to sixteen banks, and eight independent
+   streaming MSM6258 decoders. A
    codec-rate host mixer implements the five PCM8 playback clocks with exact
    rational phase accumulation, all 16 two-decibel volume steps, common PCM8
    pan, voice start/stop and active masks, and signed 16-bit saturation. A
    generated oracle checks low-nibble-first decoding, predictor and step state,
    sample exhaustion, malformed bank ranges, and deterministic two-voice mixer
-   frames under Hatari. The protocol-v23 player renders 512 PDX frames on the
+   frames under Hatari. The protocol-v24 player renders 512 PDX frames on the
    host with a voice-major mono block mixer, uploads them with global pan and
    batched YM writes, combines them with the realtime FM kernel, and double-
    buffers the result through Falcon SSI. The
@@ -352,7 +353,7 @@ The reference side of that comparison is now executable. `make check` creates
 timing, ADSR, AM/PM LFO, two-rate noise,
 feedback levels 0/7, all eight algorithms, and sustained feedback level 7 on
 algorithms 4 and 5. Every row records the exact
-2560:1007 native boundary, ordered-write count/hash, stereo output, and
+1920:1007 native boundary, ordered-write count/hash, stereo output, and
 operator/control state. `tools/compare_ym2151_realtime.py` validates that
 coverage and accepts future candidate captures using drift/timing, envelope,
 LFO/noise-rate, and spectral thresholds documented in
@@ -360,14 +361,60 @@ LFO/noise-rate, and spectral thresholds documented in
 half of the perceptual gate. A second native projection independently applies
 the 256-step sine phase, codec-rate feedback, algorithms, panning, noise, and
 YM3012 rounding while borrowing exact frame-boundary control state. It passes
-with topology spectral cosine of 0.7731-0.9999, log-spectrum RMSE of
-2.58-9.30 dB, and energy ratio of 0.974-1.032. The integrated DSP kernel is
+with topology spectral cosine of 0.7955-1.0000, log-spectrum RMSE of
+1.81-8.64 dB, and energy ratio of 0.984-1.015. The integrated DSP kernel is
 captured separately by `make capture-realtime`.
+
+### What the emulator cannot decide
+
+Every gate in this repository runs under Hatari, so it is worth recording where
+Hatari's own authors say the model stops being the hardware. These are not
+reasons to distrust the gates — the synthesis contracts above are checked
+against ymfm, not against Hatari — but they bound which *transport* questions
+an emulator run can answer, and they should be read before any future change
+to buffering, pacing, or the SSI path.
+
+Hatari's manual calls Falcon emulation "experimental and incomplete", and
+lists the crossbar sound matrix itself among its experimental features: the
+whole ADC/DAC/DMA/DSP interconnect this player depends on carries that label.
+CPU, FPU, MMU and DSP emulation are documented as instruction-wise correct but
+not cycle accurate, unlike the 68000 core, and for 68030-to-DSP synchronization
+specifically the maintainers state that enabling cache emulation is sometimes
+closer to a real machine and sometimes further from it. There is no emulator
+setting that makes host/DSP contention authoritative.
+
+Four specific approximations bear on this design:
+
+- The DSP SSI receive path substitutes one interrupt type for another as an
+  acknowledged workaround, because the documented one produced no sound. SSI
+  interrupt semantics under emulation are therefore approximated rather than
+  modeled, which is the mechanism the transmit interrupt and the A/B switch
+  are built on.
+- When the DAC receives no data, the crossbar forces its write position ahead
+  of the read position. That is invented starvation behavior, so a late refill
+  may sound acceptable under Hatari and behave differently on hardware. The
+  repeat-last-period design is still the right response to a late refill; it is
+  simply untested rather than tested-and-passing.
+- Several crossbar registers were reverse-engineered because Atari's
+  documentation does not fully describe them, and the Falcon030 Service Guide's
+  SOUNDINT/SNDINT description is noted as inaccurate against measured hardware.
+  Interrupt-timing conclusions drawn from emulation are weaker than register
+  conclusions drawn from the specification.
+- The DSP memory-cost model is a deliberate simplification, but one its author
+  states is correct for the Falcon specifically. It is the one place in this
+  list where the emulator's number should be trusted for design work; see
+  [`dsp56001-notes.md`](dsp56001-notes.md).
+
+The practical rule this yields: emulation gates decide synthesis correctness,
+register semantics, protocol behavior, and relative cycle cost. Underrun
+behavior, refill pacing under real contention, matrix state left by other
+programs, and codec-level clipping are hardware-soak questions, and a green
+gate is not evidence about any of them.
 
 ## Real-time compatibility contract
 
 The selected Falcon playback target is musical FM compatibility at the
-24,584.9609375 Hz codec cadence, with the exact command-clocked kernel retained
+32,779.9479167 Hz codec cadence, with the exact command-clocked kernel retained
 as an offline/conformance oracle. The real-time kernel must preserve these
 externally meaningful behaviors:
 
@@ -392,7 +439,7 @@ codec-rate engine must update feedback and modulation on every produced sample;
 holding selected native outputs is not a valid shortcut because those outputs
 feed later operator state.
 
-Protocol v23 satisfies the write-latency clause: the production kernel
+Protocol v24 satisfies the write-latency clause: the production kernel
 splits a block at each queued write's landing frame, draining and decoding
 between the segments, so effects land on the first codec frame at or after
 their native timestamps. The envelope, AM, LFO, and timer advances keep their
@@ -405,6 +452,63 @@ frame while noise is enabled — over the budget only in the all-channels-maxed
 profile fixture, which therefore clears $0f and leaves the noise-enabled cost
 to the capture scenarios and the hardware soak.
 
+## Falcon audio-path constraints
+
+Four properties of the Falcon sound matrix bound the playback path. They come
+from the August 1992 Falcon specification, not from emulator behavior, and two
+of them are places where Hatari is more permissive than the hardware.
+
+**The internal codec accepts only two of the three master clocks.** The
+specification states that the CODEC can use the internal 25.175 MHz or the
+external clock; the internal 32 MHz clock is available to the other matrix
+devices only. This matters because 32 MHz produces exactly the rates this
+engine would most like to have: 32 MHz / 256 / 3 is 41,666.67 Hz, precisely
+two thirds of the native 62.5 kHz OPM rate, and 32 MHz / 256 / 4 is half of
+it. Either would replace the 1920:1007 DDA with an exact 3:2 or 2:1
+decimation. Hatari's crossbar implements the full 32 MHz rate table and mutes
+the DAC only for prescale values 6, 8, 10, and 12 or above, so such a change
+would pass every gate in this repository and produce nothing on a stock
+Falcon. `SOUND_CLK25M` is therefore the only supported production clock, and
+the 32.780 kHz cadence is chosen from the 25.175 MHz table. The external-clock
+exception is real but requires non-stock hardware: an external 32 MHz
+oscillator on the DSP port is codec-legal and would make 41,666.67 Hz
+available, against a 385-cycle frame budget that the measured 364.28-cycle
+kernel fits. That remains an optional future mode, not a supported
+configuration.
+
+**The DAC cannot operate in gated clock mode.** Passing no-handshake to
+`Devconnect` is a hardware requirement rather than a tuning choice.
+
+**A frame is eight 16-bit slots, not two.** In continuous clock mode the SSI
+ports transfer 128-bit frames carrying eight 16-bit samples, with SYNC high
+for the first 16 bits and low for the remaining 96. The two-word `CRA=$4100`
+frame and word-length frame sync in `CRB=$5a00` are correct against that
+structure: the DSP fills slots 0 and 1 and idles for the rest of the frame.
+The consequence is that the DAC's source is a selected pair out of the eight,
+chosen by bits 12 and 13 of the sound mode control register.
+
+**Matrix state survives across programs.** Play-track count, the monitor track
+pair, the 16-bit adder's input selection, DMA playback state, and codec
+attenuation are all left behind by whatever ran previously; TOS does not reset
+them for a new `Devconnect`. Both the player and the conformance harness
+therefore pin the whole route rather than inheriting any of it: `Buffoper(0)`
+stops inherited DMA playback that would contend for the same DAC,
+`Sndstatus(1)` reinitializes the converters and clears their latched overflow
+bits, `Soundcmd` mode 4 restricts the 16-bit adder to the matrix so the A/D
+path cannot bleed into the output, `Settracks` and `Setmontracks` fix the
+play-track count and point the DAC at frame slots 0 and 1, and `Dsptristate`
+couples DSP transmit to the matrix. The player additionally saves and restores
+the user's codec attenuation around playback.
+
+None of this can be *proven* under Hatari, which starts from a clean matrix; a
+hostile initial state is not reproducible there. The endurance gate therefore
+asserts only that the calls still execute, and the hardening's real test is
+the hardware soak. On exit the player reads `Sndstatus(0)`, whose bits 4 and 5
+report left and right codec clipping, and prints a warning naming the affected
+channels. That is a hardware-side check on mix headroom — it measures the
+analog converter rather than the mix that fed it — and no emulation gate can
+substitute for it.
+
 ## Remaining work
 
 The functional port and its emulation gates are complete. The remaining work
@@ -412,7 +516,12 @@ is deliberately narrow:
 
 1. **Validate on a physical Falcon.** Confirm the SSI clock/DMA arrangement,
    transmit-underrun recovery, A/B handoff timing, host/DSP contention, and
-   long-duration mixed FM/PDX playback at the target machine clock.
+   long-duration mixed FM/PDX playback at the target machine clock. The
+   matrix-state hardening and the codec clipping readback are implemented; the
+   soak is what gives them meaning. These are exactly the questions listed as
+   out of the emulator's reach under [What the emulator cannot
+   decide](#what-the-emulator-cannot-decide), so plan the soak to observe
+   them deliberately rather than to confirm that playback starts.
 2. **Finish public API compatibility.** Complete the unsupported and state-only
    calls listed in [`mxdrv-api.md`](mxdrv-api.md), then tighten edge-case error
    semantics beyond the exercised MDX/PDX playback path.

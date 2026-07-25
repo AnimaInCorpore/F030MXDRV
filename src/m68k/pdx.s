@@ -15,8 +15,11 @@
         global  mxdrv_pdx_active_mask
         global  mxdrv_pdx_mix_frame
         global  mxdrv_pdx_mix_block
+        global  mxdrv_pdx_detect_table
 
 PDX_SAMPLE_COUNT        equ     96
+PDX_MAX_BANKS           equ     16
+PDX_MAX_SAMPLES         equ     PDX_SAMPLE_COUNT*PDX_MAX_BANKS
 PDX_TABLE_BYTES         equ     PDX_SAMPLE_COUNT*8
 
 PDX_DECODER_POINTER     equ     0
@@ -56,29 +59,33 @@ PDX_BP_BSSLEN           equ     $1c
 
         text
 
-; Resolve one standard PDX table entry against the copied bank.
-; in:  d0.w = sample number (0-95)
+; Resolve one raw PDX table entry against the copied bank.
+; in:  d0.w = flat sample number (bank * 96 + note)
 ; out: d0.l = encoded byte length, a0 = first ADPCM byte
 ;      d0.l = 0 and a0 = 0 for an empty entry
 ;      d0.l = -1 and a0 = 0 for an invalid index/bank/entry
 mxdrv_pdx_lookup:
         moveq   #0,d1
         move.w  d0,d1
-        cmpi.w  #PDX_SAMPLE_COUNT,d1
+        cmpi.w  #PDX_MAX_SAMPLES,d1
+        bcc     pdx_lookup_error
+        cmp.l   mxdrv_pdx_sample_count,d1
         bcc     pdx_lookup_error
 
         move.l  mxdrv_pdx_size,d2
         cmpi.l  #PDX_TABLE_BYTES,d2
         bcs     pdx_lookup_error
 
-        lsl.w   #3,d1
+        lsl.l   #3,d1
         lea     mxdrv_pdx_buffer,a0
-        lea     (a0,d1.w),a1
+        lea     (a0,d1.l),a1
         move.l  4(a1),d0
         beq     pdx_lookup_empty
 
         move.l  (a1),d3
-        cmpi.l  #PDX_TABLE_BYTES,d3
+        move.l  mxdrv_pdx_sample_count,d4
+        lsl.l   #3,d4
+        cmp.l   d4,d3
         bcs     pdx_lookup_error
         cmp.l   d2,d3
         bhi     pdx_lookup_error
@@ -100,6 +107,45 @@ pdx_lookup_empty:
 pdx_lookup_error:
         suba.l  a0,a0
         moveq   #-1,d0
+        rts
+
+; Detect the number of 96-entry tables in a raw PDX bank. The first nonempty
+; bank-0 record points at the end of the complete table area, which is a
+; multiple of the historical 768-byte table width. Keep the result bounded
+; so arbitrary data cannot turn into an unbounded table walk.
+mxdrv_pdx_detect_table:
+        move.l  #PDX_SAMPLE_COUNT,mxdrv_pdx_sample_count
+        move.l  mxdrv_pdx_size,d2
+        cmpi.l  #PDX_TABLE_BYTES,d2
+        bcs     pdx_detect_table_done
+        lea     mxdrv_pdx_buffer,a0
+        moveq   #PDX_SAMPLE_COUNT-1,d7
+pdx_detect_table_scan:
+        move.l  4(a0),d0
+        beq     pdx_detect_table_next
+        move.l  (a0),d1
+        cmpi.l  #PDX_TABLE_BYTES,d1
+        bcs     pdx_detect_table_next
+        cmp.l   d2,d1
+        bhi     pdx_detect_table_next
+        cmpi.l  #PDX_MAX_SAMPLES*8,d1
+        bhi     pdx_detect_table_next
+
+        ; DIVU leaves the remainder in the high word and quotient low.
+        move.l  d1,d3
+        divu.w  #PDX_TABLE_BYTES,d3
+        moveq   #0,d4
+        move.w  d3,d4
+        swap    d3
+        tst.w   d3
+        bne     pdx_detect_table_next
+        mulu.w  #PDX_SAMPLE_COUNT,d4
+        move.l  d4,mxdrv_pdx_sample_count
+        rts
+pdx_detect_table_next:
+        lea     8(a0),a0
+        dbra    d7,pdx_detect_table_scan
+pdx_detect_table_done:
         rts
 
 ; Start the single-voice reference decoder for one PDX entry. The MSM6258
@@ -347,7 +393,7 @@ pdx_precache_done_entry:
 
 pdx_precache_next:
         addq.l  #1,d6
-        cmpi.l  #PDX_SAMPLE_COUNT,d6
+        cmp.l   mxdrv_pdx_sample_count,d6
         bcs     pdx_precache_index
         rts
 
@@ -357,7 +403,7 @@ pdx_precache_clear_index:
         VB      vb_txt_nocache
         lea     pdx_decoded_offset,a0
         moveq   #0,d0
-        move.w  #PDX_SAMPLE_COUNT*2-1,d1
+        move.w  #PDX_MAX_SAMPLES*2-1,d1
 pdx_precache_clear_index_loop:
         move.l  d0,(a0)+
         dbra    d1,pdx_precache_clear_index_loop
@@ -369,9 +415,15 @@ pdx_precache_clear_index_loop:
 ; only had to change which subroutine it invokes. With no cache available
 ; they tail into those very routines, so the voice decodes live from its own
 ; embedded decoder state and behaviour is identical either way.
-; in: a2 = voice struct, d0.w = sample number (0-95)
+; in: a2 = voice struct, d0.w = flat sample number (bank * 96 + note)
 ; out: d0.l = 0 on success, -1 for an empty/invalid entry
 pdx_cache_start:
+        moveq   #0,d1
+        move.w  d0,d1
+        cmpi.w  #PDX_MAX_SAMPLES,d1
+        bcc     pdx_cache_start_error
+        cmp.l   mxdrv_pdx_sample_count,d1
+        bcc     pdx_cache_start_error
         tst.l   pdx_decoded_cache_ptr
         bne     pdx_cache_start_cached
         clr.l   PDX_VOICE_CACHE_PTR(a2) ; marks this voice as live-decoding
@@ -824,11 +876,11 @@ pdx_adpcm_index_shift:
         dc.b    -1,-1,-1,-1,2,4,6,8
         even
 
-; Input samples per 24.585 kHz Falcon codec frame. The quality clock is exactly
-; half the former 49.17 kHz rate, so doubling every numerator retains the same
-; denominator and the exact five MSM6258 source clocks without drift.
+; Input samples per 32.780 kHz Falcon codec frame. Prescale 2 is exactly 4/3
+; the former 24.585 kHz rate, so scaling those numerators by 3/4 retains the
+; common denominator and all five MSM6258 source clocks without drift.
 pdx_rate_phase:
-        dc.w    480,640,960,1280,1920
+        dc.w    360,480,720,960,1440
 
 ; PCM8 volume codes 0-15 are -16 dB through +14 dB in 2 dB steps. These
 ; signed Q12 gains make code 8 exactly unity.
@@ -859,9 +911,9 @@ pdx_precache_state:
 pdx_decoded_used:
         ds.l    1
 pdx_decoded_offset:
-        ds.l    PDX_SAMPLE_COUNT
+        ds.l    PDX_MAX_SAMPLES
 pdx_decoded_count:
-        ds.l    PDX_SAMPLE_COUNT
+        ds.l    PDX_MAX_SAMPLES
 ; Malloc'd to exactly 2x the loaded bank's byte size by mxdrv_pdx_precache;
 ; zero when no bank has been cached (nothing allocated, or allocation
 ; failed).  pdx_decoded_capacity is the same size expressed in samples.

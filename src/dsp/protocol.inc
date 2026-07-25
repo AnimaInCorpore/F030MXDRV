@@ -1,6 +1,6 @@
 ; Host/DSP protocol. Keep in sync with src/m68k/protocol.i.
 
-DSP_PROTOCOL_VERSION equ     23
+DSP_PROTOCOL_VERSION equ     24
 
 DSP_CMD_PING        equ     $010000
 DSP_CMD_WRITE_REG   equ     $020000
@@ -29,7 +29,8 @@ DSP_CMD_START_RT_MIXED equ  $180000
 DSP_CMD_REFILL_RT_MIXED equ $190000
 
 DSP_MIX_FRAME_COUNT equ    1007
-; 24.585 kHz production quality mode: 512 frames remain one 20.83 ms period.
+; 32.780 kHz production quality mode: 62.5 kHz native time advances by the
+; exact 1920:1007 ratio and 512 frames form one 15.62 ms transport period.
 DSP_RT_MIX_FRAME_COUNT equ 512
 DSP_RT_PCM_WORD_COUNT equ   513
 DSP_RT_EVENT_MAX equ        32
@@ -41,8 +42,13 @@ DSP_RT5_PROFILE_BLOCKS equ 256
 DSP_RT2_BLOCK_FRAMES equ   64
 DSP_RT5_BLOCK_FRAMES equ   32
 DSP_RT2_CHECKSUM_PAIRS equ 2048
+DSP_RT_NATIVE_NUMERATOR equ 1920
+DSP_RT_NATIVE_DENOMINATOR equ 1007
+DSP_RT_BLOCK_NATIVE_BASE equ 61
+DSP_RT_BLOCK_NATIVE_REMAINDER equ 13
+DSP_RT_NOISE_FRAME_STEP equ 3840
 
-DSP_REPLY_HELLO     equ     $4d5817
+DSP_REPLY_HELLO     equ     $4d5818
 DSP_REPLY_BLOCK_READY equ  $524459
 DSP_REPLY_OK        equ     $000000
 DSP_REPLY_ERROR     equ     $ffffff

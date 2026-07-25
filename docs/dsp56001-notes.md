@@ -87,6 +87,20 @@ transmit frame sync remain crossbar inputs. SSI priority is level 2 through IPR
 `$3000`. Each signed 16-bit YM sample is shifted into the upper 16 bits of the
 DSP's 24-bit transmit register.
 
+Those values are the ones the matrix requires rather than a free choice. The
+Falcon specification defines a continuous-clock frame as 128 bit clocks
+carrying eight 16-bit samples, with SYNC high for the first 16 bits and low
+for the remaining 96. Word-length frame sync (`FSL1:FSL0 = 0`) matches that
+pulse, the two-word frame from `CRA` DC=1 fills slots 0 and 1 and idles for
+the rest of the frame, and the specification's statement that the DAC port
+cannot operate in gated clock mode is why the host connects with no
+handshaking. Port C resets to GPIO, so `PCC = $1f8` — bits 3 through 8, the
+SSI group in section 11 of the user's manual — is what gives the slave SSI its
+clock and frame sync at all; without it the transmitter is clockless on
+hardware while Hatari still runs. Which pair of the eight slots reaches the
+DAC is a matrix-side selection, covered in
+[`architecture.md`](architecture.md).
+
 The normal SSI transmit vector at `P:$0010` is a two-instruction fast interrupt:
 it moves `X:(r6)+` to TX and returns through the implicit fast-interrupt path.
 The dedicated `r6/m6` pair is not used by synthesis, so refills can be
@@ -96,8 +110,8 @@ then writes TX, the required sequence for clearing TUE. It is a recovery path,
 not part of normal block playback.
 
 The Falcon DAC rate selected by the production host is 25.175 MHz divided by
-4 and 256, or 24,584.9609375 Hz. Relative to the native 62,500 Hz OPM rate
-this is exactly `2560/1007`. Each production period has 512 stereo frames, or
+4 and 192, or 32,779.9479167 Hz. Relative to the native 62,500 Hz OPM rate
+this is exactly `1920/1007`. Each production period has 512 stereo frames, or
 1024 interleaved SSI words. Buffer A starts at external `X:$1000`, buffer B at
 `X:$1800`, and `m6=1023` wraps either power-of-two period. They are
 uninitialized storage, add no `.LOD` records, and both fit below the 8192-word
@@ -105,13 +119,13 @@ external-X reservation.
 
 Protocol commands `$11`/`$13` retain the older 1007-frame exact-renderer
 interface for conformance tests. They are not the production playback path at
-the 24.585 kHz clock. Commands `$18`/`$19` select and fill the inactive
+the 32.780 kHz clock. Commands `$18`/`$19` select and fill the inactive
 512-frame buffer while `r6` transmits the active one, then switch only on a
 whole-period boundary. Buffer pointers use `r6/r7`; the phase-cache loop owns
 `r4`, so sharing that register would displace the refill position during every
 YM sample.
 
-Protocol v23 implements the event shape with a rolling clock. A refillable
+Protocol v24 implements the event shape with a rolling clock. A refillable
 32-entry ring FIFO stores an absolute 16-bit native-sample time beside each
 packed register write. Entries must be in nondecreasing modular order and
 within the 32,767-sample future horizon; all writes due at a boundary are
@@ -145,7 +159,7 @@ restores the packed tables, exact expanded tables and caches, external Y
 mapping, SSI state, and linear address modifiers.
 
 The realtime LFO is a 48-bit accumulator holding ymfm's 32-bit counter times
-2^18, advanced by decoded 81/82-tick pairs, so the true waveform index —
+2^18, advanced by decoded 61/62-tick pairs, so the true waveform index —
 counter bits 22-29 — is the high word's top byte. Each block derives ymfm's
 waveform AM byte from it (the noise waveform samples the Galois LFSR's low
 byte as a documented approximation), publishes `m_lfo_am = am*AMD>>7`, turns
@@ -179,19 +193,36 @@ algorithm-7 channels with nonzero feedback pay it.
 The production block boundary drains the real 32-entry transport FIFO and uses
 the same register decoder for direct live writes. Algorithm/pan, TL, KC/KF,
 MUL, key edges, envelope rates, LFO, and timers update persistent state. The
-2560:1007 DDA advances successive 512-frame buffers to native clocks 1301,
-2603, and 3904 without drift. An event landing inside a 32-frame block splits
+1920:1007 DDA advances successive 512-frame buffers to native clocks 976,
+1952, and 2928 without drift. An event landing inside a 32-frame block splits
 that block into ordered segments and takes effect on its first codec frame.
 DT1/DT2 pitch offsets and channel-7 noise frequency/output substitution are
 decoded by the production kernel. The Hatari smoke gate renders three buffers,
 checks 1536 prepared frames, and pins the first attack buffer checksum to
-`$98e818`.
+`$f8c040`.
 
 ## Cycle feasibility gate
 
 The Falcon DSP oscillator measured by Hatari is 32,084,988 Hz. One DSP56001
 instruction cycle is two oscillator clocks, leaving about 256.68 instruction
-cycles for each native 62.5 kHz YM sample. `make profile-dsp` arms Hatari's DSP
+cycles for each native 62.5 kHz YM sample.
+
+The memory-cost model behind every number in this section is Hatari's, and it
+is deliberately simplified: its DSP core treats Falcon external memory as
+zero wait states and ignores the bus control register, charging instead two
+extra cycles whenever a single instruction reaches more than one external
+space. Instruction fetch counts as a P access, so a hot instruction living in
+one of the `P:$2000` islands pays that penalty as soon as it also touches
+external X or Y, and an internal-P instruction pays it for an external-X plus
+external-Y parallel move. That is the rule behind the placement decisions
+recorded here — the envelope pass in internal P, the phase cache in internal
+Y, gain pairs in internal X — and it is also the lever for recovering the
+remaining margin, because those instruction pairs can be located statically
+before any rewrite. The model is credible for placement work but not for
+transport timing: Hatari's own documentation states that DSP emulation is
+instruction-wise correct and not cycle accurate, particularly for
+68030-to-DSP synchronization, so underrun behavior remains a hardware-soak
+question. `make profile-dsp` arms Hatari's DSP
 profiler on a unique host-port marker, then measures command `$0b` from entry
 through completion of the first 1280-native-sample render. Listing symbols are
 resolved mechanically, and the generated report is written to
@@ -365,7 +396,7 @@ again before the exact renderer resumes.
 Each 32-frame block drains every due ordered write from a profile-local
 FIFO — the fixture schedules one write at each of the first 25 boundaries, a
 seven-event burst at boundary 24, the shape of a real MXDRV voice load, and
-a late boundary-90 key-off — advances the drift-free 2560:1007 native
+a late boundary-90 key-off — advances the drift-free 1920:1007 native
 clock, a decoded-rate LFO, both decoded timers, and a maximum-length
 one-step-per-frame noise LFSR, runs one two-instruction, 32-iteration loop
 that rebuilds every PM-adjusted per-operator phase increment, and tail-calls
@@ -378,7 +409,7 @@ covers every decoded register class: eight `$20-$27` algorithm/pan rewrites,
 five four-band total-level writes, four KC and two KF events that rebuild
 four base increments from the exact expanded `opm_phase_step` table with
 octave shift and doubled per-operator multiplier — converted to block DDA
-units through the `2^20/(51*1007)` scale that matches the lower-rate render's
+units through the `2^20/(68*1007)` scale that matches the lower-rate render's
 phase mac against the 256-step sine ROM, exact to 0.04 ppm
 with only past-Nyquist tones wrapping into the signed alias domain —
 five key on/off edges
@@ -396,14 +427,14 @@ fill — so no noise-table words occupy the bounded P-memory image. Cleanup
 disables SSI, reads SSISR and writes TX to clear a latched underrun,
 restores the external Y map, and rebuilds the exact phase cache, including
 the internal-Y frequency-cache words the decoded multiplier/increment arrays
-overlay. The deterministic reply is `$1ce7a1`.
+overlay. The deterministic reply is `$eed0f2`.
 
 Decoded envelope curvature runs as a block-boundary pass at `P:$0080` in
 internal P RAM, where instruction fetches avoid the external-memory penalty.
 Every envelope-active operator advances once per block by one composed
 full-block affine step, `level' = a*level + b` in 10.13 fixed point, whose
 per-rate constants `tools/generate_envelope_tables.py` composes from the
-exact ymfm per-tick recurrence over the average 27.117 envelope ticks per
+exact ymfm per-tick recurrence over the average 20.337 envelope ticks per
 block: attack multiplies toward its exact fixed point at -1 (the addend is
 derived on the DSP as `a - 1`), and decay/sustain/release accumulate exact
 mean increments. Boundary checks apply the ADSR transitions — attack
@@ -420,9 +451,9 @@ live in the external island with the generated tables. The capture harness
 derives mid-block levels analytically from the same defining recurrence, so
 no mid-block state is stored.
 
-Hatari measures 2,983,043 instruction cycles for 8,192 frames over 256
-blocks, or 364.14 cycles per frame against the 652.53-cycle budget, leaving
-288.39 cycles (44.2%). The 185.95 ms modeled span fits its 333.21 ms period.
+Hatari measures 2,984,192 instruction cycles for 8,192 frames over 256
+blocks, or 364.28 cycles per frame against the 489.40-cycle budget, leaving
+125.12 cycles (25.6%). The 186.02 ms modeled span fits its 249.91 ms period.
 The 256-block window amortizes the 32-event fixture at a realistic MXDRV
 write density, and the envelope fixture exercises an eight-operator key-on
 transient that decays to its sustain levels and retires, one sustained D2R
@@ -478,7 +509,7 @@ bits (`move b1,b`) before the zero guard. And TOS 4.02's `Dsp_BlkUnpacked`
 polls host-port TXDE only before its first word, then writes the rest of the
 block blind: any command whose receive loop starts more than about one
 host-write period after the command word consumes silently loses a word to
-the one-deep transmit latch. Protocol v23 gates every multi-word upload on a
+the one-deep transmit latch. Protocol v24 gates every multi-word upload on a
 `$524459` ready token the DSP sends from immediately before its parked
 receive loop.
 

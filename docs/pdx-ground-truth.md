@@ -1,15 +1,18 @@
 # PDX and X68000 ADPCM ground truth
 
-The standard PDX sample bank begins with 96 big-endian records. Each record is
-an unsigned 32-bit offset from the beginning of the raw bank followed by an
-unsigned 32-bit encoded byte length. The original MXDRV derives sample numbers
-0-95 from its PCM note range, multiplies the number by eight, adds the selected
-entry's offset to the PDX base, and passes its length to the ADPCM driver.
+The raw PDX sample bank begins with one or more consecutive 96-entry tables of
+big-endian records. Each record is an unsigned 32-bit offset from the beginning
+of the raw bank followed by an unsigned 32-bit encoded byte length. The first
+encoded sample offset identifies the complete table area: a standard one-bank
+file starts data at byte 768, while a multi-bank file starts at a multiple of
+768. MXDRV derives sample numbers as `bank * 96 + note` and indexes the tables
+as one flat sample space.
 
 The port accepts the raw table-and-data bank rather than MXDRV's historical
 resident-memory link wrapper. Lookup rejects banks shorter than the 768-byte
-table, sample numbers above 95, nonempty offsets inside the table, and ranges
-that exceed the copied bank. Empty entries return no sample.
+minimum, sample numbers outside the detected table area or sixteen-bank limit,
+nonempty offsets inside the table, and ranges that exceed the copied bank.
+Empty entries return no sample.
 
 ## MSM6258 decoding
 
@@ -40,8 +43,8 @@ their cached `fb $0f` as PCM8 gain would add 14 dB and saturate the Falcon mix.
 
 The PCM8-facing layer has eight independent decoder states and the five MSM6258
 clock selections used by MXDRV: 3.90625, 5.20833, 7.8125, 10.4167, and 15.625
-kHz. Relative to the Falcon quality clock of `25.175 MHz / 4 / 256`, those rates
-are represented exactly by phase increments `480, 640, 960, 1280, 1920` over
+kHz. Relative to the Falcon quality clock of `25.175 MHz / 4 / 192`, those rates
+are represented exactly by phase increments `360, 480, 720, 960, 1440` over
 the common denominator `3021`. The decoder therefore has no long-term clock
 drift. The DSP applies a two-tap filter while expanding the host stream, which
 attenuates the strongest zero-order images without spending the 68030 refill
@@ -61,7 +64,7 @@ bounds against that vector.
 ## Current implementation
 
 `src/m68k/pdx.s` provides validated lookup plus the eight-voice host mixer. It
-renders 512 Falcon codec frames for each protocol-v23 realtime transaction.
+renders 512 Falcon codec frames for each protocol-v24 realtime transaction.
 The production mixer walks active voices outside the frame loop, emitting one
 signed mono block plus the common PCM8 pan. The DSP expands it into planar
 24-bit accumulators, filters PDX, adds 16 32-frame FM blocks, saturates to the

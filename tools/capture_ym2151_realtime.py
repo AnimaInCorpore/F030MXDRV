@@ -3,7 +3,7 @@
 
 For every perceptual scenario this harness compiles the exact trace into a
 CAPTURE.SCN consumed by the TTP's capture mode, replays it through the
-protocol-v23 realtime stream inside Hatari, and collects DSP state dumps from
+protocol-v24 realtime stream inside Hatari, and collects DSP state dumps from
 debugger breakpoints at every 32-frame block entry and at every completed
 512-frame buffer. A reconstruction pass turns those dumps into the
 per-codec-frame TSV rows accepted by tools/compare_ym2151_realtime.py.
@@ -28,8 +28,9 @@ from profile_dsp import parse_listing, require_symbol  # noqa: E402
 REPO = Path(__file__).resolve().parent.parent
 BLOCK_FRAMES = 32
 BUFFER_FRAMES = 512
-CODEC_NUMERATOR = 2560
+CODEC_NUMERATOR = 1920
 CODEC_DENOMINATOR = 1007
+NOISE_FRAME_STEP = CODEC_NUMERATOR * 2
 FNV_OFFSET = 2_166_136_261
 FNV_PRIME = 16_777_619
 
@@ -41,7 +42,9 @@ SCENARIOS: dict[str, tuple[str, int, int | None, int | None]] = {
     "envelope": ("perceptual_envelope.trace", 8192, None, None),
     "lfo": ("perceptual_lfo.trace", 8192, None, None),
     "noise": ("noise_channel7.trace", 8192, None, None),
-    "noise-slow": ("noise_channel7_slow.trace", 8192, None, None),
+    # At 32.780 kHz this longer window observes about 1,950 transitions,
+    # keeping the 3% transition-rate gate statistically meaningful.
+    "noise-slow": ("noise_channel7_slow.trace", 16384, None, None),
     **{
         f"algorithm-{index}": ("perceptual_topology.trace", 4096, index, 4)
         for index in range(8)
@@ -311,7 +314,7 @@ def dsp_state_to_ymfm(state: int) -> int:
 def schedule_events(
     events: list[TraceEvent], frames: int
 ) -> tuple[list[tuple[int, int, int]], list[int]]:
-    """Oracle-identical 2560:1007 schedule: per frame (native, count, hash)."""
+    """Oracle-identical 1920:1007 schedule: per frame (native, count, hash)."""
     schedule: list[tuple[int, int, int]] = []
     natives: list[int] = []
     event_index = 0
@@ -359,7 +362,7 @@ class Boundary:
     pm_scale: int  # decoded signed PM depth for the block PM offset
     lfo_waveform: int  # waveform bits; bit 0 flips the block PM sign
     noise_threshold: int  # (ymfm frequency+1)*1007; zero while disabled
-    noise_counter: int  # 5120-per-frame latch DDA position
+    noise_counter: int  # 3840-per-frame latch DDA position
     noise_snap: int  # LFSR snapshot at the last latch
 
 
@@ -479,7 +482,7 @@ def mid_block_level(before: int, after: int, multiplier: int) -> int:
 # mirror below.
 DT2_DELTA = (0, 384, 500, 608)
 RAW_SLOT = (0, 16, 8, 24)  # logical M1,C1,M2,C2 to raw register slots
-PITCH_DDA_SCALE = 5352297
+PITCH_DDA_SCALE = 4014223
 
 
 def load_pitch_tables(source_path: Path) -> tuple[list[int], list[int]]:
@@ -761,7 +764,7 @@ def reconstruct_rows(
         # Per-frame noise replays the same Galois steps the block jump or
         # the substitution pass composes; bit 16 is the output bit. With
         # noise enabled the reported state is the bit resampled by the
-        # kernel's 5120-per-frame latch DDA against the decoded period,
+        # kernel's 3840-per-frame latch DDA against the decoded period,
         # seeded from the dumped counter and snapshot at the block entry.
         lfsr = entry.lfsr
         if entry.noise_threshold:
@@ -769,7 +772,7 @@ def reconstruct_rows(
             snap = entry.noise_snap
             for _ in range(offset):
                 lfsr = lfsr_step(lfsr)
-                counter += 5120
+                counter += NOISE_FRAME_STEP
                 while counter >= entry.noise_threshold:
                     counter -= entry.noise_threshold
                     snap = lfsr

@@ -41,9 +41,8 @@ raw MDX layout or the driver's PDX table semantics.
 - FM note `n` uses MXDRV's pitch `(n << 6) + 5`, producing fractional register
   value `$14` and a KC byte from the original 96-byte `OPMNoteTable`.
 - PCM note `n` selects PDX entry `bank * 96 + n`; track 8 maps to PCM voice 0,
-  through track 15/voice 7. The currently supported raw PDX bank contains the
-  standard 96 entries, so a nonzero bank is consumed faithfully but resolves
-  as a silent missing entry.
+  through track 15/voice 7. Raw PDX banks may contain up to sixteen consecutive
+  96-entry tables, and the player resolves those banked sample numbers directly.
 - The default note-length value is 8. For nonnegative values, MXDRV computes
   the key gate as `(encoded_duration * note_length >> 3) + 1`.
 
