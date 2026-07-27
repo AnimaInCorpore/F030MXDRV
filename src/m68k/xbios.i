@@ -26,6 +26,14 @@
         addq.l  #4,sp
         endm
 
+        macro   Fcreate filename,attributes
+        move.w  \2,-(sp)
+        pea     \1
+        move.w  #60,-(sp)
+        trap    #1
+        addq.l  #8,sp
+        endm
+
         macro   Fopen filename,mode
         move.w  \2,-(sp)
         pea     \1
@@ -50,6 +58,15 @@
         move.w  #66,-(sp)
         trap    #1
         lea     10(sp),sp
+        endm
+
+        macro   Fwrite handle,count,buffer
+        pea     \3
+        move.l  \2,-(sp)
+        move.w  \1,-(sp)
+        move.w  #64,-(sp)
+        trap    #1
+        lea     12(sp),sp
         endm
 
         macro   Pterm0

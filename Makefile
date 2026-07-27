@@ -41,6 +41,7 @@ YM2151_TABLES := $(GENERATED_BUILD)/ym2151_tables.inc
 ENVELOPE_TABLES := $(GENERATED_BUILD)/envelope_tables.inc
 YM2151_HOST_TABLES := $(GENERATED_BUILD)/ym2151_host_tables.i
 DSP_STAGE2_IMAGE := $(GENERATED_BUILD)/dsp_stage2_image.i
+RATETEST_BOOT_IMAGE := $(GENERATED_BUILD)/ratetest_boot.i
 YM2151_REFERENCE := $(GENERATED_BUILD)/ym2151_reference.i
 PDX_ADPCM_REFERENCE := $(GENERATED_BUILD)/pdx_adpcm_reference.i
 YM2151_VECTORS := $(REFERENCE_BUILD)/attack_all_carriers.tsv
@@ -65,7 +66,7 @@ DOSBOX_FLAGS ?= --noprimaryconf --set output=texture
 
 .PHONY: all help host xevious dsp reference check capture-realtime compare-realtime smoke stock-audio endurance endurance-batch profile-dsp profile-dsp-rt \
 	profile-dsp-rt2 profile-dsp-rt3 profile-dsp-rt4 profile-dsp-rt5 \
-	clean run tools xevious-verbose xevious-verbose50
+	clean run tools xevious-verbose xevious-verbose50 ratetest-hatari
 
 all: host dsp
 
@@ -79,13 +80,14 @@ help:
 	@echo "  endurance        play Xevious through two loops and fade under Hatari"
 	@echo "  endurance-batch  play every uppercase MDX in CORPUS_DIR under Hatari"
 	@echo "  profile-dsp*     capture DSP cycle profiles under Hatari"
+	@echo "  ratetest-hatari  gate the physical-Falcon SSI rate test under Hatari"
 	@echo "  run              launch the conformance executable in Hatari"
 	@echo "  clean            remove generated build/ and release/ directories"
 	@echo
 	@echo "Optional corpus directory: $(CORPUS_DIR) (override with CORPUS_DIR=path)"
 
 host: $(RELEASE_DIR)/f030mxdrv.tos $(RELEASE_DIR)/f030mxdrv.ttp \
-		$(RELEASE_DIR)/xevious.tos
+		$(RELEASE_DIR)/xevious.tos $(RELEASE_DIR)/ratetest.tos
 
 xevious: $(RELEASE_DIR)/xevious.tos
 
@@ -278,12 +280,13 @@ xevious-verbose50: $(RELEASE_DIR)/xevv50.tos
 	@file $(RELEASE_DIR)/xevv50.tos
 
 $(DSP_BUILD)/BUILD.BAT: tools/BUILD_DSP.BAT src/dsp/ym2151.asm \
-		src/dsp/stage2_loader.asm src/dsp/protocol.inc $(YM2151_TABLES) \
-		$(ENVELOPE_TABLES)
+		src/dsp/stage2_loader.asm src/dsp/ratetest.asm src/dsp/protocol.inc \
+		$(YM2151_TABLES) $(ENVELOPE_TABLES)
 	@mkdir -p $(DSP_BUILD)
 	cp tools/BUILD_DSP.BAT $(DSP_BUILD)/BUILD.BAT
 	cp src/dsp/ym2151.asm src/dsp/protocol.inc $(DSP_BUILD)/
 	cp src/dsp/stage2_loader.asm $(DSP_BUILD)/YMBOOT.ASM
+	cp src/dsp/ratetest.asm $(DSP_BUILD)/RATETEST.ASM
 	cp $(YM2151_TABLES) $(DSP_BUILD)/ymtables.inc
 	cp $(ENVELOPE_TABLES) $(DSP_BUILD)/envtabs.inc
 	cp $(DSP_TOOL_SOURCE)/ASM56000.EXE $(DSP_TOOL_SOURCE)/CLDLOD.EXE \
@@ -296,10 +299,12 @@ $(DSP_BUILD)/.assembled: $(DSP_BUILD)/BUILD.BAT
 		exit 1; \
 	fi
 	@rm -f $(DSP_BUILD)/YM2151.CLD $(DSP_BUILD)/YM2151.LOD $(DSP_BUILD)/YM2151.LST \
-		$(DSP_BUILD)/YMBOOT.CLD $(DSP_BUILD)/YMBOOT.LOD $(DSP_BUILD)/YMBOOT.LST
+		$(DSP_BUILD)/YMBOOT.CLD $(DSP_BUILD)/YMBOOT.LOD $(DSP_BUILD)/YMBOOT.LST \
+		$(DSP_BUILD)/RATETEST.CLD $(DSP_BUILD)/RATETEST.LOD $(DSP_BUILD)/RATETEST.LST
 	$(DOSBOX) $(DOSBOX_FLAGS) $(abspath $(DSP_BUILD)/BUILD.BAT)
 	@test -s $(DSP_BUILD)/YM2151.LOD
 	@test -s $(DSP_BUILD)/YMBOOT.LOD
+	@test -s $(DSP_BUILD)/RATETEST.LOD
 	@touch $@
 
 $(RELEASE_DIR)/ym2151.lod: $(DSP_BUILD)/.assembled
@@ -315,10 +320,29 @@ $(DSP_STAGE2_IMAGE): tools/generate_dsp_stage2.py $(DSP_BUILD)/.assembled
 		--island 0x2000 0x2b00 \
 		--island 0x2b20 0x3400 > $@
 
+$(RATETEST_BOOT_IMAGE): tools/generate_dsp_stage2.py $(DSP_BUILD)/.assembled
+	@mkdir -p $(GENERATED_BUILD)
+	python3 tools/generate_dsp_stage2.py \
+		--standalone $(DSP_BUILD)/RATETEST.LOD \
+		--prefix ratetest > $@
+
+# The SSI rate test is a self-contained hardware-validation program: one
+# object, its own embedded DSP image, and none of the player sources.
+$(M68K_BUILD)/ratetest.o: src/m68k/ratetest.s src/m68k/xbios.i \
+		$(RATETEST_BOOT_IMAGE) $(VASM)
+	@mkdir -p $(M68K_BUILD)
+	$(VASM) $< -quiet -Felf -m68030 -Isrc/m68k -I$(GENERATED_BUILD) \
+		-o $@ -L $(M68K_BUILD)/ratetest.lst
+
+$(RELEASE_DIR)/ratetest.tos: $(M68K_BUILD)/ratetest.o $(VLINK)
+	@mkdir -p $(RELEASE_DIR)
+	$(VLINK) $(M68K_BUILD)/ratetest.o -b ataritos -s -e start -o $@
+
 check: all reference
 	@test -s $(RELEASE_DIR)/f030mxdrv.tos
 	@test -s $(RELEASE_DIR)/f030mxdrv.ttp
 	@test -s $(RELEASE_DIR)/xevious.tos
+	@test -s $(RELEASE_DIR)/ratetest.tos
 	@test -s $(RELEASE_DIR)/ym2151.lod
 	@test -s $(DSP_STAGE2_IMAGE)
 	@test -s $(YM2151_VECTORS)
@@ -328,8 +352,11 @@ check: all reference
 	@rg -q "^0 +Warnings" $(DSP_BUILD)/YM2151.LST
 	@rg -q "^0 +Errors" $(DSP_BUILD)/YMBOOT.LST
 	@rg -q "^0 +Warnings" $(DSP_BUILD)/YMBOOT.LST
+	@rg -q "^0 +Errors" $(DSP_BUILD)/RATETEST.LST
+	@rg -q "^0 +Warnings" $(DSP_BUILD)/RATETEST.LST
 	@rg -q "^DSP_BOOT_WORDS equ " $(DSP_STAGE2_IMAGE)
 	@rg -q "^DSP_STAGE2_PROGRAM_WORDS equ " $(DSP_STAGE2_IMAGE)
+	@rg -q "^RATETEST_BOOT_WORDS equ " $(RATETEST_BOOT_IMAGE)
 	@file $(RELEASE_DIR)/f030mxdrv.tos $(RELEASE_DIR)/ym2151.lod
 
 # Replay every perceptual scenario through the protocol-v23 realtime stream
@@ -712,6 +739,37 @@ ENDURANCE_MIN_REFILLS := 200
 # build/endurance-batch/.
 endurance-batch: check
 	@python3 tools/endurance_batch.py --corpus-dir "$(abspath $(CORPUS_DIR))"
+
+# Run the physical-Falcon SSI rate test under Hatari and gate its verdict.
+# The program measures the crossbar-delivered DSP frame rate against the
+# 200 Hz system tick at prescales 3/1/2 and writes deterministic PASS/FAIL
+# lines to RATETEST.TXT; a real-hardware run of the same binary produces the
+# same file, so a hardware/emulator divergence shows up as one differing
+# line. The binary exits on a keypress that never arrives, so the VBL limit
+# terminates the run after the report is on disk.
+ratetest-hatari: $(RELEASE_DIR)/ratetest.tos
+	@if ! command -v hatari >/dev/null 2>&1; then \
+		echo "error: ratetest-hatari target needs Hatari" >&2; \
+		exit 1; \
+	fi
+	@rm -rf build/ratetest
+	@mkdir -p build/ratetest
+	@cp $(RELEASE_DIR)/ratetest.tos build/ratetest/
+	# Run from inside the work directory with a bare program name: Windows
+	# Hatari splits the program path on backslashes only, so a relative
+	# forward-slash path would mount the wrong GEMDOS root.
+	@cd build/ratetest && SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy hatari \
+		--machine falcon --dsp emu \
+		--tos $(CURDIR)/third_party/f030dsp3d/tools/tos402.rom \
+		--patch-tos true \
+		--fast-boot true --fast-forward true --sound off \
+		--confirm-quit false --run-vbls 4000 \
+		--log-file hatari.log \
+		ratetest.tos
+	@test -s build/ratetest/RATETEST.TXT
+	@rg -q "^RESULT: PASS" build/ratetest/RATETEST.TXT
+	@! rg -q "FAIL" build/ratetest/RATETEST.TXT
+	@echo "Hatari SSI rate measurement: OK"
 
 profile-dsp-rt5: check tools/profile_dsp.py
 	@if ! command -v hatari >/dev/null 2>&1; then \

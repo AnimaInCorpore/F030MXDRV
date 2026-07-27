@@ -88,6 +88,7 @@ Use `make help` for the complete target summary. The most useful targets are:
 | `make endurance` | play Xevious through two loops, fade, and shutdown | Hatari + Xevious corpus files |
 | `make endurance-batch` | play every uppercase `*.MDX` in the local corpus | Hatari + local corpus |
 | `make profile-dsp-rt5` | reproduce the integrated DSP cycle report | Hatari |
+| `make ratetest-hatari` | gate the physical-Falcon SSI rate test under Hatari | Hatari |
 
 The principal outputs are:
 
@@ -95,6 +96,7 @@ The principal outputs are:
 release/f030mxdrv.tos  conformance program and GEM launchable player
 release/f030mxdrv.ttp  the same program with a Desktop command-line entry
 release/xevious.tos    dedicated no-argument Xevious player
+release/ratetest.tos   physical-Falcon SSI rate measurement
 release/ym2151.lod     readable DSP assembler artifact
 ```
 
@@ -151,6 +153,22 @@ For the no-argument conformance program in Hatari:
 ```sh
 make run
 ```
+
+## Hardware validation: SSI rate test
+
+`release/ratetest.tos` is a standalone physical-Falcon validation program.
+It boots a minimal polled DSP frame counter, connects the DSP transmitter to
+the DAC, and measures the crossbar-delivered SSI frame rate against the TOS
+200 Hz tick for prescales 3, 1, and 2 (10 seconds each, 0.1 % tolerance
+against the 25.175 MHz / 256 / (prescale+1) model). It prints deterministic
+`PASS`/`FAIL` lines and writes the identical report to `RATETEST.TXT` beside
+the program, so a run on a real Falcon can be reported as one file or one
+photo. A frame counter frozen at prescale 3 confirms the stopped-SSI
+suspicion that `make xevious-verbose50` was built to isolate; a missing
+crossbar clock, a wrong clock source, and every wrong-divider outcome each
+produce a distinct line. `make ratetest-hatari` runs the same binary under
+Hatari and gates its verdict, so a hardware/emulator divergence shows up as
+one differing line between the two reports.
 
 ## Architecture
 
