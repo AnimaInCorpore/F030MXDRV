@@ -3174,8 +3174,9 @@ rt5_feedback_add_x:
         move    y:(r0+n0),x0
         mpyr    x0,y0,a y:(r5)+,y0
         move    a,y:(r4)
-        mpyr    x0,y0,a y:(r5)+,y0
-        move    x:(r3),x0
+        ; The carrier multiply consumes the old sine/gain pair while both
+        ; data buses preload the accumulation word and next history gain.
+        mpyr    x0,y0,a x:(r3),x0 y:(r5)+,y0
         add     x0,a
         move    a,x:(r3)+
 rt5_feedback_add_x_done:
@@ -3189,16 +3190,22 @@ rt5_feedback_add_x_done:
 
 ; Start or add an unmodulated operator in the internal X stage ring.
 rt5_independent_write_x:
-        move    #rt2_stage_ring,r3
+        ; Software-pipeline the ring store through the following frame's
+        ; phase mask.  The first parallel write lands in unused slot 63;
+        ; m3 then wraps r3 to slot zero, and the epilogue commits the final
+        ; result.  Runtime segments are at most 32 frames, so slot 63 is
+        ; never consumed by a following stage.
+        move    #rt2_stage_ring+63,r3
         move    l:(r7),b10
-        do      n5,rt5_independent_write_x_done
         and     y1,b1
         move    b1,n0
-        mac     x1,y1,b
-        move    y:(r0+n0),x0
+        do      n5,rt5_independent_write_x_done
+        mac     x1,y1,b y:(r0+n0),x0
+        and     y1,b1 a,x:(r3)+
+        move    b1,n0
         mpyr    x0,y0,a
-        move    a,x:(r3)+
 rt5_independent_write_x_done:
+        move    a,x:(r3)+
         move    b10,l:(r7)+
         rts
 
@@ -3206,11 +3213,12 @@ rt5_independent_add_x:
         move    #rt2_stage_ring,r3
         move    #rt2_stage_ring,r5
         move    l:(r7),b10
+        and     y1,b1
+        move    b1,n0
         do      n5,rt5_independent_add_x_done
+        mac     x1,y1,b y:(r0+n0),x0
         and     y1,b1 x:(r3)+,a
         move    b1,n0
-        mac     x1,y1,b
-        move    y:(r0+n0),x0
         macr    x0,y0,a
         move    a,x:(r5)+
 rt5_independent_add_x_done:
@@ -3294,8 +3302,7 @@ rt5_serial_accumulate_left_x:
         move    y:(r0+n0),x0
         mpyr    x0,y0,a x:(r1)+,x0
         add     x0,a x:(r3)+,x0
-        move    a,x:(r5)+
-        move    x0,a
+        move    a,x:(r5)+ x0,a
 rt5_serial_accumulate_left_x_done:
         move    b10,l:(r7)+
         rts
@@ -3726,11 +3733,13 @@ command_rt_refill_receive:
         move    r1,x:rt5_pan_left_base
         move    r7,x:rt5_pan_right_base
         jsr     rt5_receive_runtime_pcm
-        ; The host block is now private DSP memory. Acknowledge acceptance so
-        ; the 68030 can prepare the following period while this one renders;
-        ; its next command blocks naturally until we return to the stream loop.
+        ; The host block is now private DSP memory. Acknowledge acceptance
+        ; before committing its staged YM burst: the 68030 can prepare the
+        ; following period while event decode and rendering run, and its next
+        ; command still blocks naturally until we return to the stream loop.
         move    #>DSP_REPLY_OK,a
         jsr     send_reply
+        jsr     rt5_commit_runtime_events
         move    x:ssi_refill_buffer,a
         move    a1,x:rt5_runtime_output
         do      #DSP_RT_MIX_BLOCK_COUNT,command_rt_refill_render_done
@@ -6197,9 +6206,10 @@ command_start_realtime_mixed:
         move    a1,x:rt5_pan_right_base
         jsr     rt5_receive_runtime_pcm
         ; Match refill semantics: once the upload is owned, let the host begin
-        ; its next preparation pass while the first synthesis period renders.
+        ; its next preparation pass while event commit and synthesis run.
         move    #>DSP_REPLY_OK,a
         jsr     send_reply
+        jsr     rt5_commit_runtime_events
         move    #>ssi_buffer_a,a
         move    a1,x:rt5_runtime_output
         jsr     rt5_enter_runtime_map
@@ -6248,7 +6258,7 @@ command_rt_start_buffer_ready:
 ; owns when panned both (or discarded by the unset flag when unpanned,
 ; keeping the latch state advancing), or accumulated into a one-sided
 ; planar stream.
-        org     p:$2900
+        org     p:$2902
 rt5_noise_block:
         move    x:rt5_noise_threshold,a
         tst     a
@@ -7794,7 +7804,7 @@ rt5_receive_runtime_left_done:
 rt5_receive_runtime_right_done:
         move    b1,y:(r7)+
 rt5_receive_runtime_pcm_done:
-        jmp     rt5_commit_runtime_events
+        rts
 
         ; Generated program-memory noise jump tables and external-Y exact
         ; renderer reservations. No P code follows this include.

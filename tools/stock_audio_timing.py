@@ -17,6 +17,10 @@ import sys
 import tempfile
 import threading
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from hatari_binary import default_hatari
+
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PLAYER = os.path.join(REPO, "release", "xevious.tos")
@@ -47,6 +51,8 @@ class TraceScorer(threading.Thread):
         self.ssi_words = 0
         self.clipped_words = 0
         self.switch_words = []
+        self.switch_refills = []
+        self.refill_words = []
         self.refills = 0
         self.awaiting_refill_payload = False
         self.batch_counts = []
@@ -70,8 +76,10 @@ class TraceScorer(threading.Thread):
                         continue
                     if SWITCH_PATTERN in line:
                         self.switch_words.append(self.ssi_words)
+                        self.switch_refills.append(self.refills)
                     elif REFILL_PATTERN in line:
                         self.refills += 1
+                        self.refill_words.append(self.ssi_words)
                         self.awaiting_refill_payload = True
                     elif self.awaiting_refill_payload:
                         match = HOST_DIRECT_RE.search(line)
@@ -98,14 +106,17 @@ def main():
                         help="maximum saturated production SSI words (default: 64)")
     parser.add_argument("--wall-timeout", type=int, default=180,
                         help="Hatari wall-time cap in seconds (default: 180)")
+    parser.add_argument("--hatari", default=default_hatari(),
+                        help=f"Hatari binary to run (default: {default_hatari()})")
     parser.add_argument("--corpus-dir", default=DEFAULT_CORPUS,
                         help=("directory containing XEVIOUS.MDX/PDX "
                               f"(default: {DEFAULT_CORPUS})"))
     args = parser.parse_args()
     corpus_dir = os.path.abspath(args.corpus_dir)
 
-    if not shutil.which("hatari"):
-        sys.exit("error: stock audio timing gate needs Hatari")
+    hatari = args.hatari
+    if not shutil.which(hatari):
+        sys.exit(f"error: stock audio timing gate needs Hatari ({hatari})")
     mdx_path = os.path.join(corpus_dir, "XEVIOUS.MDX")
     pdx_path = os.path.join(corpus_dir, "XEVIOUS.PDX")
     for path in (PLAYER, TOS_ROM, mdx_path, pdx_path):
@@ -126,7 +137,7 @@ def main():
 
         env = dict(os.environ, SDL_VIDEODRIVER="dummy", SDL_AUDIODRIVER="dummy")
         command = [
-            "hatari", "--machine", "falcon", "--cpuclock", "16",
+            hatari, "--machine", "falcon", "--cpuclock", "16",
             "--dsp", "emu", "--tos", TOS_ROM, "--patch-tos", "true",
             "--fast-boot", "true", "--fast-forward", "true", "--sound", "off",
             "--confirm-quit", "false", "--run-vbls", str(args.run_vbls),
@@ -178,12 +189,21 @@ def main():
                                                WORDS_PER_PERIOD + 1):
             reasons.append(f"cold-start interval is {intervals[0]} SSI words")
         late = [
-            (index + 2, interval)
+            (
+                index + 2,
+                interval,
+                scorer.switch_refills[index + 2],
+                scorer.refill_words[scorer.switch_refills[index + 2] - 1]
+                - scorer.switch_words[index + 1],
+            )
             for index, interval in enumerate(intervals[1:])
             if interval != WORDS_PER_PERIOD
         ]
         if late:
-            preview = ", ".join(f"#{index}={words}" for index, words in late[:5])
+            preview = ", ".join(
+                f"#{index}/refill-{refill}={words} (submitted +{submit} words)"
+                for index, words, refill, submit in late[:5]
+            )
             reasons.append("missed steady buffer boundary: " + preview)
         if scorer.refills < args.min_switches:
             reasons.append(
@@ -200,6 +220,12 @@ def main():
         if reasons:
             for reason in reasons:
                 print("FAIL: " + reason, file=sys.stderr)
+            print(
+                f"Observed {len(scorer.switch_words)} handoffs, "
+                f"{scorer.refills} refills, largest YM burst "
+                f"{largest_batch} words.",
+                file=sys.stderr,
+            )
             sys.exit(1)
 
         first = intervals[0] if intervals else 0

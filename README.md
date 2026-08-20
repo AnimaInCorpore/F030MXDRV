@@ -11,13 +11,19 @@ ymfm implementation.
 
 ## Project status
 
-The playback path is complete and passes the repository's Hatari gates. It
-supports bounded 9- and 16-track MDX execution, automatic PDX lookup, eight
-PCM voices, realtime FM/PDX mixing, interrupt-fed double buffering, two-loop
-playback, and fadeout.
+The playback path is feature-complete and passes every Hatari gate except
+`stock-audio`. It supports bounded 9- and 16-track MDX execution, automatic PDX
+lookup, eight PCM voices, realtime FM/PDX mixing, interrupt-fed double
+buffering, two-loop playback, and fadeout.
 
 This is still a pre-release project:
 
+- the transport is close to, but does not yet hold, every deadline at the
+  Falcon's actual clock. DSP and host-path optimizations reduced the calibrated
+  Xevious gate from 351 late periods (46.25%) to 3 (0.27%); those three are
+  repeatable single-buffer pipeline misses while the 68030 prepares a dense
+  PDX/YM period, so `make stock-audio` still correctly reports a failure. See
+  [`docs/hatari-timing.md`](docs/hatari-timing.md);
 - production playback has not completed a physical-Falcon validation and
   long-duration soak;
 - the resident-independent dispatcher preserves the original 32-entry MXDRV
@@ -50,10 +56,19 @@ The exact support boundary is documented in
 - Reproducible native-oracle, perceptual, smoke, stock-clock timing, endurance,
   and DSP-cycle gates.
 
-The integrated worst-case DSP profile measures 364.28 instruction cycles per
+The integrated worst-case DSP profile measures 346.21 instruction cycles per
 32.780 kHz frame against a 489.40-cycle budget. The exact scalar renderer costs
-12,024.34 cycles per native 62.5 kHz sample against a 256.68-cycle budget, so it
+12,271.21 cycles per native 62.5 kHz sample against a 256.68-cycle budget, so it
 is deliberately a test oracle rather than the production renderer.
+
+Measured on production material rather than on a bracketed fixture, the DSP
+now occupies 84.4% of that budget — 407.59 cycles of synthesis and transport
+plus 5.58 cycles stalled on the 68030 — leaving 76.22 cycles per frame. The
+remaining three Xevious misses are caused by late host preparation rather than
+average DSP saturation. See
+[`docs/hatari-timing.md`](docs/hatari-timing.md); it also explains why the
+emulator gates only started reporting this once they moved to a DSP-calibrated
+Hatari.
 
 ## Build
 
@@ -62,7 +77,10 @@ The supported build flow expects a POSIX shell plus:
 - Git with access to the three pinned submodules;
 - Python 3, a C++17 compiler, `make`, `tar`, `file`, and `rg`;
 - DOSBox Staging or DOSBox for Motorola's DSP assembler; and
-- Hatari for emulator integration, capture, endurance, and profiling targets.
+- Hatari for emulator integration, capture, endurance, and profiling targets —
+  the DSP-calibrated build described in
+  [`docs/hatari-timing.md`](docs/hatari-timing.md), because stock Hatari runs
+  the Falcon DSP at twice its hardware speed.
 
 DOSBox is needed only to run Motorola's DOS `ASM56000` binary. The `dsptools`
 project carries `asm56000c`, the same 4.1.1 assembler ported to C under a 0BSD
@@ -94,6 +112,7 @@ Use `make help` for the complete target summary. The most useful targets are:
 | `make endurance` | play Xevious through two loops, fade, and shutdown | Hatari + Xevious corpus files |
 | `make endurance-batch` | play every uppercase `*.MDX` in the local corpus | Hatari + local corpus |
 | `make profile-dsp-rt5` | reproduce the integrated DSP cycle report | Hatari |
+| `make profile-dsp-live` | measure DSP occupancy during real playback | Hatari + Xevious corpus files |
 | `make ratetest-hatari` | gate the physical-Falcon SSI rate test under Hatari | Hatari |
 
 The principal outputs are:

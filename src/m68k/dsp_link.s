@@ -41,17 +41,26 @@ dsp_blast_paced:
 
 dsp_blast_send_super:
         movem.l d3/a3,-(sp)
+        ; A 1,024 Hz MFP Timer-A tick inside this short critical stream
+        ; otherwise leaves the DSP parked at HRDF long enough to turn
+        ; an isolated voice-load burst into a full repeated audio period.
+        ; Preserve the caller's mask and defer that tick until all payload
+        ; words have reached the DSP; no interrupt is discarded.
+        move.w  sr,-(sp)
+        ori.w   #$0700,sr
         move.l  dsp_blast_ptr,a3
         move.l  dsp_blast_count,d3
 dsp_blast_send_word:
         btst    #1,DSP_HOST_ISR
         beq.s   dsp_blast_send_word
-        move.b  1(a3),DSP_HOST_DATA+1
-        move.b  2(a3),DSP_HOST_DATA+2
-        move.b  3(a3),DSP_HOST_DATA+3
-        addq.l  #4,a3
+        ; Each payload slot is already a zero-padded 24-bit word.  A long
+        ; write covers TX0:TXH:TXM:TXL and the low-byte access still strobes
+        ; the transfer, but the 68030 pays for one host-port transaction
+        ; instead of three separately wait-stated byte writes.
+        move.l  (a3)+,DSP_HOST_DATA
         subq.l  #1,d3
         bne.s   dsp_blast_send_word
+        move.w  (sp)+,sr
         movem.l (sp)+,d3/a3
         rts
 

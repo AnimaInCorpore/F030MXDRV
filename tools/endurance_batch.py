@@ -22,6 +22,10 @@ import sys
 import threading
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from hatari_binary import default_hatari
+
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PLAYER = os.path.join(REPO, "release", "f030mxdrv.tos")
 DEFAULT_CORPUS = os.path.join(REPO, "corpus")
@@ -88,7 +92,7 @@ class TraceScorer(threading.Thread):
                     self.protocol_error = line.strip()
 
 
-def run_song(mdx_name, pdx_name, corpus_dir, keep_dir):
+def run_song(mdx_name, pdx_name, corpus_dir, keep_dir, hatari):
     song = os.path.splitext(mdx_name)[0]
     work = os.path.join(BATCH_DIR, song)
     shutil.rmtree(work, ignore_errors=True)
@@ -110,7 +114,7 @@ def run_song(mdx_name, pdx_name, corpus_dir, keep_dir):
 
     env = dict(os.environ, SDL_VIDEODRIVER="dummy", SDL_AUDIODRIVER="dummy")
     cmd = [
-        "hatari", "--machine", "falcon", "--dsp", "emu",
+        hatari, "--machine", "falcon", "--dsp", "emu",
         "--tos", TOS_ROM, "--patch-tos", "true",
         "--fast-boot", "true", "--fast-forward", "true", "--sound", "off",
         "--confirm-quit", "false", "--run-vbls", str(RUN_VBLS),
@@ -178,11 +182,13 @@ def main():
                               f"(default: {DEFAULT_CORPUS})"))
     parser.add_argument("--keep-workdirs", action="store_true",
                         help="keep per-song work directories even on PASS")
+    parser.add_argument("--hatari", default=default_hatari(),
+                        help=f"Hatari binary to run (default: {default_hatari()})")
     args = parser.parse_args()
     corpus_dir = os.path.abspath(args.corpus_dir)
 
-    if not shutil.which("hatari"):
-        sys.exit("error: endurance batch needs Hatari")
+    if not shutil.which(args.hatari):
+        sys.exit(f"error: endurance batch needs Hatari ({args.hatari})")
     if not os.path.isfile(PLAYER):
         sys.exit("error: build release/f030mxdrv.tos before running endurance")
     if not os.path.isdir(corpus_dir):
@@ -213,7 +219,7 @@ def main():
             except (OSError, ValueError) as error:
                 sys.exit(f"error: {error}")
             result = run_song(
-                mdx_name, pdx_name, corpus_dir, args.keep_workdirs
+                mdx_name, pdx_name, corpus_dir, args.keep_workdirs, args.hatari
             )
             results.append(result)
             line = (f"{result['verdict']}  {result['song']:<10}"

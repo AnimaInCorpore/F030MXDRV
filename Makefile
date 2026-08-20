@@ -26,6 +26,7 @@ DSP_RT2_PROFILE_DIR := build/dsp-profile-rt2
 DSP_RT3_PROFILE_DIR := build/dsp-profile-rt3
 DSP_RT4_PROFILE_DIR := build/dsp-profile-rt4
 DSP_RT5_PROFILE_DIR := build/dsp-profile-rt5
+DSP_LIVE_PROFILE_DIR := build/dsp-profile-live
 DSP_RT_PROFILE_FRAMES := 2048
 DSP_RT2_PROFILE_FRAMES := 2048
 DSP_RT3_PROFILE_FRAMES := 2048
@@ -62,9 +63,38 @@ VERBOSE_M68K_BUILD := build/m68k-xevious-verbose
 VERBOSE_M68K_OBJECTS := $(patsubst src/m68k/%.s,$(VERBOSE_M68K_BUILD)/%.o,$(M68K_SOURCES))
 
 DOSBOX ?= $(shell command -v dosbox-staging 2>/dev/null || command -v dosbox 2>/dev/null)
+
+# Hatari selection. Stock Hatari hands the Falcon DSP two instruction cycles
+# per emulated 68030 clock twice over, so the DSP56001 runs at 32 MIPS instead
+# of the hardware's 16, and its host-port wait states are 72-174 % of hardware
+# depending on the access pattern. Every real-time result from such a build is
+# measured against a machine that does not exist. The default is therefore the
+# DSP-calibrated Hatari from the F030Arcade tree, which halves the DSP clock
+# back to 16 MIPS and charges a measured per-direction, per-size host-port wait
+# state table; see docs/hatari-timing.md. Override either variable:
+#   make <target> F030ARCADE=/path/to/F030Arcade
+#   make <target> HATARI=/path/to/hatari
+F030ARCADE ?= $(HOME)/Work/F030Arcade
+HATARI_CALIBRATED := $(F030ARCADE)/third_party/hatari/build/src/hatari
+HATARI ?= $(firstword $(wildcard $(HATARI_CALIBRATED)) hatari)
+
+# A missing calibrated build is not an error -- every static gate still works
+# -- but a real-time result from a stock build describes a DSP running at twice
+# the Falcon's speed, so say so rather than reporting it as a clean pass.
+define require_hatari
+	@if ! command -v $(HATARI) >/dev/null 2>&1; then \
+		echo "error: $(1) target needs Hatari ($(HATARI))" >&2; \
+		exit 1; \
+	fi
+	@if [ "$(HATARI)" != "$(HATARI_CALIBRATED)" ]; then \
+		echo "warning: $(HATARI) is not the DSP-calibrated build; real-time" >&2; \
+		echo "         results will describe a 32 MIPS DSP - see docs/hatari-timing.md" >&2; \
+	fi
+endef
+
 DOSBOX_FLAGS ?= --noprimaryconf --set output=texture
 
-.PHONY: all help host xevious dsp reference check capture-realtime compare-realtime smoke stock-audio endurance endurance-batch profile-dsp profile-dsp-rt \
+.PHONY: all help host xevious dsp reference check capture-realtime compare-realtime smoke stock-audio endurance endurance-batch profile-dsp profile-dsp-rt profile-dsp-live \
 	profile-dsp-rt2 profile-dsp-rt3 profile-dsp-rt4 profile-dsp-rt5 \
 	clean run tools xevious-verbose xevious-verbose50 ratetest-hatari
 
@@ -80,6 +110,7 @@ help:
 	@echo "  endurance        play Xevious through two loops and fade under Hatari"
 	@echo "  endurance-batch  play every uppercase MDX in CORPUS_DIR under Hatari"
 	@echo "  profile-dsp*     capture DSP cycle profiles under Hatari"
+	@echo "  profile-dsp-live measure DSP occupancy during real playback"
 	@echo "  ratetest-hatari  gate the physical-Falcon SSI rate test under Hatari"
 	@echo "  run              launch the conformance executable in Hatari"
 	@echo "  clean            remove generated build/ and release/ directories"
@@ -364,11 +395,9 @@ check: all reference
 # in Hatari, reconstruct per-frame vectors from the block-boundary dumps, and
 # feed them through the exact-to-perceptual comparator.
 capture-realtime: check
-	@if ! command -v hatari >/dev/null 2>&1; then \
-		echo "error: capture-realtime target needs Hatari" >&2; \
-		exit 1; \
-	fi
-	python3 tools/capture_ym2151_realtime.py --output build/capture/vectors
+	$(call require_hatari,capture-realtime)
+	python3 tools/capture_ym2151_realtime.py --hatari $(HATARI) \
+		--output build/capture/vectors
 	$(MAKE) compare-realtime REALTIME_CANDIDATE_DIR=build/capture/vectors
 
 compare-realtime: $(YM2151_PERCEPTUAL_STAMP)
@@ -383,12 +412,9 @@ compare-realtime: $(YM2151_PERCEPTUAL_STAMP)
 		--output $(REFERENCE_BUILD)/ym2151-realtime-comparison.txt
 
 smoke: check
-	@if ! command -v hatari >/dev/null 2>&1; then \
-		echo "error: smoke target needs Hatari" >&2; \
-		exit 1; \
-	fi
+	$(call require_hatari,smoke)
 	@rm -f build/hatari-smoke.log build/hatari-smoke.trace
-	@SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy hatari \
+	@SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy $(HATARI) \
 		--machine falcon --dsp emu \
 		--tos third_party/f030dsp3d/tools/tos402.rom --patch-tos true \
 		--fast-boot true --fast-forward true --sound off \
@@ -503,19 +529,17 @@ smoke: check
 # 600-handoff floor runs past both former stalls and requires a >32-write burst
 # to exercise the expanded stage.
 stock-audio: xevious
-	@python3 tools/stock_audio_timing.py --corpus-dir "$(abspath $(CORPUS_DIR))"
+	@python3 tools/stock_audio_timing.py --hatari $(HATARI) \
+		--corpus-dir "$(abspath $(CORPUS_DIR))"
 
 profile-dsp: check tools/profile_dsp.py
-	@if ! command -v hatari >/dev/null 2>&1; then \
-		echo "error: profile-dsp target needs Hatari" >&2; \
-		exit 1; \
-	fi
+	$(call require_hatari,profile-dsp)
 	@rm -rf $(DSP_PROFILE_DIR)
 	@python3 tools/profile_dsp.py prepare \
 		--listing $(DSP_BUILD)/YM2151.LST \
 		--output-dir $(DSP_PROFILE_DIR) \
 		--marker 0x01c1c0
-	@SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy hatari \
+	@SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy $(HATARI) \
 		--machine falcon --dsp emu \
 		--tos third_party/f030dsp3d/tools/tos402.rom --patch-tos true \
 		--fast-boot true --fast-forward true --sound off \
@@ -537,10 +561,7 @@ profile-dsp: check tools/profile_dsp.py
 		--output $(DSP_PROFILE_DIR)/report.txt
 
 profile-dsp-rt: check tools/profile_dsp.py
-	@if ! command -v hatari >/dev/null 2>&1; then \
-		echo "error: profile-dsp-rt target needs Hatari" >&2; \
-		exit 1; \
-	fi
+	$(call require_hatari,profile-dsp-rt)
 	@rm -rf $(DSP_RT_PROFILE_DIR)
 	@python3 tools/profile_dsp.py prepare \
 		--listing $(DSP_BUILD)/YM2151.LST \
@@ -548,7 +569,7 @@ profile-dsp-rt: check tools/profile_dsp.py
 		--marker 0x01c2c0 \
 		--start-symbol rt_profile_loop_start \
 		--end-symbol rt_profile_loop_done
-	@SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy hatari \
+	@SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy $(HATARI) \
 		--machine falcon --dsp emu \
 		--tos third_party/f030dsp3d/tools/tos402.rom --patch-tos true \
 		--fast-boot true --fast-forward true --sound off \
@@ -576,10 +597,7 @@ profile-dsp-rt: check tools/profile_dsp.py
 		--title "DSP56001 codec-rate four-operator lower-bound profile"
 
 profile-dsp-rt2: check tools/profile_dsp.py
-	@if ! command -v hatari >/dev/null 2>&1; then \
-		echo "error: profile-dsp-rt2 target needs Hatari" >&2; \
-		exit 1; \
-	fi
+	$(call require_hatari,profile-dsp-rt2)
 	@rm -rf $(DSP_RT2_PROFILE_DIR)
 	@python3 tools/profile_dsp.py prepare \
 		--listing $(DSP_BUILD)/YM2151.LST \
@@ -587,7 +605,7 @@ profile-dsp-rt2: check tools/profile_dsp.py
 		--marker 0x01c3c0 \
 		--start-symbol rt2_profile_loop_start \
 		--end-symbol rt2_profile_loop_done
-	@SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy hatari \
+	@SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy $(HATARI) \
 		--machine falcon --dsp emu \
 		--tos third_party/f030dsp3d/tools/tos402.rom --patch-tos true \
 		--fast-boot true --fast-forward true --sound off \
@@ -615,10 +633,7 @@ profile-dsp-rt2: check tools/profile_dsp.py
 		--title "DSP56001 codec-rate algorithm-0 block-spike profile"
 
 profile-dsp-rt3: check tools/profile_dsp.py
-	@if ! command -v hatari >/dev/null 2>&1; then \
-		echo "error: profile-dsp-rt3 target needs Hatari" >&2; \
-		exit 1; \
-	fi
+	$(call require_hatari,profile-dsp-rt3)
 	@rm -rf $(DSP_RT3_PROFILE_DIR)
 	@python3 tools/profile_dsp.py prepare \
 		--listing $(DSP_BUILD)/YM2151.LST \
@@ -626,7 +641,7 @@ profile-dsp-rt3: check tools/profile_dsp.py
 		--marker 0x01c4c0 \
 		--start-symbol rt3_profile_loop_start \
 		--end-symbol rt3_profile_loop_done
-	@SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy hatari \
+	@SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy $(HATARI) \
 		--machine falcon --dsp emu \
 		--tos third_party/f030dsp3d/tools/tos402.rom --patch-tos true \
 		--fast-boot true --fast-forward true --sound off \
@@ -659,10 +674,7 @@ profile-dsp-rt4-alg%: check tools/profile_dsp.py
 	@case "$*" in 1|2|3|4|5|6) ;; \
 		*) echo "error: algorithm must be 1-6" >&2; exit 1 ;; \
 	esac
-	@if ! command -v hatari >/dev/null 2>&1; then \
-		echo "error: profile-dsp-rt4-alg$* target needs Hatari" >&2; \
-		exit 1; \
-	fi
+	$(call require_hatari,profile-dsp-rt4-alg$*)
 	@rm -rf $(DSP_RT4_PROFILE_DIR)/algorithm-$*
 	@python3 tools/profile_dsp.py prepare \
 		--listing $(DSP_BUILD)/YM2151.LST \
@@ -670,7 +682,7 @@ profile-dsp-rt4-alg%: check tools/profile_dsp.py
 		--marker 0x01c50$* \
 		--start-symbol rt4_algorithm$*_loop_start \
 		--end-symbol rt4_profile_loop_done
-	@SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy hatari \
+	@SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy $(HATARI) \
 		--machine falcon --dsp emu \
 		--tos third_party/f030dsp3d/tools/tos402.rom --patch-tos true \
 		--fast-boot true --fast-forward true --sound off \
@@ -702,10 +714,7 @@ profile-dsp-rt4-alg%: check tools/profile_dsp.py
 # blocking refill as the only cadence. Proves sustained mixed FM/PDX
 # scheduling under Hatari ahead of the real-hardware soak.
 endurance: check
-	@if ! command -v hatari >/dev/null 2>&1; then \
-		echo "error: endurance target needs Hatari" >&2; \
-		exit 1; \
-	fi
+	$(call require_hatari,endurance)
 	@if [ ! -s "$(CORPUS_DIR)/XEVIOUS.MDX" ] || \
 		[ ! -s "$(CORPUS_DIR)/XEVIOUS.PDX" ]; then \
 		echo "error: endurance needs XEVIOUS.MDX and XEVIOUS.PDX in $(CORPUS_DIR)/" >&2; \
@@ -717,7 +726,7 @@ endurance: check
 	@cp $(RELEASE_DIR)/f030mxdrv.tos build/endurance/
 	@cp "$(CORPUS_DIR)/XEVIOUS.MDX" "$(CORPUS_DIR)/XEVIOUS.PDX" build/endurance/
 	@printf 'XEVIOUS.MDX\r\n' > build/endurance/AUTOPLAY.INF
-	@SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy hatari \
+	@SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy $(HATARI) \
 		--machine falcon --dsp emu \
 		--tos third_party/f030dsp3d/tools/tos402.rom --patch-tos true \
 		--fast-boot true --fast-forward true --sound off \
@@ -751,7 +760,8 @@ ENDURANCE_MIN_REFILLS := 200
 # trace file lands on disk; failing songs keep a rolling trace tail in
 # build/endurance-batch/.
 endurance-batch: check
-	@python3 tools/endurance_batch.py --corpus-dir "$(abspath $(CORPUS_DIR))"
+	@python3 tools/endurance_batch.py --hatari $(HATARI) \
+		--corpus-dir "$(abspath $(CORPUS_DIR))"
 
 # Run the physical-Falcon SSI rate test under Hatari and gate its verdict.
 # The program measures the crossbar-delivered DSP frame rate against the
@@ -785,10 +795,7 @@ ratetest-hatari: $(RELEASE_DIR)/ratetest.tos
 	@echo "Hatari SSI rate measurement: OK"
 
 profile-dsp-rt5: check tools/profile_dsp.py
-	@if ! command -v hatari >/dev/null 2>&1; then \
-		echo "error: profile-dsp-rt5 target needs Hatari" >&2; \
-		exit 1; \
-	fi
+	$(call require_hatari,profile-dsp-rt5)
 	@rm -rf $(DSP_RT5_PROFILE_DIR)
 	@python3 tools/profile_dsp.py prepare \
 		--listing $(DSP_BUILD)/YM2151.LST \
@@ -796,7 +803,7 @@ profile-dsp-rt5: check tools/profile_dsp.py
 		--marker 0x01c6c0 \
 		--start-symbol rt5_profile_loop_start \
 		--end-symbol rt5_profile_loop_done
-	@SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy hatari \
+	@SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy $(HATARI) \
 		--machine falcon --dsp emu \
 		--tos third_party/f030dsp3d/tools/tos402.rom --patch-tos true \
 		--fast-boot true --fast-forward true --sound off \
@@ -821,12 +828,24 @@ profile-dsp-rt5: check tools/profile_dsp.py
 		--unit-label "codec frame" \
 		--title "DSP56001 32.780 kHz live-SSI eight-channel decoded ALG/PAN/AM/PM/TL profile"
 
-run: all
-	@if ! command -v hatari >/dev/null 2>&1; then \
-		echo "error: run target needs Hatari" >&2; \
+# Measure what the DSP actually spends during production playback, including
+# the SSI interrupt, the host-port receive and the refill command that the
+# bracketed profile-dsp-rt* windows exclude. Only meaningful under a
+# DSP-calibrated Hatari; see docs/hatari-timing.md.
+profile-dsp-live: check tools/profile_dsp_live.py
+	$(call require_hatari,profile-dsp-live)
+	@if [ ! -s "$(CORPUS_DIR)/XEVIOUS.MDX" ] || \
+		[ ! -s "$(CORPUS_DIR)/XEVIOUS.PDX" ]; then \
+		echo "error: profile-dsp-live needs XEVIOUS.MDX and XEVIOUS.PDX in $(CORPUS_DIR)/" >&2; \
 		exit 1; \
 	fi
-	hatari --machine falcon --dsp emu --tos \
+	@python3 tools/profile_dsp_live.py --hatari $(HATARI) \
+		--corpus-dir "$(abspath $(CORPUS_DIR))" \
+		--output $(DSP_LIVE_PROFILE_DIR)/report.txt
+
+run: all
+	$(call require_hatari,run)
+	$(HATARI) --machine falcon --dsp emu --tos \
 		third_party/f030dsp3d/tools/tos402.rom $(RELEASE_DIR)/f030mxdrv.tos
 
 clean:

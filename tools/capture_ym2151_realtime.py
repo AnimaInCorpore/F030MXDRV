@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from hatari_binary import default_hatari  # noqa: E402
 from profile_dsp import parse_listing, require_symbol  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
@@ -861,7 +862,8 @@ def main() -> int:
     parser.add_argument("--listing", type=Path, default=REPO / "build/dsp/YM2151.LST")
     parser.add_argument("--build-dir", type=Path, default=REPO / "build/capture")
     parser.add_argument("--output", type=Path, default=REPO / "build/capture/vectors")
-    parser.add_argument("--hatari", default="hatari")
+    parser.add_argument("--hatari", default=default_hatari(),
+                        help=f"Hatari binary to run (default: {default_hatari()})")
     parser.add_argument("--run-vbls", type=int, default=2500)
     parser.add_argument("--scenario", action="append", choices=sorted(SCENARIOS))
     args = parser.parse_args()

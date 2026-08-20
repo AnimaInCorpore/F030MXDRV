@@ -107,7 +107,10 @@ The dedicated `r6/m6` pair is not used by synthesis, so refills can be
 interrupted without saving ALU state or disturbing a hardware `DO` loop. The
 transmit-exception vector at `P:$0012` is a long interrupt that reads SSISR and
 then writes TX, the required sequence for clearing TUE. It is a recovery path,
-not part of normal block playback.
+not part of normal block playback — and because Hatari's DAC starvation model
+is invented rather than measured, no gate has ever starved the SSI, so this
+vector has never executed in a passing run. It is listed among the untested
+paths in [`architecture.md`](architecture.md).
 
 The Falcon DAC rate selected by the production host is 25.175 MHz divided by
 4 and 192, or 32,779.9479167 Hz. Relative to the native 62,500 Hz OPM rate
@@ -222,7 +225,22 @@ before any rewrite. The model is credible for placement work but not for
 transport timing: Hatari's own documentation states that DSP emulation is
 instruction-wise correct and not cycle accurate, particularly for
 68030-to-DSP synchronization, so underrun behavior remains a hardware-soak
-question. `make profile-dsp` arms Hatari's DSP
+question.
+
+Two inputs to every cycle figure below are themselves modeled rather than
+measured on hardware. Whatever TOS leaves in the DSP bus control register is
+not represented at all, so if the real wait-state configuration is non-zero,
+the per-access cost this kernel was optimized against is systematically low —
+and this kernel is deliberately external-memory dense. The oscillator figure
+of 32,084,988 Hz is likewise Hatari's; a small difference on real hardware
+scales every budget here proportionally. The figure itself is not in doubt,
+but the rate at which stock Hatari hands those cycles to the DSP was: it
+delivers two per emulated 68030 clock twice over, so every real-time gate ran
+against a 32 MIPS DSP. The budgets below were always derived from
+`oscillator / 2`, so they describe the hardware correctly; it was the
+emulated machine, not the arithmetic, that was twice too fast. Neither invalidates the placement
+conclusions, which depend on relative cost, but both bear on how much of the
+reported headroom actually exists. `make profile-dsp` arms Hatari's DSP
 profiler on a unique host-port marker, then measures command `$0b` from entry
 through completion of the first 1280-native-sample render. Listing symbols are
 resolved mechanically, and the generated report is written to
@@ -230,10 +248,12 @@ resolved mechanically, and the generated report is written to
 
 The deterministic fixture enables a sustained four-operator algorithm-7 voice
 on all eight channels and deliberately uses the cached no-PM phase path. Hatari
-2.6.1 reports 30,782,302 oscillator clocks, or 15,391,151 instruction cycles,
-for the block. That is 12,024.34 instruction cycles per native sample and
-959.40 ms of modeled DSP time for audio consumed in 20.48 ms: a 46.85x
-real-time miss. The profile window does not include steady SSI interrupt or
+reports 31,414,310 oscillator clocks, or 15,707,155 instruction cycles,
+for the block. That is 12,271.21 instruction cycles per native sample and
+979.10 ms of modeled DSP time for audio consumed in 20.48 ms: a 47.81x
+real-time miss. The stock and DSP-calibrated Hatari builds report this figure
+identically, as they do every bracketed profile here: the per-instruction cost
+model is the same in both, and only the rate of cycle delivery differs. The profile window does not include steady SSI interrupt or
 host-port service overhead, and a PM-modulated workload can only be more
 expensive. This replaces the earlier 8.6x estimate derived indirectly from a
 VBL throughput test.
@@ -451,9 +471,19 @@ live in the external island with the generated tables. The capture harness
 derives mid-block levels analytically from the same defining recurrence, so
 no mid-block state is stored.
 
-Hatari measures 2,984,192 instruction cycles for 8,192 frames over 256
-blocks, or 364.28 cycles per frame against the 489.40-cycle budget, leaving
-125.12 cycles (25.6%). The 186.02 ms modeled span fits its 249.91 ms period.
+Hatari measures 2,836,170 instruction cycles for 8,192 frames over 256
+blocks, or 346.21 cycles per frame against the 489.40-cycle budget, leaving
+143.19 cycles (29.3%). The 176.79 ms modeled span fits its 249.91 ms period.
+Those 143.19 cycles are not all spare capacity. The window is bracketed between
+two render markers, so it excludes the SSI transmit interrupt, the host-port
+receive and the refill command; `make profile-dsp-live` measures the same DSP
+across 128 whole production periods of Xevious and finds 407.59 cycles per
+frame of synthesis and transport plus 5.58 stalled on the 68030, i.e. 84.4%
+occupancy and a 76.22-cycle margin. At the true 16 MIPS DSP clock the optimized
+Xevious run misses 3 of 1,103 steady boundaries (0.27%), down from 351 of 759;
+the remaining three arrive from the 68030 roughly one third of a period late,
+rather than exhausting the DSP's mean render budget. See
+[`hatari-timing.md`](hatari-timing.md).
 The 256-block window amortizes the 32-event fixture at a realistic MXDRV
 write density, and the envelope fixture exercises an eight-operator key-on
 transient that decays to its sustain levels and retires, one sustained D2R
@@ -462,7 +492,12 @@ envelope cost is activity-proportional rather than a permanent 32-operator
 tax. Every decoded register class the real transport must apply executes
 inside the budget beside live SSI, planar PDX mixing, saturation, and
 decoded envelope curvature. The write-first common-ring
-pass has been spent: the block's first both-panned carrier stores instead of
+pass has been spent. The unmodulated operator stages also carry the previous
+ring store through the next phase mask and fetch the next sine word beside the
+phase MAC; the feedback-add carrier multiply simultaneously preloads its X
+accumulator and Y gain. Together those DSP56001 parallel moves reduce the
+integrated gate by 18.07 cycles per frame without changing `$eed0f2`. The
+block's first both-panned carrier stores instead of
 accumulating, the rare unwritten ring is cleared once at emission, and both
 write variants keep full-accumulator limiter moves so the checksum gate
 proves the output bit-identical. Recovering the lever and the boundary drain
@@ -478,7 +513,14 @@ outside this gate.
 
 Hatari's Falcon decode (and the hardware it models) maps external P to the
 32K SRAM directly, external Y onto the same lower 16K word for word, and
-external X onto the upper 16K at `phys = addr + $4000`. The `P:$1400` ceiling
+external X onto the upper 16K at `phys = addr + $4000`. That statement is the
+emulator's, and this section builds on it more heavily than anything else in
+the port: the islands below place program *into the gaps between live data
+arrays*, so a decode that differs on real hardware by even one region corrupts
+state silently instead of failing cleanly. Verify it on hardware with a
+standalone probe — write a pattern through `Y:$2000`, read it back through
+`P:$2000` and `X:$6000` — before trusting any audio result, as recorded in the
+soak order in [`architecture.md`](architecture.md). The `P:$1400` ceiling
 therefore only protects the Y-resident table region. The window from the end
 of the external-Y reservation at `Y:$1f7f` through `Y:$26ff` is program space.
 The island at `P:$2000-$2af6` holds the generated per-rate tables, amortized
