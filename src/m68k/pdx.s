@@ -689,22 +689,134 @@ mxdrv_pdx_mix_block:
         move.b  pdx_pcm_pan,d0
         move.l  d0,(a3)+
 
-        ; When no PCM voice is sounding — every period of an FM-only song, and
-        ; the common case between drum hits otherwise — emit the silent period
-        ; directly and skip the clear, mix, and saturating-store passes over
-        ; 512 frames.
+        ; Count active voices once. No voice emits silence directly; one voice
+        ; (the normal legacy-ADPCM case) can render and saturate straight into
+        ; the wire payload. Only true PCM8 overlap needs the three-pass clear,
+        ; accumulate, and saturating-store path below.
         lea     pdx_voices,a2
         moveq   #PDX_VOICE_COUNT-1,d1
+        moveq   #0,d5
 pdx_mix_block_silence_test:
         tst.b   PDX_VOICE_ACTIVE(a2)
-        bne     pdx_mix_block_render
+        beq     pdx_mix_block_silence_next
+        addq.w  #1,d5
+        movea.l a2,a0
+pdx_mix_block_silence_next:
         lea     PDX_VOICE_BYTES(a2),a2
         dbra    d1,pdx_mix_block_silence_test
+        tst.w   d5
+        bne     pdx_mix_block_active
         moveq   #0,d0
         move.w  #PDX_MIX_BLOCK_FRAMES-1,d4
 pdx_mix_block_silence:
         move.l  d0,(a3)+
         dbra    d4,pdx_mix_block_silence
+        rts
+
+pdx_mix_block_active:
+        cmpi.w  #1,d5
+        bne     pdx_mix_block_render
+
+        ; A lone voice needs no accumulation buffer. This folds the former
+        ; clear, read/modify/write mix, and final copy into one output pass;
+        ; source-clock and retirement ordering stay identical to the general
+        ; mixer so the generated PCM words remain bit-exact.
+        movea.l a0,a2
+        move.w  #PDX_MIX_BLOCK_FRAMES-1,d4
+        moveq   #0,d2
+        move.w  PDX_VOICE_PHASE(a2),d2
+        moveq   #0,d3
+        move.b  PDX_VOICE_RATE(a2),d3
+        add.w   d3,d3
+        lea     pdx_rate_phase(pc),a0
+        move.w  (a0,d3.w),d3
+        move.l  PDX_VOICE_SCALED_CURRENT(a2),d6
+        cmpi.b  #8,PDX_VOICE_VOLUME(a2)
+        bne     pdx_mix_block_single_frame
+        tst.l   PDX_VOICE_CACHE_PTR(a2)
+        beq     pdx_mix_block_single_frame
+
+        ; The precached unity-gain path is the production legacy-ADPCM hot
+        ; case. Its samples are already signed 16-bit output values, so clamp
+        ; checks and Q12 rescaling are identities. Advance the cache inline to
+        ; avoid three nested calls at every source-rate crossing.
+pdx_mix_block_single_cached_frame:
+        move.l  d6,(a3)+
+        add.w   d3,d2
+        cmpi.w  #PDX_RESAMPLE_DENOMINATOR,d2
+        bcs     pdx_mix_block_single_cached_next
+        subi.w  #PDX_RESAMPLE_DENOMINATOR,d2
+        move.w  d2,PDX_VOICE_PHASE(a2)
+        tst.b   PDX_VOICE_NEXT_VALID(a2)
+        beq     pdx_mix_block_single_end_voice
+        move.w  PDX_VOICE_NEXT(a2),PDX_VOICE_CURRENT(a2)
+        move.l  PDX_VOICE_SCALED_NEXT(a2),d6
+        move.l  d6,PDX_VOICE_SCALED_CURRENT(a2)
+        tst.l   PDX_VOICE_CACHE_LEFT(a2)
+        beq     pdx_mix_block_single_cached_tail
+        movea.l PDX_VOICE_CACHE_PTR(a2),a0
+        move.w  (a0)+,d0
+        ext.l   d0
+        move.l  a0,PDX_VOICE_CACHE_PTR(a2)
+        subq.l  #1,PDX_VOICE_CACHE_LEFT(a2)
+        move.w  d0,PDX_VOICE_NEXT(a2)
+        move.l  d0,PDX_VOICE_SCALED_NEXT(a2)
+        bra     pdx_mix_block_single_cached_next
+pdx_mix_block_single_cached_tail:
+        move.w  PDX_VOICE_CURRENT(a2),PDX_VOICE_NEXT(a2)
+        move.l  d6,PDX_VOICE_SCALED_NEXT(a2)
+        clr.b   PDX_VOICE_NEXT_VALID(a2)
+pdx_mix_block_single_cached_next:
+        dbra    d4,pdx_mix_block_single_cached_frame
+        move.w  d2,PDX_VOICE_PHASE(a2)
+        rts
+
+pdx_mix_block_single_frame:
+        move.l  d6,d0
+        cmpi.l  #32767,d0
+        ble     pdx_mix_block_single_clamp_low
+        move.l  #32767,d0
+pdx_mix_block_single_clamp_low:
+        cmpi.l  #-32768,d0
+        bge     pdx_mix_block_single_sample_ready
+        move.l  #-32768,d0
+pdx_mix_block_single_sample_ready:
+        move.l  d0,(a3)+
+        add.w   d3,d2
+        cmpi.w  #PDX_RESAMPLE_DENOMINATOR,d2
+        bcs     pdx_mix_block_single_frame_next
+        subi.w  #PDX_RESAMPLE_DENOMINATOR,d2
+        move.w  d2,PDX_VOICE_PHASE(a2)
+        bsr     pdx_mix_advance_source
+        tst.l   d1
+        beq     pdx_mix_block_single_end_voice
+        move.l  PDX_VOICE_SCALED_CURRENT(a2),d6
+        moveq   #0,d2
+        move.w  PDX_VOICE_PHASE(a2),d2
+pdx_mix_block_single_frame_next:
+        dbra    d4,pdx_mix_block_single_frame
+        move.w  d2,PDX_VOICE_PHASE(a2)
+        rts
+
+pdx_mix_block_single_end_voice:
+        clr.b   PDX_VOICE_ACTIVE(a2)
+        clr.b   PDX_VOICE_NEXT_VALID(a2)
+        clr.w   PDX_VOICE_CURRENT(a2)
+        clr.w   PDX_VOICE_NEXT(a2)
+        clr.l   PDX_VOICE_SCALED_CURRENT(a2)
+        clr.l   PDX_VOICE_SCALED_NEXT(a2)
+        clr.l   PDX_VOICE_CACHE_PTR(a2)
+        clr.l   PDX_VOICE_CACHE_LEFT(a2)
+        ; The terminating source point was already emitted. D4 still denotes
+        ; the DBRA count before that frame, so one predecrement converts it to
+        ; the exact number of silent tail slots.
+        subq.w  #1,d4
+        bmi     pdx_mix_block_single_done
+        moveq   #0,d0
+pdx_mix_block_single_silence:
+        move.l  d0,(a3)+
+        dbra    d4,pdx_mix_block_single_silence
+pdx_mix_block_single_done:
         rts
 
 pdx_mix_block_render:
@@ -746,9 +858,7 @@ pdx_mix_block_voice:
         move.l  PDX_VOICE_SCALED_CURRENT(a2),d6
 
 pdx_mix_block_frame:
-        move.l  (a1),d0
-        add.l   d6,d0
-        move.l  d0,(a1)+
+        add.l   d6,(a1)+
         add.w   d3,d2
         cmpi.w  #PDX_RESAMPLE_DENOMINATOR,d2
         bcs     pdx_mix_block_frame_next
@@ -822,11 +932,14 @@ pdx_mix_rescale_voice:
 pdx_mix_scale_sample:
         moveq   #0,d1
         move.b  PDX_VOICE_VOLUME(a2),d1
+        cmpi.w  #8,d1                  ; PCM8 unity needs no multiply at all
+        beq     pdx_mix_scale_done
         add.w   d1,d1
         lea     pdx_volume_q12(pc),a0
         muls.w  (a0,d1.w),d0
         asr.l   #8,d0
         asr.l   #4,d0
+pdx_mix_scale_done:
         rts
 
 ; Advance to the prefetched source point after the exact rate accumulator

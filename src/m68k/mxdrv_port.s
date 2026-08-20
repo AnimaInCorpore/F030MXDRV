@@ -56,47 +56,74 @@ mxdrv_write_ym2151:
         ; write to the same latch with its final value while retaining the
         ; first-occurrence order (voice parameters therefore remain ahead of
         ; key-on). Register $08 key edges and $14 timer-control edges are never
-        ; collapsed; $19 keeps AMD and PM-depth selectors distinct.
-        tst.w   d3
-        beq     mxdrv_write_ym2151_batch_append
+        ; collapsed; $19 keeps AMD and PM-depth selectors distinct. A batch
+        ; generation plus one byte per register maps a latch directly to its
+        ; first slot. Dense voice loads used to rescan the growing batch for
+        ; every parameter, making this foreground preparation quadratic just
+        ; when the audio pipeline had the least headroom.
         move.l  d0,d4
-        andi.l  #$0000ff00,d4
-        cmpi.w  #$0800,d4
-        beq     mxdrv_write_ym2151_batch_append
-        cmpi.w  #$1400,d4
-        beq     mxdrv_write_ym2151_batch_append
-        move.l  #$0000ff00,d5
-        cmpi.w  #$1900,d4
-        bne     mxdrv_write_ym2151_batch_key_ready
-        move.l  #$0000ff80,d5
-        move.l  d0,d4
-        and.l   d5,d4
-mxdrv_write_ym2151_batch_key_ready:
-        lea     mxdrv_ym_batch_words,a0
-        move.w  d3,d6
-        subq.w  #1,d6
-mxdrv_write_ym2151_batch_search:
-        move.l  (a0),d3
-        and.l   d5,d3
-        cmp.l   d4,d3
-        beq     mxdrv_write_ym2151_batch_replace
-        addq.l  #4,a0
-        dbra    d6,mxdrv_write_ym2151_batch_search
+        lsr.l   #8,d4
+        andi.w  #$00ff,d4              ; register number
+        cmpi.w  #$08,d4
+        beq     mxdrv_write_ym2151_batch_append_edge
+        cmpi.w  #$14,d4
+        beq     mxdrv_write_ym2151_batch_append_edge
+        cmpi.w  #$19,d4
+        bne     mxdrv_write_ym2151_batch_lookup
+        btst    #7,d0                  ; PM depth has its own internal $1a bank
+        bne     mxdrv_write_ym2151_batch_lookup_pm
 
+mxdrv_write_ym2151_batch_lookup:
+        move.w  d4,d6
+        lsl.w   #2,d6
+        lea     mxdrv_ym_batch_generation_by_reg,a0
+        move.l  mxdrv_ym_batch_generation,d5
+        cmp.l   (a0,d6.w),d5
+        bne     mxdrv_write_ym2151_batch_append_register
+        lea     mxdrv_ym_batch_slot_by_reg,a0
         moveq   #0,d3
-        move.w  mxdrv_ym_batch_count,d3
-mxdrv_write_ym2151_batch_append:
+        move.b  (a0,d4.w),d3
+        bra     mxdrv_write_ym2151_batch_replace_slot
+
+mxdrv_write_ym2151_batch_lookup_pm:
+        move.l  mxdrv_ym_batch_generation,d5
+        cmp.l   mxdrv_ym_batch_pm_generation,d5
+        bne     mxdrv_write_ym2151_batch_append_pm
+        moveq   #0,d3
+        move.b  mxdrv_ym_batch_pm_slot,d3
+        bra     mxdrv_write_ym2151_batch_replace_slot
+
+mxdrv_write_ym2151_batch_append_register:
         cmpi.w  #DSP_RT_BATCH_MAX,d3
         bcc     mxdrv_write_ym2151_batch_full
-        lsl.l   #2,d3
+        move.l  d5,(a0,d6.w)
+        lea     mxdrv_ym_batch_slot_by_reg,a0
+        move.b  d3,(a0,d4.w)
+        bra     mxdrv_write_ym2151_batch_append_slot
+
+mxdrv_write_ym2151_batch_append_pm:
+        cmpi.w  #DSP_RT_BATCH_MAX,d3
+        bcc     mxdrv_write_ym2151_batch_full
+        move.l  d5,mxdrv_ym_batch_pm_generation
+        move.b  d3,mxdrv_ym_batch_pm_slot
+        bra     mxdrv_write_ym2151_batch_append_slot
+
+mxdrv_write_ym2151_batch_append_edge:
+        cmpi.w  #DSP_RT_BATCH_MAX,d3
+        bcc     mxdrv_write_ym2151_batch_full
+mxdrv_write_ym2151_batch_append_slot:
+        move.w  d3,d6
+        lsl.w   #2,d6
         lea     mxdrv_ym_batch_words,a0
-        move.l  d0,(a0,d3.l)
+        move.l  d0,(a0,d6.w)
         addq.w  #1,mxdrv_ym_batch_count
         movem.l (sp)+,d3-d6
         moveq   #DSP_REPLY_OK,d0
         rts
-mxdrv_write_ym2151_batch_replace:
-        move.l  d0,(a0)
+mxdrv_write_ym2151_batch_replace_slot:
+        lsl.w   #2,d3
+        lea     mxdrv_ym_batch_words,a0
+        move.l  d0,(a0,d3.w)
         movem.l (sp)+,d3-d6
         moveq   #DSP_REPLY_OK,d0
         rts
@@ -117,6 +144,7 @@ mxdrv_write_ym2151_flush:
         bsr     dsp_exchange
         dbra    d3,mxdrv_write_ym2151_flush
         clr.w   mxdrv_ym_batch_count
+        addq.l  #1,mxdrv_ym_batch_generation
         move.l  (sp)+,d0
         bsr     dsp_exchange
         movem.l (sp)+,d3-d6
@@ -128,6 +156,7 @@ mxdrv_write_ym2151_direct:
 ; calls retain their synchronous command-02 behavior unless the player opts in.
 mxdrv_ym_batch_enable:
         clr.w   mxdrv_ym_batch_count
+        addq.l  #1,mxdrv_ym_batch_generation
         clr.b   mxdrv_ym_batch_overflow
         move.b  #1,mxdrv_ym_batch_active
         rts
@@ -136,6 +165,7 @@ mxdrv_ym_batch_disable:
         clr.b   mxdrv_ym_batch_active
         clr.b   mxdrv_ym_batch_overflow
         clr.w   mxdrv_ym_batch_count
+        addq.l  #1,mxdrv_ym_batch_generation
         rts
 
 ; Append a count header and the pending packed writes to a realtime transfer.
@@ -146,6 +176,7 @@ mxdrv_ym_batch_copy:
         beq     mxdrv_ym_batch_copy_valid
         clr.b   mxdrv_ym_batch_overflow
         clr.w   mxdrv_ym_batch_count
+        addq.l  #1,mxdrv_ym_batch_generation
         moveq   #-1,d0
         rts
 mxdrv_ym_batch_copy_valid:
@@ -163,6 +194,7 @@ mxdrv_ym_batch_copy_loop:
         dbra    d4,mxdrv_ym_batch_copy_loop
 mxdrv_ym_batch_copy_done:
         clr.w   mxdrv_ym_batch_count
+        addq.l  #1,mxdrv_ym_batch_generation
         addq.l  #1,d5
         moveq   #0,d0
         rts
@@ -220,5 +252,15 @@ mxdrv_ym_batch_count:
         ds.w    1
 mxdrv_ym_batch_words:
         ds.l    DSP_RT_BATCH_MAX
+mxdrv_ym_batch_generation:
+        ds.l    1
+mxdrv_ym_batch_generation_by_reg:
+        ds.l    256
+mxdrv_ym_batch_slot_by_reg:
+        ds.b    256
+mxdrv_ym_batch_pm_generation:
+        ds.l    1
+mxdrv_ym_batch_pm_slot:
+        ds.b    1
 
         end
