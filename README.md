@@ -11,19 +11,23 @@ ymfm implementation.
 
 ## Project status
 
-The playback path is feature-complete and passes every Hatari gate except
-`stock-audio`. It supports bounded 9- and 16-track MDX execution, automatic PDX
-lookup, eight PCM voices, realtime FM/PDX mixing, interrupt-fed double
-buffering, two-loop playback, and fadeout.
+The playback path is feature-complete and passes every Hatari gate, including
+the calibrated stock-clock `stock-audio` cadence gate: every steady production
+buffer handoff lands exactly 1024 SSI words after the previous one. It
+supports bounded 9- and 16-track MDX execution, automatic PDX lookup, eight
+PCM voices, realtime FM/PDX mixing, interrupt-fed double buffering, two-loop
+playback, and fadeout.
+
+Realtime playback holds its deadlines through a producer/consumer pipeline on
+both processors: the 68030 keeps one completed refill payload announced to
+the DSP and one queued behind it while it prepares a third, delivering the
+announced block from its sequencer seams and its Timer-A interrupt; the DSP,
+in turn, receives the next parked payload during the previous period's
+boundary wait through a boundary-aware transfer that can straddle the wrap.
+See [`docs/hatari-timing.md`](docs/hatari-timing.md).
 
 This is still a pre-release project:
 
-- the transport is close to, but does not yet hold, every deadline at the
-  Falcon's actual clock. DSP and host-path optimizations reduced the calibrated
-  Xevious gate from 351 late periods (46.25%) to 3 (0.27%); those three are
-  repeatable single-buffer pipeline misses while the 68030 prepares a dense
-  PDX/YM period, so `make stock-audio` still correctly reports a failure. See
-  [`docs/hatari-timing.md`](docs/hatari-timing.md);
 - production playback has not completed a physical-Falcon validation and
   long-duration soak;
 - the resident-independent dispatcher preserves the original 32-entry MXDRV

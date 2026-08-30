@@ -3,9 +3,10 @@
 Every emulator gate in this repository now runs the DSP-calibrated Hatari built
 in the F030Arcade tree, not the Homebrew release. The two builds agree
 instruction for instruction; they disagree about how much time the Falcon's
-DSP56001 has. That disagreement originally hid 351 late periods. After the
-optimizations recorded below, the calibrated emulator still matters: it is the
-only build that exposes the three remaining host-pipeline misses.
+DSP56001 has. That disagreement originally hid 351 late periods, then three
+host-pipeline misses; the producer/consumer pipeline recorded below cleared
+the last of them, and the calibrated emulator remains the only build whose
+pass actually describes the Falcon's clock.
 
 ## Selecting the binary
 
@@ -79,12 +80,13 @@ the same 1500-frame calibrated run is down to three:
 | before optimization / Homebrew 2.6.1 | 1113 | 1111 × 1024 | 0 (0.00%) |
 | before optimization / calibrated | 761 | 408 × 1024, 351 × 2048 | 351 (46.25%) |
 | optimized / calibrated | 1105 | 1100 × 1024, 3 × 2048 | 3 (0.27%) |
+| pipelined / calibrated | 1111 | 1109 × 1024 | 0 (0.00%) |
 
 An interval of 2048 words is the transmit path repeating the last complete
 period because the next one was not ready — the designed underrun response.
-The optimized run reduces repeated output from 31.6% to about 0.27%. The gate
-still fails intentionally: a release claim requires zero repeated periods, not
-a low average.
+The producer/consumer pipeline described below eliminated the last three
+repeats: every steady handoff in the calibrated run lands exactly 1024 SSI
+words after the previous one, and `make stock-audio` passes.
 
 Every other gate still passes, because none of them asserts period-boundary
 punctuality and the capture path is blocking rather than real-time paced:
@@ -96,7 +98,7 @@ punctuality and the capture path is blocking rather than real-time paced:
 | `capture-realtime` | pass | pass, 19/19 scenarios |
 | `endurance` | pass | pass |
 | `endurance-batch` | pass | pass, 19/19 corpus songs |
-| `stock-audio` | pass | **fail** — 3 missed boundaries after optimization |
+| `stock-audio` | pass | pass — 0 missed boundaries with the pipeline |
 
 `endurance` and `endurance-batch` score refill volume and a clean `Dsp_Unlock`,
 not punctuality, so a run in which a third of the periods are repeats still
@@ -113,21 +115,21 @@ bracketed `profile-dsp-rt*` windows exclude. Xevious, 16 MHz 68030:
 
 ```
   instruction cycles per codec frame (budget 489.40):
-    synthesis and transport:    407.59     83.3% of budget
-    stalled on the host port:     5.58      1.1% of budget
-    idle at the SSI boundary:    76.21     15.6% of budget
+    synthesis and transport:    426.76     87.2% of budget
+    stalled on the host port:     0.45      0.1% of budget
+    idle at the SSI boundary:    66.00     13.5% of budget
 
-  DSP occupancy:              84.4% of real time
-  margin:                     76.22 cycles per frame
+  DSP occupancy:              87.3% of real time
+  margin:                     62.18 cycles per frame
 ```
 
-The real measured margin is now **15.6%**, up from 4.3%. The bracketed rt5
-fixture fell from 364.28 to 346.21 cycles per frame, while whole production
-periods fell from 427.46 work + 40.74 host-wait cycles to 407.59 + 5.58. The
-remaining three misses are no longer an average DSP-capacity failure: the
-timing trace records their refill commands arriving 324-334 SSI words after
-the preceding handoff, too late for a full 512-frame render in the remainder
-of a double-buffered period.
+With the early-accept pipeline the host-port stall is nearly gone: the
+payload transfer happens inside the previous period's boundary wait, so its
+DSP-side word handling is counted as work (the rise from 407.59 to 426.76
+cycles per frame is that reclassified receive, not new synthesis cost) and
+the handoff pays only the event commit and the render. The probe arms at the
+boundary catch that every switch passes once, because early-accepted refills
+bypass the stream-loop receive it previously counted.
 
 The reduction combines several independent changes:
 
@@ -142,11 +144,41 @@ The reduction combines several independent changes:
 - silent, single-voice, precached-unity, and overlapping PDX blocks have
   progressively cheaper host mixer paths.
 
-All checksum and perceptual gates remain unchanged. Clearing the final three
-misses needs another period of producer lookahead (a queued/triple-buffered
-input path) or a comparable reduction in the recurring dense host period; more
-steady-state DSP loop shaving alone cannot compensate for a payload that has
-not arrived.
+All checksum and perceptual gates remain unchanged. The final three misses
+were cleared by exactly the producer lookahead this document called for, built
+on both sides of the host port:
+
+- **68030 producer queue.** The player rotates three staging buffers: one
+  payload is ANNOUNCED to the DSP (its `19` command word parked in the host
+  receive register), one complete payload is QUEUED behind it, and one is
+  being prepared. Delivery is decoupled from the loop: `dsp_rt_submit_poll`
+  releases the announced block from seams inside the sequencer drain and the
+  PDX mixer, and the 1,024 Hz Timer-A handler runs the same delivery poll
+  directly, bounding the response to READY to about one tick even while the
+  foreground is deep inside a dense preparation. A payload whose preparation
+  overruns its period therefore borrows idle time from its neighbours instead
+  of pushing an already-finished payload past the DSP's render deadline.
+- **DSP early accept (command `1a`).** Opted into once per session by the
+  player, the DSP's post-render boundary wait doubles as a host service loop:
+  the parked refill is received during the PREVIOUS period's tail, so the
+  handoff pays only the event commit and the render. The receive and its
+  acknowledgement wait are boundary-aware — every host-word wait also watches
+  for the r6 wrap and performs the stereo-safe handoff in place — so a
+  transfer may arrive at any phase and freely straddle the boundary. The
+  wrap test runs before the data test on every word, because a paced blast
+  that runs ahead of the receive would otherwise cross the wrap without a
+  single look at r6.
+- **One payload per coalesced burst.** `DSP_RT_BATCH_MAX` grew from 64 to
+  224 and the burst stages in dedicated external X memory, so even a full
+  eight-channel voice load rides a single refill payload. The former
+  batch-overflow flush — synchronous command-`02` writes that serialized
+  against a busy DSP for whole periods at song start and at dense phrases —
+  no longer occurs in any corpus song.
+
+Conformance and capture flows never send command `1a`, so their command
+timing against the stream loop is unchanged; a mid-wait stop still completes
+the running period's handoff first, keeping the frame count a post-handoff
+stop would have produced.
 
 Before these optimizations, two controls separated the original two errors:
 
@@ -169,5 +201,6 @@ substitution, invented DAC starvation, and unmodelled video-shifter bus
 contention listed under [What the emulator cannot
 decide](architecture.md#what-the-emulator-cannot-decide) are all still in force,
 and the 68030 side still loses no bus cycles to the shifter. A real Falcon has
-*less* host bandwidth than this build models, not more, so 84.4% occupancy and
-the remaining producer-timing result are optimistic rather than conservative.
+*less* host bandwidth than this build models, not more, so 87.3% occupancy and
+the zero-repeat cadence result are optimistic rather than conservative: the
+physical-Falcon validation still has to confirm them.

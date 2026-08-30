@@ -135,6 +135,10 @@ mxdrv_write_ym2151_batch_full:
         ; preserved; only this unusually dense tick pays the old per-write cost.
         ; dsp_exchange saves d1-d7/a0-a6, so the loop pointer and counter survive.
         move.l  d0,-(sp)                ; current packed write
+        ; With a realtime payload posted, these synchronous command words
+        ; would slot into the middle of that payload's block transfer at the
+        ; next handoff. Deliver the announced block before using the port.
+        bsr     dsp_rt_submit_wait
         moveq   #0,d3
         move.w  mxdrv_ym_batch_count,d3
         lea     mxdrv_ym_batch_words,a0

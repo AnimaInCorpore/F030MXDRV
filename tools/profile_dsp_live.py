@@ -57,15 +57,11 @@ def collect_spins(listing: Path, symbols: dict) -> tuple[set[int], set[int]]:
     text = listing.read_text(errors="replace")
     self_loops = {int(m.group(1), 16) for m in SELF_LOOP_RE.finditer(text)}
 
-    # The boundary block runs from the wait label to the next label; its own
-    # `jclr #m_tde,x:m_sr,*` is part of the same idle, not a host wait.
-    start = require_symbol(symbols, "P", "command_rt_refill_wait_boundary")
-    following = sorted(
-        address
-        for (space, _name), address in symbols.items()
-        if space == "P" and address > start
-    )
-    stop = following[0] if following else start + 1
+    # The boundary wait doubles as the host-service loop in the $2b20 island;
+    # its spin runs from the service label to the first dispatch handler. The
+    # handoff's own `jclr #m_tde,x:m_sr,*` remains part of the same idle.
+    start = require_symbol(symbols, "P", "command_rt_refill_wait_service")
+    stop = require_symbol(symbols, "P", "command_rt_refill_wait_write")
     boundary = set(range(start, stop))
     return self_loops - boundary, boundary
 
@@ -100,7 +96,9 @@ def main() -> int:
             sys.exit(f"error: missing required file: {path}")
 
     symbols = parse_listing(args.listing)
-    entry = require_symbol(symbols, "P", "command_rt_refill_receive")
+    # Early-accepted refills bypass command_rt_refill_receive, so count
+    # periods at the boundary catch that every switch passes exactly once.
+    entry = require_symbol(symbols, "P", "command_rt_refill_at_boundary")
     host_pcs, boundary_pcs = collect_spins(args.listing, symbols)
 
     (REPO / "build").mkdir(exist_ok=True)

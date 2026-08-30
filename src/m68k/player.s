@@ -32,6 +32,7 @@ PLAYER_SNDSTAT_CLIPL   equ     4
 PLAYER_SNDSTAT_CLIPR   equ     5
 PLAYER_LOOP_BUDGET     equ     2
 PLAYER_FADE_SPEED      equ     8
+PLAYER_STAGE_LONGS     equ     2+DSP_RT_BATCH_MAX+DSP_RT_PCM_WORD_COUNT
 
         text
 
@@ -582,20 +583,33 @@ player_start_audio:
         VBH
         cmp.l   #DSP_REPLY_OK,d0
         bne     player_dsp_error
+        ; Opt into the DSP's boundary-wait host service: production refills
+        ; become resident before the handoff that frees their target buffer.
+        ; Conformance and capture flows never enable it, so their command
+        ; timing stays exactly as scored.
+        move.l  #DSP_CMD_EARLY_ACCEPT,d0
+        bsr     dsp_exchange
+        cmp.l   #DSP_REPLY_OK,d0
+        bne     player_dsp_error
         bsr     mxdrv_mdx_clock_resync
         move.b  #1,player_audio_started
         VB      vb_txt_looping
         ; Once SSI is live, ordered pump writes ride with the PCM refill that
         ; consumes them, avoiding dozens of per-write XBIOS handshakes.
         bsr     mxdrv_ym_batch_enable
+        clr.w   player_stage_next
 
 player_loop:
-        ; The blocking realtime refill is the playback cadence. At 32.780 kHz,
-        ; 512 frames form a 15.62 ms period; a VBL wait here would still miss
-        ; the following buffer boundary.
+        ; The delivery wait below is the playback cadence: one announced
+        ; payload is consumed per SSI buffer handoff. Each iteration first
+        ; PREPARES the following period, so a dense drain or mix borrows the
+        ; idle time this loop previously spent parked inside the blocking
+        ; refill exchange; the already-finished payload still leaves through
+        ; the producer seams (dsp_rt_submit_poll) the moment the DSP frees a
+        ; buffer. See docs/hatari-timing.md.
         bsr     mxdrv_mdx_clock_pump
         tst.w   d0
-        beq     player_finished
+        beq     player_finish_drain
         ; After the loop budget the song eases out instead of repeating
         ; forever; the fade retires playback and the pump returns zero.
         tst.b   player_fading
@@ -612,15 +626,74 @@ player_check_key:
         beq     player_refill
         Cconin
         tst.b   player_fading
-        bne     player_stopped         ; a second key stops immediately
+        bne     player_stop_drain      ; a second key stops immediately
         bsr     player_arm_fade
         bra     player_refill
 
 player_refill:
-        bsr     dsp_refill_realtime_audio
+        bsr     player_stage_payload
+        tst.l   d0
+        bne     player_error_drain
+        bsr     player_post_staged     ; blocks only while the pipeline is full
+        ; Deliveries complete asynchronously at the producer seams, so a
+        ; protocol failure surfaces on the following iteration's check.
         cmp.l   #DSP_REPLY_OK,d0
         bne     player_dsp_error
         bra     player_loop
+
+; Assemble the next realtime refill payload in the idle staging buffer: the
+; command word, the coalesced YM burst, then the mixed PCM period. The PDX
+; mix polls the pending delivery at its internal seams.
+; out: d0.l = 0, or -1 after a batch overflow report
+player_stage_payload:
+        moveq   #0,d0
+        move.w  player_stage_next,d0
+        mulu.w  #PLAYER_STAGE_LONGS*4,d0
+        lea     player_stages,a3
+        adda.l  d0,a3
+        move.l  a3,player_stage_base
+        move.l  #DSP_CMD_REFILL_RT_MIXED,(a3)+
+        bsr     mxdrv_ym_batch_copy
+        tst.l   d0
+        bne     player_stage_return
+        move.l  d5,-(sp)
+        bsr     mxdrv_pdx_mix_block
+        move.l  (sp)+,d5
+        addi.l  #DSP_RT_PCM_WORD_COUNT,d5
+        move.l  d5,player_stage_count
+        moveq   #0,d0
+player_stage_return:
+        rts
+
+; Hand the staged payload to the submission pipeline and rotate to the next
+; of the three staging buffers: one announced, one queued, one being built.
+; out: d0.l = most recent delivery reply
+player_post_staged:
+        movem.l d3/a3,-(sp)
+        movea.l player_stage_base,a3
+        move.l  player_stage_count,d3
+        bsr     dsp_rt_submit
+        movem.l (sp)+,d3/a3
+        addq.w  #1,player_stage_next
+        cmpi.w  #3,player_stage_next
+        bne     player_post_rotated
+        clr.w   player_stage_next
+player_post_rotated:
+        move.l  dsp_stage_reply,d0
+        rts
+
+; Every exit owes the DSP the payload that is still announced: it will be
+; consumed at the next handoff regardless, and the stop/cleanup exchanges
+; below must not interleave their command words into its block transfer.
+player_finish_drain:
+        bsr     dsp_rt_submit_wait
+        bra     player_finished
+player_stop_drain:
+        bsr     dsp_rt_submit_wait
+        bra     player_stopped
+player_error_drain:
+        bsr     dsp_rt_submit_wait
+        bra     player_dsp_error
 
 player_arm_fade:
         move.b  #1,player_fading
@@ -815,6 +888,19 @@ player_old_left_atten:
 player_old_right_atten:
         ds.w    1
         even
+
+; Triple-staged realtime payloads: command word, event count, up to
+; DSP_RT_BATCH_MAX packed writes, pan word, and one 512-sample PCM period
+; each. At any moment one buffer is announced to the DSP, one may be queued
+; behind it, and one is being prepared.
+player_stages:
+        ds.l    3*PLAYER_STAGE_LONGS
+player_stage_base:
+        ds.l    1
+player_stage_count:
+        ds.l    1
+player_stage_next:
+        ds.w    1
 
 ; Silent DMA playback region. Nothing is connected to the DMA source, so this
 ; is never heard; it exists only so the sound engine that supplies the SSI
