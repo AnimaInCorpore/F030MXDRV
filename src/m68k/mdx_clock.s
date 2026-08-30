@@ -69,6 +69,10 @@ mdx_clock_pump_loop:
         beq     mdx_clock_pump_done
         subq.w  #1,mdx_clock_pending_ticks
         bsr     mxdrv_mdx_timer_service
+        ; A posted realtime payload must leave the moment the DSP frees a
+        ; buffer; one sequencer tick bounds how long a dense drain can sit on
+        ; it. Falls straight through whenever nothing is posted.
+        bsr     dsp_rt_submit_poll
         addq.l  #1,d6
         tst.b   mxdrv_playing
         bne     mdx_clock_pump_loop
@@ -166,9 +170,12 @@ mdx_clock_remove_super:
         rts
 
 ; Level-6 MFP interrupt: accumulate elapsed 62.5 kHz samples in 16.16 and
-; enqueue every crossed Timer-B boundary. No OS or DSP service is called here.
+; enqueue every crossed Timer-B boundary. The only DSP access is the direct
+; hardware delivery poll, which bounds how long an announced realtime payload
+; can wait behind foreground work to about one tick; no OS service is called.
 mdx_clock_timer_a_irq:
-        movem.l d0-d2,-(sp)
+        movem.l d0-d2/a0,-(sp)
+        bsr     dsp_rt_submit_poll_irq
         tst.b   mxdrv_playing
         beq     mdx_clock_irq_ack
         tst.b   mxdrv_paused
@@ -195,7 +202,7 @@ mdx_clock_irq_store:
 
 mdx_clock_irq_ack:
         move.b  #MFP_TIMER_A_CLEAR,MFP_ISRA
-        movem.l (sp)+,d0-d2
+        movem.l (sp)+,d0-d2/a0
         rte
 
         bss

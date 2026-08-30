@@ -610,6 +610,26 @@ rt5_runtime_mode:
         ds      1
 rt5_runtime_output:
         ds      1
+; Early-accepted refill: the boundary wait services the host port, so the
+; next period's payload is resident before the handoff that frees its target
+; buffer. ssi_refill_buffer still names the rendered block until the switch,
+; so the early target parks here and is published only afterwards.
+rt5_pending_refill:
+        ds      1
+rt5_pending_output:
+        ds      1
+rt5_pending_switched:
+        ds      1
+rt5_early_enable:
+        ds      1
+
+; Production event staging. One full coalesced host batch - up to a complete
+; eight-channel voice load - rides a single refill payload, so the former
+; batch-overflow flush of synchronous command-02 writes never has to
+; serialize against a busy DSP mid-song. Uninitialized external X.
+        org     x:$2600
+rt5_burst_events:
+        ds      DSP_RT_BATCH_MAX
 
 
 ; Raised above the enlarged code island; only block-boundary code touches it.
@@ -3600,7 +3620,23 @@ ssi_stream_loop:
         move    #>DSP_CMD_QUERY_TIME,x0
         cmp     x0,a
         jeq     ssi_stream_query_time
+
+        move    #>DSP_CMD_EARLY_ACCEPT,x0
+        cmp     x0,a
+        jeq     ssi_stream_early_accept
         jmp     ssi_stream_command_error
+
+; Opt into the boundary-wait host service. The production player enables it
+; once per session so its parked refills become resident before the handoff
+; that frees their target; the conformance and capture flows never send it
+; and keep the exact stream-loop-only command timing they were scored
+; against. Reset, stop, and a fresh realtime start all clear it.
+ssi_stream_early_accept:
+        move    #>1,a
+        move    a1,x:rt5_early_enable
+        move    #>DSP_REPLY_OK,a
+        jsr     send_reply
+        jmp     ssi_stream_data
 
 ssi_stream_query_time:
         move    x:ssi_native_sample_count,a
@@ -3739,7 +3775,9 @@ command_rt_refill_receive:
         ; command still blocks naturally until we return to the stream loop.
         move    #>DSP_REPLY_OK,a
         jsr     send_reply
+command_rt_refill_owned:
         jsr     rt5_commit_runtime_events
+command_rt_refill_render:
         move    x:ssi_refill_buffer,a
         move    a1,x:rt5_runtime_output
         do      #DSP_RT_MIX_BLOCK_COUNT,command_rt_refill_render_done
@@ -3752,8 +3790,8 @@ command_rt_refill_render_done:
         ; until r6 wraps to its active buffer base, then perform the existing
         ; stereo-safe handoff. A late renderer naturally waits for the next
         ; boundary and repeats one whole, never torn, period.
-        move    x:ssi_active_buffer,a
 command_rt_refill_buffer_ready:
+        move    x:ssi_active_buffer,a
         tst     a
         jne     command_rt_refill_wait_buffer_b
         move    #ssi_buffer_a,r1
@@ -3761,33 +3799,15 @@ command_rt_refill_buffer_ready:
 command_rt_refill_wait_buffer_b:
         move    #ssi_buffer_b,r1
 command_rt_refill_wait_ready:
+        ; The boundary wait doubles as a host-port service loop so the next
+        ; period's payload becomes resident before the handoff; the loop
+        ; itself lives in the $2b20 code island.
         move    r1,x0
-command_rt_refill_wait_boundary:
-        move    r6,a
-        cmp     x0,a
-        jne     command_rt_refill_wait_boundary
+        jmp     command_rt_refill_wait_service
 
-        movep   #$1a00,x:m_crb
-        jclr    #m_tde,x:m_sr,*
-        move    r6,a
-        jclr    #0,a1,command_rt_refill_boundary
-        movep   x:(r6)+,x:m_tx
-        jclr    #m_tde,x:m_sr,*
-command_rt_refill_boundary:
-        move    x:ssi_refill_buffer,r6
-        move    x:ssi_active_buffer,a
-        move    #>1,x0
-        eor     x0,a
-        move    a1,x:ssi_active_buffer
-        nop
-        move    x:(r6)+,a
-        movep   a1,x:m_tx
-        movep   #$5a00,x:m_crb
-        move    x:ssi_frame_count,a
-        move    #>DSP_RT_MIX_FRAME_COUNT,x0
-        add     x0,a
-        move    a1,x:ssi_frame_count
-        jmp     ssi_stream_loop
+command_rt_refill_at_boundary:
+        jsr     rt5_perform_handoff
+        jmp     command_rt_refill_handoff_tail
 
 command_stop_audio:
         movep   #0,x:m_crb
@@ -3809,6 +3829,9 @@ command_stop_rt_restore_done:
         jsr     ym_expand_tables
         clr     a
         move    a1,x:rt5_runtime_mode
+        move    a1,x:rt5_pending_refill
+        move    a1,x:rt5_pending_switched
+        move    a1,x:rt5_early_enable
         jsr     rt2_restore_common
         jmp     command_stop_reply
 command_stop_exact:
@@ -4003,6 +4026,9 @@ ym_reset:
         clr     a
         move    a1,x:rt5_runtime_mode
         move    a1,x:rt5_runtime_output
+        move    a1,x:rt5_pending_refill
+        move    a1,x:rt5_pending_switched
+        move    a1,x:rt5_early_enable
         move    #ym_regdata,r0
         do      #256,ym_reset_clear
         move    a1,x:(r0)+
@@ -6167,14 +6193,13 @@ rt5_am_d1r_rows:
 ; Commit the host batch only after its complete PCM payload is safely in DSP
 ; memory. TOS bulk output does not pace every word, so decoding or even doing
 ; the rolling-queue bookkeeping between event words can lose the following
-; word when an SSI interrupt lands there. The adjacent profile-only event-time
-; and command arrays provide one 64-word production staging area; r2 survives
-; the queue append fast path.
+; word when an SSI interrupt lands there. rt5_burst_events provides the
+; production staging area; r2 survives the queue append fast path.
 rt5_commit_runtime_events:
         move    x:rt5_event_count,a
         tst     a
         jeq     rt5_commit_runtime_events_done
-        move    #rt5_event_times,r2
+        move    #rt5_burst_events,r2
         do      a1,rt5_commit_runtime_events_done
         move    x:(r2)+,x1
         jsr     ssi_stream_write_realtime
@@ -7771,7 +7796,7 @@ rt5_receive_runtime_pcm_cold:
         move    a1,x:rt5_event_count
         tst     a
         jeq     rt5_receive_runtime_events_done
-        move    #rt5_event_times,r2
+        move    #rt5_burst_events,r2
         do      a1,rt5_receive_runtime_events_done
         jclr    #0,x:m_hsr,*
         movep   x:m_hrx,x1
@@ -7972,5 +7997,256 @@ rt5_rebuild_render_targets_next:
         jlt     rt5_rebuild_render_targets_next
         rts
 
+; Post-render boundary wait, relocated from the main section for P-memory
+; budget. While r6 has not wrapped to the active base held in x0, service the
+; host port: with a queued producer the next period's refill command is
+; already parked, so its whole payload becomes resident BEFORE the handoff
+; that frees its target buffer, and the handoff pays only the event commit
+; and the render. The receive itself is boundary-aware (see
+; rt5_receive_runtime_early), so it may arrive at any phase and freely
+; straddle the wrap; no reserve guard is needed. The other buffered-state
+; commands are handled exactly as in ssi_stream_loop so a blocking caller
+; never deadlocks against the wait.
+command_rt_refill_wait_service:
+        move    r6,a
+        cmp     x0,a
+        jeq     command_rt_refill_at_boundary
+        move    x:rt5_pending_refill,a
+        tst     a
+        jne     command_rt_refill_wait_service
+        move    x:rt5_early_enable,a
+        tst     a
+        jeq     command_rt_refill_wait_service
+        jclr    #0,x:m_hsr,command_rt_refill_wait_service
+        movep   x:m_hrx,x1
+        move    x1,x:last_command
+        move    x1,a
+        move    #>$ff0000,y0
+        and     y0,a1
+        move    #>DSP_CMD_REFILL_RT_MIXED,x0
+        cmp     x0,a
+        jeq     command_rt_refill_early
+        move    #>DSP_CMD_WRITE_REG,x0
+        cmp     x0,a
+        jeq     command_rt_refill_wait_write
+        move    #>DSP_CMD_QUEUE_WRITE,x0
+        cmp     x0,a
+        jeq     command_rt_refill_wait_queue
+        move    #>DSP_CMD_QUERY_TIME,x0
+        cmp     x0,a
+        jeq     command_rt_refill_wait_time
+        move    #>DSP_CMD_STOP_AUDIO,x0
+        cmp     x0,a
+        jeq     command_rt_refill_wait_stop
+        move    #>DSP_REPLY_ERROR,a
+        jsr     send_reply
+        jmp     command_rt_refill_buffer_ready
+        ; Stop keeps its stream-loop semantics: the running period completes
+        ; and hands off first, so the frame count and the last rendered block
+        ; match what a post-handoff stop would have produced. A resident
+        ; pending payload is abandoned; command_stop_audio clears its state.
+command_rt_refill_wait_stop:
+        move    x:ssi_active_buffer,a
+        tst     a
+        jne     command_rt_refill_wait_stop_b
+        move    #ssi_buffer_a,r1
+        jmp     command_rt_refill_wait_stop_spin
+command_rt_refill_wait_stop_b:
+        move    #ssi_buffer_b,r1
+command_rt_refill_wait_stop_spin:
+        move    r1,x0
+command_rt_refill_wait_stop_loop:
+        move    r6,a
+        cmp     x0,a
+        jne     command_rt_refill_wait_stop_loop
+        jsr     rt5_perform_handoff
+        jmp     command_stop_audio
+command_rt_refill_wait_write:
+        jsr     ssi_stream_write_realtime
+        move    #>DSP_REPLY_OK,a
+        jsr     send_reply
+        jmp     command_rt_refill_buffer_ready
+command_rt_refill_wait_queue:
+        jsr     ym_enqueue_write
+        jsr     send_reply
+        jmp     command_rt_refill_buffer_ready
+command_rt_refill_wait_time:
+        move    x:ssi_native_sample_count,a
+        jsr     send_reply
+        jmp     command_rt_refill_buffer_ready
+
+        ; The buffer freed by the upcoming switch is the one playing now, so
+        ; the early path selects target and planar half from the CURRENT
+        ; active buffer - the inverse of the post-switch selection in
+        ; command_refill_realtime_mixed. ssi_refill_buffer still names the
+        ; rendered block the handoff needs; the early target parks in
+        ; rt5_pending_output until the switch publishes it. The pending gate
+        ; above keeps this path pre-switch only: once a payload is resident,
+        ; no further command is consumed until after its handoff.
+command_rt_refill_early:
+        move    x:ssi_active_buffer,a
+        tst     a
+        jne     command_rt_refill_early_b
+        move    #rt5_pan_left_stream,r1
+        move    #rt5_pan_right_stream,r7
+        move    #ssi_buffer_a,r2
+        move    #>ssi_buffer_a,a
+        jmp     command_rt_refill_early_receive
+command_rt_refill_early_b:
+        move    #rt5_pan_left_stream+DSP_RT_MIX_FRAME_COUNT,r1
+        move    #rt5_pan_right_stream+DSP_RT_MIX_FRAME_COUNT,r7
+        move    #ssi_buffer_b,r2
+        move    #>ssi_buffer_b,a
+command_rt_refill_early_receive:
+        move    a1,x:rt5_pending_output
+        move    r1,x:rt5_pan_left_base
+        move    r7,x:rt5_pan_right_base
+        ; y1 carries the base r6 is walking - the buffer being received into
+        ; is also the one playing now - and the boundary-aware receive
+        ; performs the handoff itself if the wrap lands inside the transfer.
+        ; The acknowledgement wait below is boundary-aware for the same
+        ; reason: the host may take up to one MFP tick to collect it, and the
+        ; wrap must not pass unseen inside that park.
+        move    r2,y1
+        clr     a
+        move    a1,x:rt5_pending_switched
+        jsr     rt5_receive_runtime_early
+command_rt_refill_early_ack:
+        move    r6,a
+        cmp     y1,a
+        jne     command_rt_refill_early_ack_data
+        jsr     rt5_perform_handoff
+        move    #>1,a
+        move    a1,x:rt5_pending_switched
+command_rt_refill_early_ack_data:
+        jclr    #1,x:m_hsr,command_rt_refill_early_ack
+        move    #>DSP_REPLY_OK,a
+        movep   a1,x:m_htx
+        move    x:rt5_pending_switched,a
+        tst     a
+        jne     command_rt_refill_early_switched
+        move    #>1,a
+        move    a1,x:rt5_pending_refill
+        jmp     command_rt_refill_buffer_ready
+        ; The boundary landed inside the transfer and the handoff already
+        ; happened: the received payload's own period is running, so publish
+        ; its target, commit the burst, and render immediately.
+command_rt_refill_early_switched:
+        clr     a
+        move    a1,x:rt5_pending_switched
+        move    x:rt5_pending_output,a
+        move    a1,x:ssi_refill_buffer
+        jmp     command_rt_refill_owned
+
+; Handoff epilogue: an early-accepted payload is already resident, so
+; publish its target, commit its staged YM burst, and render immediately,
+; giving the new period its full length minus only decode and synthesis;
+; otherwise return to the stream loop and wait for the next command.
+command_rt_refill_handoff_tail:
+        move    x:rt5_pending_refill,a
+        tst     a
+        jeq     command_rt_refill_stream
+        clr     a
+        move    a1,x:rt5_pending_refill
+        move    x:rt5_pending_output,a
+        move    a1,x:ssi_refill_buffer
+        jmp     command_rt_refill_owned
+command_rt_refill_stream:
+        jmp     ssi_stream_loop
+
+; The stereo-safe handoff, callable both from the boundary catch and from
+; inside a straddling receive. Quiesce transmit interrupts after the current
+; prepared word moves to the shift register, complete an odd (left-sample)
+; position, then move r6 to the freshly rendered block and reenable.
+; Scratches a and x0 only.
+rt5_perform_handoff:
+        movep   #$1a00,x:m_crb
+        jclr    #m_tde,x:m_sr,*
+        move    r6,a
+        jclr    #0,a1,rt5_perform_handoff_even
+        movep   x:(r6)+,x:m_tx
+        jclr    #m_tde,x:m_sr,*
+rt5_perform_handoff_even:
+        move    x:ssi_refill_buffer,r6
+        move    x:ssi_active_buffer,a
+        move    #>1,x0
+        eor     x0,a
+        move    a1,x:ssi_active_buffer
+        nop
+        move    x:(r6)+,a
+        movep   a1,x:m_tx
+        movep   #$5a00,x:m_crb
+        move    x:ssi_frame_count,a
+        move    #>DSP_RT_MIX_FRAME_COUNT,x0
+        add     x0,a
+        move    a1,x:ssi_frame_count
+        rts
+
+; Boundary-aware twin of rt5_receive_runtime_pcm for the early path: every
+; host wait also watches for the r6 wrap against the active base in y1 and
+; performs the handoff the moment it lands, so a payload transfer may freely
+; straddle the period boundary instead of forcing the receive to fit before
+; it. The switch can fire at most once - afterwards r6 walks the other
+; buffer and never equals y1 again - and it reports through
+; rt5_pending_switched so the caller renders immediately instead of waiting
+; for a boundary that has already passed.
+rt5_receive_runtime_early:
+        move    #>DSP_REPLY_BLOCK_READY,a
+        jsr     send_reply
+        jsr     rt5_early_wait_host
+        movep   x:m_hrx,a
+        move    a1,x:rt5_event_count
+        tst     a
+        jeq     rt5_receive_early_events_done
+        move    #rt5_burst_events,r2
+        do      a1,rt5_receive_early_events_done
+        jsr     rt5_early_wait_host
+        movep   x:m_hrx,x1
+        move    x1,x:(r2)+
+rt5_receive_early_events_done:
+        move    x:rt5_pan_left_base,r1
+        move    x:rt5_pan_right_base,r7
+        jsr     rt5_early_wait_host
+        movep   x:m_hrx,x0             ; global PCM8 pan
+        do      #DSP_RT_MIX_FRAME_COUNT,rt5_receive_early_pcm_done
+        jsr     rt5_early_wait_host
+        movep   x:m_hrx,a
+        move    x:rt5_pcm_previous,b
+        move    a1,x:rt5_pcm_previous
+        add     b,a
+        asr     a                      ; 2-tap anti-image FIR at 32.780 kHz
+        rep     #8
+        asl     a
+        clr     b
+        jclr    #0,x0,rt5_receive_early_left_done
+        move    a1,b
+rt5_receive_early_left_done:
+        move    b1,x:(r1)+
+        clr     b
+        jclr    #1,x0,rt5_receive_early_right_done
+        move    a1,b
+rt5_receive_early_right_done:
+        move    b1,y:(r7)+
+rt5_receive_early_pcm_done:
+        rts
+
+; Wait for one host word while watching the boundary. The wrap test runs
+; BEFORE the data test: when the host's paced blast runs ahead of the
+; receive, HRDF is already set on every word and a data-first loop would
+; cross the wrap without ever looking at r6. The handoff scratches a and
+; x0; x0 carries the caller's pan word, so it rides in y0 across the
+; switch. a is dead here - every caller reloads it from the port.
+rt5_early_wait_host:
+        move    r6,a
+        cmp     y1,a
+        jne     rt5_early_wait_data
+        move    x0,y0
+        jsr     rt5_perform_handoff
+        move    y0,x0
+        move    #>1,a
+        move    a1,x:rt5_pending_switched
+rt5_early_wait_data:
+        jclr    #0,x:m_hsr,rt5_early_wait_host
+        rts
 
         end

@@ -714,6 +714,10 @@ pdx_mix_block_silence:
         rts
 
 pdx_mix_block_active:
+        ; Producer seam: splits a dense sequencer drain from the mix passes so
+        ; a posted payload never waits behind both. Register-transparent, and
+        ; a fall-through while nothing is posted (every conformance path).
+        bsr     dsp_rt_submit_poll
         cmpi.w  #1,d5
         bne     pdx_mix_block_render
 
@@ -886,6 +890,9 @@ pdx_mix_block_end_voice:
         clr.l   PDX_VOICE_CACHE_LEFT(a2)
 
 pdx_mix_block_next_voice:
+        ; Producer seam between voice passes: one accumulated voice is the
+        ; longest uninterruptible stretch of the overlap mixer.
+        bsr     dsp_rt_submit_poll
         lea     PDX_VOICE_BYTES(a2),a2
         dbra    d7,pdx_mix_block_voice
 
