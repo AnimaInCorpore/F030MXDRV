@@ -241,4 +241,37 @@ at `start:` restores the modeled cost in full. And the external decode is
 the one the code islands assume, shadows included, which retires the
 aliasing probe from the soak plan. The internal reference also puts this
 machine's DSP clock at 32.0 MHz against the 32,084,988 Hz Hatari models, a
-0.27% difference.
+0.27% difference. That clock figure is only good to one percent, since it
+came from a 100-tick run; separating 32.000 from 32.085 MHz needs a run of
+several thousand ticks.
+
+### The SSI rate test found no clock
+
+The same session ran `release/ratetest.tos`, and it failed outright:
+
+```
+timebase: TOS 200 Hz tick; 10 s window per prescale
+model: rate = 25175000 / 256 / (prescale+1) Hz
+prescale 3: no SSI frames in the window (crossbar clock dead)  FAIL
+prescale 1: no SSI frames in the window (crossbar clock dead)  FAIL
+prescale 2: no SSI frames in the window (crossbar clock dead)  FAIL
+RESULT: FAIL (3 of 3 runs failed)
+```
+
+The DSP booted, answered the ping and every counter read, so the boot path
+and the host port are fine; the transmitter simply never saw a word slot.
+Hatari clocks the same configuration without complaint (`make
+ratetest-hatari` passes), which makes this the second confirmed instance,
+after `PCC`, of [the emulator running a peripheral the hardware leaves
+unconfigured](architecture.md#what-the-emulator-cannot-decide). The
+production player does play through the same route, and it differs from the
+rate test in exactly five steps: `Buffoper(0)`, `Sndstatus(1)`,
+`Soundcmd(ADDERIN, matrix)`, `Setmontracks(0)`, and arming the transmitter
+only after `Devconnect`. The rate test therefore now bisects: it applies
+those steps one at a time, cumulatively, probes each state for one second at
+prescale 3, and prints the DSP's word and frame counters, its SSISR and the
+crossbar registers as TOS left them, before measuring in the first state
+that clocks. Whichever step turns the clock on is a rule Hatari has to
+enforce as well: an emulator that clocks the SSI in a state where the Falcon
+does not is as wrong as one that refuses to. The bus probe above is
+unaffected; it never enables the SSI.
