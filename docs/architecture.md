@@ -76,7 +76,7 @@ at external `X:$1000`, buffer B at `X:$1800`; each uses modulo addressing over
 left/right pair as a conformance probe retained after the stream stops.
 
 Commands `18` and `19` are the production realtime counterparts. Each receives
-a count and up to 64 ordered, coalesced YM writes followed by the common PCM8
+a count and up to 224 ordered, coalesced YM writes followed by the common PCM8
 pan and 512 signed mono PCM frames. The DSP first receives those event words
 into a short-loop staging array, then queues them at the current rolling
 timestamp after the complete blind TOS bulk upload is safe. It expands the
