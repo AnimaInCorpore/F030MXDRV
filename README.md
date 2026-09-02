@@ -206,7 +206,7 @@ The 68030 owns the MXDRV-compatible API, file validation, track state, timing,
 and PDX decoding. The DSP owns YM2151 state, realtime FM synthesis, final PCM
 mixing, saturation, and SSI transport.
 
-Protocol v24 uses 24-bit host words. Production refills batch up to 64
+Protocol v24 uses 24-bit host words. Production refills batch up to 224
 coalesced YM writes and 512 mono PDX frames; the DSP stages those writes into a
 32-entry rolling event FIFO, renders sixteen 32-frame blocks, and switches the
 inactive 1024-word stereo SSI buffer at the next complete boundary. A
