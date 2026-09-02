@@ -46,7 +46,7 @@ Every transport unit is one DSP/host 24-bit word. The upper byte is an opcode.
 | `14 00 00` | run the 2048-frame block-oriented algorithm-0 channel spike | deterministic checksum `0f 26 66` |
 | `15 00 00` | run the 2048-frame block-oriented algorithm-7 carrier spike | deterministic checksum `89 eb 00` |
 | `16 00 aa` | run the 2048-frame mixed-topology spike for algorithm `aa = 1..6` | per-algorithm deterministic checksum |
-| `17 00 00` | run the 256-block live-SSI decoded-control and envelope engine | deterministic checksum `fe eb ab` |
+| `17 00 00` | run the 256-block live-SSI decoded-control and envelope engine | deterministic checksum `fe eb ad` |
 | `18 00 00`, then an event count, 0–224 packed writes, PCM8 pan, and 512 mono PCM words after `52 44 59` | accept the first production period, render the realtime FM buffer, and start interrupt-fed SSI | ready token, then `00 00 00` when the upload is owned |
 | `19 00 00`, with the same variable payload | accept the next production period, render 16 32-frame FM blocks, and switch at the following whole-buffer boundary | ready token, then `00 00 00` when the upload is owned |
 | `1a 00 00` | opt into the boundary-wait host service: a parked `19` refill is received during the previous period's boundary wait, so its whole payload is resident before the handoff that frees its target buffer; the receive itself is boundary-aware and may straddle the wrap, performing the stereo-safe handoff in place. Cleared by reset, stop, and a new realtime start. The production player enables it once per session; conformance and capture flows never do, keeping their scored stream-loop command timing | `00 00 00` |
@@ -210,7 +210,7 @@ output — and the command checksum — are bit-identical to the cleared-ring
 ordering. Algorithms 6/7 route their already-summed
 carrier rings through a separate decoded-pan path. The command explicitly
 clears a latched SSI underrun before restoring the external Y map and exact
-phase cache. Its checksum is `fe eb ab`.
+phase cache. Its checksum is `fe eb ad`.
 
 Hatari measures 342.89 cycles per codec frame over the 8,192-frame,
 256-block profile against the 489.40-cycle budget, leaving 146.51 cycles
@@ -615,10 +615,16 @@ is deliberately narrow:
    Run the steps in this order, so that a failure identifies which
    approximation it came from rather than merely stopping the soak:
 
-   1. **Aliasing probe, before any audio.** Write a pattern through
-      `Y:$2000`, read it back through `P:$2000` and `X:$6000`, and confirm the
-      decode exactly. Everything else assumes the program islands do not
-      overlap live data.
+   1. **Bus probe, before any audio.** Run `release/dspprobe.tos`. It
+      reports the Bus Control Register as the player's own `Dsp_ExecBoot`
+      path leaves it (the DSP56001 resets it to `$FFFF`, fifteen wait states
+      on every external access, and Hatari ignores the register), times a
+      sixteen-word loop fetched from internal P, from external P, and
+      reading external X and Y before and after clearing it, and checks the
+      decode the program islands assume: a word written through `Y:$2000`
+      reads back through `P:$2000`, a word written through `X:$2000` reads
+      back through `P:$6000`, and neither disturbs the other. Everything
+      else assumes both that decode and two-clock external words.
    2. **Boot with the verbose markers.** Confirm progress past `PCC`,
       `Dsptristate` and `Devconnect`, then past the payload-sent and reply
       markers, which separate "stopped consuming mid-block" from "took the

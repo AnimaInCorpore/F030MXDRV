@@ -212,7 +212,9 @@ cycles for each native 62.5 kHz YM sample.
 
 The memory-cost model behind every number in this section is Hatari's, and it
 is deliberately simplified: its DSP core treats Falcon external memory as
-zero wait states and ignores the bus control register, charging instead two
+zero wait states and ignores the bus control register (which the kernel
+therefore clears itself at `start:`, since reset leaves fifteen wait states
+and the `Dsp_ExecBoot` path never passes through the TOS loader), charging instead two
 extra cycles whenever a single instruction reaches more than one external
 space. Instruction fetch counts as a P access, so a hot instruction living in
 one of the `P:$2000` islands pays that penalty as soon as it also touches
@@ -447,7 +449,7 @@ fill — so no noise-table words occupy the bounded P-memory image. Cleanup
 disables SSI, reads SSISR and writes TX to clear a latched underrun,
 restores the external Y map, and rebuilds the exact phase cache, including
 the internal-Y frequency-cache words the decoded multiplier/increment arrays
-overlay. The deterministic reply is `$feebab`.
+overlay. The deterministic reply is `$feebad`.
 
 Decoded envelope curvature runs as a block-boundary pass at `P:$0080` in
 internal P RAM, where instruction fetches avoid the external-memory penalty.

@@ -119,6 +119,7 @@ Use `make help` for the complete target summary. The most useful targets are:
 | `make profile-dsp-rt5` | reproduce the integrated DSP cycle report | Hatari |
 | `make profile-dsp-live` | measure DSP occupancy during real playback | Hatari + Xevious corpus files |
 | `make ratetest-hatari` | gate the physical-Falcon SSI rate test under Hatari | Hatari |
+| `make dspprobe-hatari` | gate the physical-Falcon DSP bus probe under Hatari | Hatari |
 
 The principal outputs are:
 
@@ -127,6 +128,7 @@ release/f030mxdrv.tos  conformance program and GEM launchable player
 release/f030mxdrv.ttp  the same program with a Desktop command-line entry
 release/xevious.tos    dedicated no-argument Xevious player
 release/ratetest.tos   physical-Falcon SSI rate measurement
+release/dspprobe.tos   physical-Falcon DSP bus probe (BCR, wait states, decode)
 release/ym2151.lod     readable DSP assembler artifact
 ```
 
@@ -199,6 +201,15 @@ crossbar clock, a wrong clock source, and every wrong-divider outcome each
 produce a distinct line. `make ratetest-hatari` runs the same binary under
 Hatari and gates its verdict, so a hardware/emulator divergence shows up as
 one differing line between the two reports.
+
+`release/dspprobe.tos` is the companion bus probe. It boots its DSP program
+the way the player does, prints the Bus Control Register that path leaves
+behind, times a sixteen-word loop fetched from internal P, from external P,
+and reading external X and Y data before and after clearing the register,
+checks that `Y:$2000` aliases `P:$2000` and `X:$2000` aliases `P:$6000`
+without either write disturbing the other, and writes `DSPPROBE.TXT`.
+Hatari charges no wait states and ignores the register, so it can only
+prove the program's mechanics; the "before" lines are the hardware answer.
 
 ## Architecture
 
