@@ -892,6 +892,12 @@ start:
         movep   #$1f8,x:m_pcc           ; Port C pins to SSI function; they
                                         ; reset to GPIO, leaving the slave
                                         ; SSI clockless on real hardware
+        movep   #0,x:m_bcr              ; reset leaves fifteen wait states on
+                                        ; every external access, and this
+                                        ; bootstrap path bypasses the TOS
+                                        ; loader that would clear them; the
+                                        ; Falcon SRAM needs none and Hatari
+                                        ; ignores the register entirely
         movep   #$3000,x:m_ipr          ; SSI interrupt priority level 2
         andi    #$fc,mr                 ; reset leaves I1:I0=11 masking IPL 2;
                                         ; the SSI ISR needs the mask lowered
