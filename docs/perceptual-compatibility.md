@@ -169,7 +169,7 @@ is not attenuated to obtain the requested history depth.
 
 This removes the former coupled fold, its per-algorithm bias table, and the
 special level-7 repair class. The integrated worst-case profile measures
-346.21 cycles per quality frame against a 489.40-cycle budget. Sustained FB7
+342.89 cycles per quality frame against a 489.40-cycle budget. Sustained FB7
 remains separately splice-gated because feedback trajectories are sensitive
 to waveform-table quantization even when their depth law is correct — the
 exact-arithmetic implementation model already carries the ROM/block

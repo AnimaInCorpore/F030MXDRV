@@ -59,12 +59,12 @@ All eleven bracketed profile reports are byte-identical between the two builds:
 | `profile-dsp-rt2` | 37.75 per codec frame (301.98 projected) | 326.27 | 0.93x |
 | `profile-dsp-rt3` | 37.70 per codec frame (301.61 projected) | 326.27 | 0.92x |
 | `profile-dsp-rt4-alg1..6` | 35.98-39.05 per codec frame (287.86-312.37 projected) | 326.27 | 0.88-0.96x |
-| `profile-dsp-rt5` | 346.21 per codec frame | 489.40 | 0.71x |
+| `profile-dsp-rt5` | 342.89 per codec frame | 489.40 | 0.71x |
 
 This is the expected result and it is worth stating plainly: the static budget
 analysis in [`dsp56001-notes.md`](dsp56001-notes.md) was never inflated by the
 emulator. `489.40 = 32,084,988 / 2 / 32,779.95` is the hardware's 16 MIPS, so
-the rt5 figure of 346.21 cycles per frame with 29.3% spare is a
+the rt5 figure of 342.89 cycles per frame with 29.9% spare is a
 statement about a real Falcon. Only the *emulated machine* was twice as fast as
 the one those numbers describe.
 
