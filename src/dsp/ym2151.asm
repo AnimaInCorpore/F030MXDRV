@@ -692,20 +692,20 @@ rt5_env_scan_next:
         move    b1,n3
         move    b1,n5
         ; a unity multiplier with a zero addend can never move the level
-        ; again: rebuild the gain once and retire the operator
+        ; again: rebuild the gain once and retire the operator. The three
+        ; pointer loads interleave so each fills the address-pipeline slot
+        ; of the previous one; y:(r3+n3) stays wrap-free under m3=63
+        ; because rt5_env_b is 64-aligned and n3 is at most 31.
         move    #0,r2
-        nop
+        move    #rt5_env_b,r3
         move    y:(r2+n2),x0            ; block multiplier
-        move    #rt5_env_b,r2
-        nop
-        move    y:(r2+n2),a             ; block addend
+        move    #rt5_envelope_level,r1
+        move    y:(r3+n3),a             ; block addend
         tst     a                       ; a zero addend can never move the
         jne     rt5_env_op_moving       ; level: attack addends are a-1 and
         jsr     rt5_env_gain_op         ; zero decay addends pair with unity
         jmp     rt5_env_remove
 rt5_env_op_moving:
-        move    #rt5_envelope_level,r1
-        nop
         move    x:(r1+n1),y0            ; pre-advance level, kept for the
                                         ; gain-rebuild change test below
         mac     x0,y0,a                 ; end-of-block level
@@ -1159,12 +1159,12 @@ rt_profile_clear_fraction:
         move    #>$100000,x0           ; 0.125
         move    x0,x:(r7)+
         move    #rt_envelope_gain,r7
-        move    #>255,m0
+        move    #255,m0
         move    #>255,m1
         move    #>255,m2
         move    #>255,m3
         move    #>3,m4
-        move    #>3,m5
+        move    #3,m5
         move    #>3,m7
         move    #>2,n0                  ; 440 Hz: 2 + $4a74/65536 entries
         move    #>2,n1
@@ -2244,12 +2244,12 @@ rt5_initialize_pdx_right_done:
         ori     #$04,omr
         nop                             ; map the on-chip Y sine ROM
         move    #>$100,r0              ; r0 replaces r6 as the sine base
-        move    #>255,m0
+        move    #255,m0
         move    #>-1,m1
         move    #>-1,m2
-        move    #>63,m3
+        move    #63,m3
         move    #>-1,m4
-        move    #>63,m5
+        move    #63,m5
         move    #>-1,m7
         move    #>$ff,y1
         move    #>rt5_channel_render-@cvs(x,rt5_feedback_0),n4
@@ -2310,8 +2310,7 @@ rt5_channel_block_done:
         move    #rt5_mix_ring,r4
         move    x:rt5_pan_left_base,r1
         move    x:rt5_pan_right_base,r7
-        move    #ssi_buffer_b,r5
-        move    #>-1,m5
+        move    #ssi_buffer_b,r2
         move    y:rt5_mix_written,a
         tst     a
         jne     rt5_emit_ring_ready
@@ -2322,12 +2321,11 @@ rt5_emit_ring_cleared:
         move    #rt5_mix_ring,r4
 rt5_emit_ring_ready:
         do      #DSP_RT5_BLOCK_FRAMES,rt5_emit_stereo_done
-        move    x:(r1)+,x0 y:(r4)+,a
-        move    a,b
-        add     x0,a y:(r7)+,x0
-        move    a,x:(r5)+
-        add     x0,b
-        move    b,x:(r5)+
+        move    x:(r1)+,x0 y:(r4),a
+        add     x0,a y:(r4)+,b
+        move    a,x:(r2)+ y:(r7)+,y0
+        add     y0,b
+        move    b,x:(r2)+
 rt5_emit_stereo_done:
         move    r1,x:rt5_pan_left_base
         move    r7,x:rt5_pan_right_base
@@ -2343,7 +2341,7 @@ rt5_emit_stereo_done:
         move    #>rt5_pan_right_stream,a
         move    a1,x:rt5_pan_right_base
 rt5_pan_streams_ready:
-        move    #>63,m5
+        move    #63,m5
 rt5_profile_blocks_done:
         nop
 rt5_profile_loop_done:
@@ -2441,12 +2439,12 @@ rt5_receive_runtime_pcm:
 rt5_enter_runtime_map:
         ori     #$04,omr
         nop
-        move    #>255,m0
+        move    #255,m0
         move    #>-1,m1
         move    #>-1,m2
-        move    #>63,m3
+        move    #63,m3
         move    #>-1,m4
-        move    #>63,m5
+        move    #63,m5
         move    #>-1,m7
         move    #>rt5_channel_render-@cvs(x,rt5_feedback_0),n4
         rts
@@ -2503,8 +2501,7 @@ rt5_runtime_emit:
         move    #rt5_mix_ring,r4
         move    x:rt5_pan_left_base,r1
         move    x:rt5_pan_right_base,r7
-        move    x:rt5_runtime_output,r5
-        move    #>-1,m5
+        move    x:rt5_runtime_output,r2
         move    y:rt5_mix_written,a
         tst     a
         jne     rt5_runtime_ring_ready
@@ -2514,18 +2511,22 @@ rt5_runtime_emit:
 rt5_runtime_ring_cleared:
         move    #rt5_mix_ring,r4
 rt5_runtime_ring_ready:
+        ; The common ring is internal, so a second read of the same word
+        ; costs nothing: it lands in B beside the left add in place of the
+        ; accumulator copy, and the left store shares an instruction with
+        ; the right fetch (r2 in the X bank, r7 in the Y bank). Output is
+        ; bit-identical; the loop drops from ten cycles per frame to nine.
         do      #DSP_RT5_BLOCK_FRAMES,rt5_runtime_stereo_done
-        move    x:(r1)+,x0 y:(r4)+,a
-        move    a,b
-        add     x0,a y:(r7)+,x0
-        move    a,x:(r5)+
-        add     x0,b
-        move    b,x:(r5)+
+        move    x:(r1)+,x0 y:(r4),a
+        add     x0,a y:(r4)+,b
+        move    a,x:(r2)+ y:(r7)+,y0
+        add     y0,b
+        move    b,x:(r2)+
 rt5_runtime_stereo_done:
         move    r1,x:rt5_pan_left_base
         move    r7,x:rt5_pan_right_base
-        move    r5,x:rt5_runtime_output
-        move    #>63,m5
+        move    r2,x:rt5_runtime_output
+        move    #63,m5
         rts
 
 ; Update one 32-frame quality block of global control state at 32.780 kHz.
@@ -3094,7 +3095,7 @@ rt5_feedback_write_carrier:
         move    a1,y0                   ; first product is feedback history
         move    #>RT5_OUT_GAIN_OFFSET,n7
         move    #rt5_alg7_gain_ring,r5
-        move    #>1,m5
+        move    #1,m5
         move    #rt2_stage_ring,r3
         move    l:(r7),b10
         do      n5,rt5_feedback_write_carrier_done
@@ -3135,7 +3136,7 @@ rt5_feedback_write_x:
         move    a1,y:rt5_alg7_gain_ring+1
         move    a1,y0                   ; first product is feedback history
         move    #rt5_alg7_gain_ring,r5
-        move    #>1,m5
+        move    #1,m5
         move    #rt2_stage_ring,r3
         move    l:(r7),b10
         do      n5,rt5_feedback_write_x_done
@@ -3172,7 +3173,7 @@ rt5_feedback_add_x:
         move    a1,y:rt5_alg7_gain_ring+1
         move    a1,y0
         move    #rt5_alg7_gain_ring,r5
-        move    #>1,m5
+        move    #1,m5
         move    #rt2_stage_ring,r3
         move    l:(r7),b10
         do      n5,rt5_feedback_add_x_done
@@ -3432,8 +3433,8 @@ rt2_clear_state:
         nop                             ; OMR memory-map pipeline delay
         move    #>$100,r6
         move    #ssi_buffer_a,r1
-        move    #>63,m3
-        move    #>63,m5
+        move    #63,m3
+        move    #63,m5
         move    #>255,m6
         move    #>63,m7
         ; MAC fractional products place the integer table step in B1 and the

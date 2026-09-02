@@ -60,7 +60,7 @@ The exact support boundary is documented in
 - Reproducible native-oracle, perceptual, smoke, stock-clock timing, endurance,
   and DSP-cycle gates.
 
-The integrated worst-case DSP profile measures 346.21 instruction cycles per
+The integrated worst-case DSP profile measures 342.89 instruction cycles per
 32.780 kHz frame against a 489.40-cycle budget. The exact scalar renderer costs
 12,271.21 cycles per native 62.5 kHz sample against a 256.68-cycle budget, so it
 is deliberately a test oracle rather than the production renderer.

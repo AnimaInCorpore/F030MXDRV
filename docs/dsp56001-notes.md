@@ -447,7 +447,7 @@ fill — so no noise-table words occupy the bounded P-memory image. Cleanup
 disables SSI, reads SSISR and writes TX to clear a latched underrun,
 restores the external Y map, and rebuilds the exact phase cache, including
 the internal-Y frequency-cache words the decoded multiplier/increment arrays
-overlay. The deterministic reply is `$feebbe`.
+overlay. The deterministic reply is `$feebab`.
 
 Decoded envelope curvature runs as a block-boundary pass at `P:$0080` in
 internal P RAM, where instruction fetches avoid the external-memory penalty.
@@ -471,10 +471,10 @@ live in the external island with the generated tables. The capture harness
 derives mid-block levels analytically from the same defining recurrence, so
 no mid-block state is stored.
 
-Hatari measures 2,836,170 instruction cycles for 8,192 frames over 256
-blocks, or 346.21 cycles per frame against the 489.40-cycle budget, leaving
-143.19 cycles (29.3%). The 176.79 ms modeled span fits its 249.91 ms period.
-Those 143.19 cycles are not all spare capacity. The window is bracketed between
+Hatari measures 2,808,938 instruction cycles for 8,192 frames over 256
+blocks, or 342.89 cycles per frame against the 489.40-cycle budget, leaving
+146.51 cycles (29.9%). The 175.09 ms modeled span fits its 249.91 ms period.
+Those 146.51 cycles are not all spare capacity. The window is bracketed between
 two render markers, so it excludes the SSI transmit interrupt, the host-port
 receive and the refill command; `make profile-dsp-live` measures the same DSP
 across 128 whole production periods of Xevious and finds 426.76 cycles per

@@ -46,7 +46,7 @@ Every transport unit is one DSP/host 24-bit word. The upper byte is an opcode.
 | `14 00 00` | run the 2048-frame block-oriented algorithm-0 channel spike | deterministic checksum `0f 26 66` |
 | `15 00 00` | run the 2048-frame block-oriented algorithm-7 carrier spike | deterministic checksum `89 eb 00` |
 | `16 00 aa` | run the 2048-frame mixed-topology spike for algorithm `aa = 1..6` | per-algorithm deterministic checksum |
-| `17 00 00` | run the 256-block live-SSI decoded-control and envelope engine | deterministic checksum `fe eb be` |
+| `17 00 00` | run the 256-block live-SSI decoded-control and envelope engine | deterministic checksum `fe eb ab` |
 | `18 00 00`, then an event count, 0–224 packed writes, PCM8 pan, and 512 mono PCM words after `52 44 59` | accept the first production period, render the realtime FM buffer, and start interrupt-fed SSI | ready token, then `00 00 00` when the upload is owned |
 | `19 00 00`, with the same variable payload | accept the next production period, render 16 32-frame FM blocks, and switch at the following whole-buffer boundary | ready token, then `00 00 00` when the upload is owned |
 | `1a 00 00` | opt into the boundary-wait host service: a parked `19` refill is received during the previous period's boundary wait, so its whole payload is resident before the handoff that frees its target buffer; the receive itself is boundary-aware and may straddle the wrap, performing the stereo-safe handoff in place. Cleared by reset, stop, and a new realtime start. The production player enables it once per session; conformance and capture flows never do, keeping their scored stream-loop command timing | `00 00 00` |
@@ -210,17 +210,17 @@ output — and the command checksum — are bit-identical to the cleared-ring
 ordering. Algorithms 6/7 route their already-summed
 carrier rings through a separate decoded-pan path. The command explicitly
 clears a latched SSI underrun before restoring the external Y map and exact
-phase cache. Its checksum is `fe eb be`.
+phase cache. Its checksum is `fe eb ab`.
 
-Hatari measures 346.21 cycles per codec frame over the 8,192-frame,
-256-block profile against the 489.40-cycle budget, leaving 143.19 cycles
-(29.3%). Dynamic topology/pan routing, planar PDX accumulation, final
+Hatari measures 342.89 cycles per codec frame over the 8,192-frame,
+256-block profile against the 489.40-cycle budget, leaving 146.51 cycles
+(29.9%). Dynamic topology/pan routing, planar PDX accumulation, final
 saturation, live SSI, the full decoded register control path, and decoded
 envelope curvature therefore fit the budget together. That figure is a
 bracketed render window and is not the whole cost: measured across whole
 production periods, the same DSP spends 426.76 cycles per frame on synthesis
 and transport plus 0.45 stalled on the 68030's host-port delivery, so real
-occupancy is 87.3% and the margin is 62.18 cycles rather than 143.19. See
+occupancy is 87.3% and the margin is 62.18 cycles rather than 146.51. See
 [`hatari-timing.md`](hatari-timing.md). Envelope-active
 operators advance once per block by a composed full-block affine step from
 generated per-rate tables — exponential attacks toward zero attenuation,
@@ -318,7 +318,7 @@ protocol version in the ping reply whenever either side changes incompatibly.
    time by 47.81x before steady SSI and host-port overhead. That exact kernel is
    retained as the conformance reference. The production block kernel renders
    eight channels, mixed PDX, decoded controls, block envelopes, and live SSI
-   at 346.21 cycles per codec frame against a 489.40-cycle budget. Its relaxed
+   at 342.89 cycles per codec frame against a 489.40-cycle budget. Its relaxed
    boundary is block-rate envelope/LFO evolution and codec-rate synthesis;
    ordered writes split blocks at their first landing frame, and DT1/DT2 plus
    noise-frequency/output substitution are integrated. An embedded second-stage P-memory loader removes the
@@ -556,7 +556,7 @@ Falcon. `SOUND_CLK25M` is therefore the only supported production clock, and
 the 32.780 kHz cadence is chosen from the 25.175 MHz table. The external-clock
 exception is real but requires non-stock hardware: an external 32 MHz
 oscillator on the DSP port is codec-legal and would make 41,666.67 Hz
-available, against a 385-cycle frame budget that the measured 346.21-cycle
+available, against a 385-cycle frame budget that the measured 342.89-cycle
 kernel fits. That remains an optional future mode, not a supported
 configuration.
 
