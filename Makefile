@@ -771,17 +771,16 @@ endurance-batch: check
 # line. The binary exits on a keypress that never arrives, so the VBL limit
 # terminates the run after the report is on disk.
 ratetest-hatari: $(RELEASE_DIR)/ratetest.tos
-	@if ! command -v hatari >/dev/null 2>&1; then \
-		echo "error: ratetest-hatari target needs Hatari" >&2; \
-		exit 1; \
-	fi
+	$(call require_hatari,ratetest-hatari)
 	@rm -rf build/ratetest
 	@mkdir -p build/ratetest
 	@cp $(RELEASE_DIR)/ratetest.tos build/ratetest/
 	# Run from inside the work directory with a bare program name: Windows
 	# Hatari splits the program path on backslashes only, so a relative
-	# forward-slash path would mount the wrong GEMDOS root.
-	@cd build/ratetest && SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy hatari \
+	# forward-slash path would mount the wrong GEMDOS root. That cd is also why
+	# HATARI has to be an absolute path or a bare name found on PATH, which both
+	# of its defaults are.
+	@cd build/ratetest && SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy $(HATARI) \
 		--machine falcon --dsp emu \
 		--tos $(CURDIR)/third_party/f030dsp3d/tools/tos402.rom \
 		--patch-tos true \
