@@ -66,10 +66,11 @@ The integrated worst-case DSP profile measures 346.21 instruction cycles per
 is deliberately a test oracle rather than the production renderer.
 
 Measured on production material rather than on a bracketed fixture, the DSP
-now occupies 84.4% of that budget — 407.59 cycles of synthesis and transport
-plus 5.58 cycles stalled on the 68030 — leaving 76.22 cycles per frame. The
-remaining three Xevious misses are caused by late host preparation rather than
-average DSP saturation. See
+now occupies 87.3% of that budget — 426.76 cycles of synthesis and transport
+plus 0.45 cycles stalled on the 68030 — leaving 62.18 cycles per frame. The
+rise from the pre-pipeline 407.59 cycles is the payload receive moving into the
+previous period's boundary wait, where it counts as work rather than as a host
+stall; it is not new synthesis cost. See
 [`docs/hatari-timing.md`](docs/hatari-timing.md); it also explains why the
 emulator gates only started reporting this once they moved to a DSP-calibrated
 Hatari.

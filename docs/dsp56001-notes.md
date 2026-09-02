@@ -477,12 +477,14 @@ blocks, or 346.21 cycles per frame against the 489.40-cycle budget, leaving
 Those 143.19 cycles are not all spare capacity. The window is bracketed between
 two render markers, so it excludes the SSI transmit interrupt, the host-port
 receive and the refill command; `make profile-dsp-live` measures the same DSP
-across 128 whole production periods of Xevious and finds 407.59 cycles per
-frame of synthesis and transport plus 5.58 stalled on the 68030, i.e. 84.4%
-occupancy and a 76.22-cycle margin. At the true 16 MIPS DSP clock the optimized
-Xevious run misses 3 of 1,103 steady boundaries (0.27%), down from 351 of 759;
-the remaining three arrive from the 68030 roughly one third of a period late,
-rather than exhausting the DSP's mean render budget. See
+across 128 whole production periods of Xevious and finds 426.76 cycles per
+frame of synthesis and transport plus 0.45 stalled on the 68030, i.e. 87.3%
+occupancy and a 62.18-cycle margin. At the true 16 MIPS DSP clock the pipelined
+Xevious run lands all 1,109 steady boundaries exactly 1024 words apart, down
+from 351 late of 759 before the optimization and 3 late of 1,103 after it. The
+misses that remained at that stage arrived from the 68030 roughly one third of
+a period late rather than exhausting the DSP's mean render budget, which is why
+the producer/consumer pipeline cleared them without touching synthesis. See
 [`hatari-timing.md`](hatari-timing.md).
 The 256-block window amortizes the 32-event fixture at a realistic MXDRV
 write density, and the envelope fixture exercises an eight-operator key-on
