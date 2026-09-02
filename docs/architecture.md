@@ -214,9 +214,9 @@ Hatari measures 346.21 cycles per codec frame over the 8,192-frame,
 saturation, live SSI, the full decoded register control path, and decoded
 envelope curvature therefore fit the budget together. That figure is a
 bracketed render window and is not the whole cost: measured across whole
-production periods, the same DSP spends 407.59 cycles per frame on synthesis
-and transport plus 5.58 stalled on the 68030's host-port delivery, so real
-occupancy is 84.4% and the margin is 76.22 cycles rather than 143.19. See
+production periods, the same DSP spends 426.76 cycles per frame on synthesis
+and transport plus 0.45 stalled on the 68030's host-port delivery, so real
+occupancy is 87.3% and the margin is 62.18 cycles rather than 143.19. See
 [`hatari-timing.md`](hatari-timing.md). Envelope-active
 operators advance once per block by a composed full-block affine step from
 generated per-rate tables — exponential attacks toward zero attenuation,
