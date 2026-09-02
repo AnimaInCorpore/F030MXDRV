@@ -46,7 +46,7 @@ Every transport unit is one DSP/host 24-bit word. The upper byte is an opcode.
 | `14 00 00` | run the 2048-frame block-oriented algorithm-0 channel spike | deterministic checksum `0f 26 66` |
 | `15 00 00` | run the 2048-frame block-oriented algorithm-7 carrier spike | deterministic checksum `89 eb 00` |
 | `16 00 aa` | run the 2048-frame mixed-topology spike for algorithm `aa = 1..6` | per-algorithm deterministic checksum |
-| `17 00 00` | run the 256-block live-SSI decoded-control and envelope engine | deterministic checksum `ee d0 f2` |
+| `17 00 00` | run the 256-block live-SSI decoded-control and envelope engine | deterministic checksum `fe eb be` |
 | `18 00 00`, then an event count, 0–224 packed writes, PCM8 pan, and 512 mono PCM words after `52 44 59` | accept the first production period, render the realtime FM buffer, and start interrupt-fed SSI | ready token, then `00 00 00` when the upload is owned |
 | `19 00 00`, with the same variable payload | accept the next production period, render 16 32-frame FM blocks, and switch at the following whole-buffer boundary | ready token, then `00 00 00` when the upload is owned |
 | `1a 00 00` | opt into the boundary-wait host service: a parked `19` refill is received during the previous period's boundary wait, so its whole payload is resident before the handoff that frees its target buffer; the receive itself is boundary-aware and may straddle the wrap, performing the stereo-safe handoff in place. Cleared by reset, stop, and a new realtime start. The production player enables it once per session; conformance and capture flows never do, keeping their scored stream-loop command timing | `00 00 00` |
@@ -183,7 +183,11 @@ word rides the parallel Y-bank pointer: its low sixteen bits address the
 render entry for the channel's algorithm and feedback class (a bypass head
 for level 0 and the exact-gain head for levels 1-7, resolved at register-decode
 time so no per-block classification survives into the render), and bits
-16-23 carry the raw control byte for the pan-routing tests. The DSP56001
+16-23 carry the raw control byte for the pan-routing tests. The same decode
+publishes the channel's operator-1 feedback-history shift, 9-FB, in
+`rt5_channel_fb_shift`; the channel dispatch parks it in `n1` and the
+feedback stages apply it with one `REP`, because the packed word's low bits
+are an address and cannot yield FB. The DSP56001
 only pairs same-numbered index and address registers, which fixed this
 layout. The 32 fixture events cover
 the profiled decoded control set: `$20-$27` algorithm/pan, four-band total
@@ -206,7 +210,7 @@ output — and the command checksum — are bit-identical to the cleared-ring
 ordering. Algorithms 6/7 route their already-summed
 carrier rings through a separate decoded-pan path. The command explicitly
 clears a latched SSI underrun before restoring the external Y map and exact
-phase cache. Its checksum is `ee d0 f2`.
+phase cache. Its checksum is `fe eb be`.
 
 Hatari measures 346.21 cycles per codec frame over the 8,192-frame,
 256-block profile against the 489.40-cycle budget, leaving 143.19 cycles

@@ -604,6 +604,15 @@ rt5_env_key_phase:
 rt5_env_target:
         ds      32                      ; cached 10.13 sustain-level target
 
+; Per-channel operator-1 feedback-history shift, 9-FB, rebuilt by the
+; register decode beside the packed dispatch word. rt5_render_channel parks
+; it in n1 so the feedback stages apply it with one REP instead of deriving
+; it from a control byte the packed word no longer exposes at bits 3-5.
+        org     x:$24a0
+rt5_channel_fb_shift:
+        ds      8
+RT5_FB_SHIFT_OFFSET equ rt5_channel_fb_shift-rt5_feedback_1
+
 ; Persistent production-stream bookkeeping. This sits beyond the envelope
 ; arrays in external X and is touched only at block/refill boundaries.
 rt5_runtime_mode:
@@ -2861,11 +2870,16 @@ rt5_apply_packed_write:
 ; 1-7, bypass for level 0), while bits 16-23 carry the raw control byte for the
 ; pan routing tests. One (r4+n4) read therefore serves both jobs, no stage
 ; pays a per-block feedback classification, and the address truncation into
-; the 16-bit r5 drops the control bits for free.
+; the 16-bit r5 drops the control bits for free. The channel's decoded
+; feedback-history shift rides a second indexed read into n1, which no
+; stage touches before the operator-1 stage consumes it.
 rt5_render_channel:
+        move    #>RT5_FB_SHIFT_OFFSET,n2
         move    x:(r4+n4),a
+        move    x:(r2+n2),b             ; operator-1 feedback-history shift
         move    a1,x:rt5_current_channel_control
         move    a1,r5
+        move    b1,n1                   ; parked for the feedback stage
         move    #>RT5_INC_OP1_PRE,n2
         jmp     (r5)
 
@@ -3073,16 +3087,8 @@ rt5_feedback_write_carrier:
         move    #>RT5_MOD_GAIN_OFFSET,n7
         nop                              ; address-register pipeline interlock
         move    x:(r7+n7),y0            ; exact serial-depth gain
-        move    x:rt5_current_channel_control,a
-        move    #>$38,x0
-        and     x0,a
-        rep     #3
-        lsr     a                       ; feedback level 1-7
-        move    #>9,b
-        sub     a,b                     ; history shift = 9-FB
-        move    b1,n0
         move    y0,a
-        rep     n0
+        rep     n1                      ; history shift 9-FB from rt5_render_channel
         asr     a
         move    a1,y:rt5_alg7_gain_ring+1
         move    a1,y0                   ; first product is feedback history
@@ -3114,7 +3120,8 @@ rt5_feedback_write_carrier_done:
 ; All-topology stages for the live-SSI profile. r0 is the sine-ROM base and r7
 ; walks 32 overlaid internal long phases, leaving r6/m6 untouched for the
 ; interrupt. Callers preload each stage's decoded PM-adjusted increment into
-; x1 and its block gain into y0 before the jsr.
+; x1 and its block gain into y0 before the jsr; rt5_render_channel parks the
+; channel's feedback-history shift in n1 for the operator-1 stages.
 rt5_feedback_write_x:
         ; Feedback level 0 contributes zero self-modulation, exactly as
         ; ymfm's (out0+out1)>>(10-FB) special-cases it, but that dispatch now
@@ -3122,16 +3129,8 @@ rt5_feedback_write_x:
         ; (rt5_feedback_write_bypass), so the stages carry no per-block test.
         move    x:(r7+n7),y0            ; exact onward serial gain
         move    y0,y:rt5_alg7_gain_ring
-        move    x:rt5_current_channel_control,a
-        move    #>$38,x0
-        and     x0,a
-        rep     #3
-        lsr     a
-        move    #>9,b
-        sub     a,b
-        move    b1,n0
         move    y0,a
-        rep     n0
+        rep     n1                      ; history shift 9-FB from rt5_render_channel
         asr     a
         move    a1,y:rt5_alg7_gain_ring+1
         move    a1,y0                   ; first product is feedback history
@@ -3167,16 +3166,8 @@ rt5_feedback_write_x_done:
 rt5_feedback_add_x:
         move    x:(r7+n7),y0            ; exact onward serial gain
         move    y0,y:rt5_alg7_gain_ring
-        move    x:rt5_current_channel_control,a
-        move    #>$38,x0
-        and     x0,a
-        rep     #3
-        lsr     a
-        move    #>9,b
-        sub     a,b
-        move    b1,n0
         move    y0,a
-        rep     n0
+        rep     n1                      ; history shift 9-FB from rt5_render_channel
         asr     a
         move    a1,y:rt5_alg7_gain_ring+1
         move    a1,y0
@@ -7973,6 +7964,21 @@ rt5_store_render_fetch:
         move    n0,b                    ; channel index; (r3+n) pairs n3 only
         move    b1,n3
         move    #rt5_channel_render,r3
+        nop
+        move    a1,x:(r3+n3)
+        ; The operator-1 stages apply the feedback history as gain >> (9-FB).
+        ; Decode that shift here from the control byte at bits 16-23 and
+        ; publish it beside the packed word: the stages cannot read FB from
+        ; the packed word's low bits, which hold the entry address. Level 0
+        ; takes the bypass row and never applies it.
+        move    #>$380000,x0
+        and     x0,a
+        rep     #19
+        lsr     a                       ; feedback level 0-7
+        move    a1,x0
+        move    #>9,a
+        sub     x0,a                    ; history shift = 9-FB
+        move    #rt5_channel_fb_shift,r3
         nop
         move    a1,x:(r3+n3)
         rts
