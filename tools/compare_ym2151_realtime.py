@@ -24,7 +24,7 @@ BASE_SCENARIOS = (
     "pitch", "detune", "timing", "envelope", "lfo", "noise", "noise-slow"
 )
 ALGORITHM_SCENARIOS = tuple(f"algorithm-{index}" for index in range(8))
-FEEDBACK_SCENARIOS = ("feedback-0", "feedback-7")
+FEEDBACK_SCENARIOS = ("feedback-0", "feedback-7", "feedback-7-algorithm-5")
 # Long sustained-feedback scenarios: two real voices held at feedback level 7
 # to fence history stability beyond the short spectral fixtures. CON4 pairs
 # each operator 1 with a single carrier; CON5 fans one operator 1 out to

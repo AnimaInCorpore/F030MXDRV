@@ -103,7 +103,7 @@ make check
 `make check` bootstraps vasm/vlink from the archived sources in
 `third_party/f030dsp3d`, assembles both processors, builds the native ymfm and
 MSM6258 oracles, regenerates all lookup/reference data, and validates the
-19-scenario perceptual reference model. It does not launch Hatari.
+20-scenario perceptual reference model. It does not launch Hatari.
 
 Use `make help` for the complete target summary. The most useful targets are:
 
@@ -112,7 +112,7 @@ Use `make help` for the complete target summary. The most useful targets are:
 | `make all` | build the Falcon executables and DSP image | DOSBox |
 | `make check` | run static build and oracle gates | DOSBox |
 | `make smoke` | run the full non-interactive Hatari integration test | Hatari |
-| `make capture-realtime` | capture and compare all 19 production-kernel scenarios | Hatari |
+| `make capture-realtime` | capture and compare all 20 production-kernel scenarios | Hatari |
 | `make stock-audio` | verify stock-clock SSI cadence and clipping | Hatari + Xevious corpus files |
 | `make endurance` | play Xevious through two loops, fade, and shutdown | Hatari + Xevious corpus files |
 | `make endurance-batch` | play every uppercase `*.MDX` in the local corpus | Hatari + local corpus |

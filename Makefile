@@ -105,7 +105,7 @@ help:
 	@echo "  all              build the Falcon executables and DSP image"
 	@echo "  check            build everything and validate generated references"
 	@echo "  smoke            run the full non-interactive Hatari integration test"
-	@echo "  capture-realtime capture and compare all 19 perceptual scenarios"
+	@echo "  capture-realtime capture and compare all 20 perceptual scenarios"
 	@echo "  stock-audio      gate stock-clock SSI timing (needs Xevious corpus files)"
 	@echo "  endurance        play Xevious through two loops and fade under Hatari"
 	@echo "  endurance-batch  play every uppercase MDX in CORPUS_DIR under Hatari"
@@ -230,6 +230,9 @@ $(YM2151_PERCEPTUAL_STAMP): $(YM2151_ORACLE) \
 				--algorithm 0 --feedback $$feedback \
 				> $$output_dir/feedback-$$feedback.tsv || exit 1; \
 		done; \
+		$(YM2151_ORACLE) $$mode tests/traces/perceptual_topology.trace 4096 \
+			--algorithm 5 --feedback 7 \
+			> $$output_dir/feedback-7-algorithm-5.tsv || exit 1; \
 		$(YM2151_ORACLE) $$mode tests/traces/bisect_two_bom_fb7.trace 40960 \
 			> $$output_dir/feedback-7-long.tsv || exit 1; \
 		$(YM2151_ORACLE) $$mode tests/traces/bisect_two_bom_alg5_fb7.trace 40960 \

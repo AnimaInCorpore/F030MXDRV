@@ -52,6 +52,12 @@ SCENARIOS: dict[str, tuple[str, int, int | None, int | None]] = {
     },
     "feedback-0": ("perceptual_topology.trace", 4096, 0, 0),
     "feedback-7": ("perceptual_topology.trace", 4096, 0, 7),
+    # Level 7 on algorithm 5, whose spectrum the gate separates most sharply
+    # by feedback depth. The algorithm-0 pair above cannot tell a kernel
+    # that ignores the FB register from one that honours it - algorithm 0
+    # once decoded a fixed level 7 by accident - but CON5 at the wrong depth
+    # scores far outside the model tolerance.
+    "feedback-7-algorithm-5": ("perceptual_topology.trace", 4096, 5, 7),
     # Two real CON4 voices sustained at feedback level 7. This long scenario
     # fences codec-rate feedback-history stability beyond the short spectra.
     "feedback-7-long": ("bisect_two_bom_fb7.trace", 40960, None, None),
