@@ -624,7 +624,10 @@ is deliberately narrow:
       decode the program islands assume: a word written through `Y:$2000`
       reads back through `P:$2000`, a word written through `X:$2000` reads
       back through `P:$6000`, and neither disturbs the other. Everything
-      else assumes both that decode and two-clock external words.
+      else assumes both that decode and two-clock external words. Measured
+      on hardware on 2026-09-02: the reset `$FFFF` reached the kernel and
+      cost seventeen clocks per external word, two once cleared, and the
+      decode matched - see [`hatari-timing.md`](hatari-timing.md).
    2. **Boot with the verbose markers.** Confirm progress past `PCC`,
       `Dsptristate` and `Devconnect`, then past the payload-sent and reply
       markers, which separate "stopped consuming mid-block" from "took the

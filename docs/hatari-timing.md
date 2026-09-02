@@ -204,3 +204,41 @@ and the 68030 side still loses no bus cycles to the shifter. A real Falcon has
 *less* host bandwidth than this build models, not more, so 87.3% occupancy and
 the zero-repeat cadence result are optimistic rather than conservative: the
 physical-Falcon validation still has to confirm them.
+
+## First measurements from a physical Falcon
+
+`release/dspprobe.tos` run on a real Falcon030 on 2026-09-02, before the
+kernel cleared the Bus Control Register:
+
+```
+BCR after Dsp_ExecBoot: $ffff
+timing with BCR as found (8,000,000 words per run, TOS 200 Hz ticks):
+  fetch from internal P : ticks 100  = 2.00 clocks/word
+  fetch from external P : ticks 850  = 17.00 clocks/word
+  read external X data  : ticks 850  = 17.00 clocks/word
+  read external Y data  : ticks 850  = 17.00 clocks/word
+BCR after clearing:     $0000
+timing with BCR cleared:
+  fetch from internal P : ticks 100  = 2.00 clocks/word
+  fetch from external P : ticks 100  = 2.00 clocks/word
+  read external X data  : ticks 100  = 2.00 clocks/word
+  read external Y data  : ticks 100  = 2.00 clocks/word
+memory decode (model: Y:$2000 = P:$2000, X:$2000 = P:$6000):
+  Y:$2000 <- $a5c3a5  reads Y:$2000=$a5c3a5 P:$2000=$a5c3a5
+  X:$2000 <- $3c5a3c  reads X:$2000=$3c5a3c P:$6000=$3c5a3c
+  shadows (information only): X:$6000=$3c5a3c Y:$6000=$a5c3a5
+  decode matches the model  PASS
+```
+
+Three things follow. The reset BCR does reach the kernel through the
+`Dsp_ExecBoot` path, and it costs exactly the manual's fifteen wait states:
+seventeen clocks per external word against two, so every production build
+before the fix ran its externally fetched kernel 8.5 times slower than any
+figure in this document and repeated periods continuously - the "robotic"
+playback reported from hardware. The Falcon's DSP SRAM is zero-wait once
+the register is cleared, on all three external paths, so the one-word fix
+at `start:` restores the modeled cost in full. And the external decode is
+the one the code islands assume, shadows included, which retires the
+aliasing probe from the soak plan. The internal reference also puts this
+machine's DSP clock at 32.0 MHz against the 32,084,988 Hz Hatari models, a
+0.27% difference.
