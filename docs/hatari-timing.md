@@ -275,3 +275,58 @@ that clocks. Whichever step turns the clock on is a rule Hatari has to
 enforce as well: an emulator that clocks the SSI in a state where the Falcon
 does not is as wrong as one that refuses to. The bus probe above is
 unaffected; it never enables the SSI.
+
+### The bisect run passed, and did not reproduce the failure
+
+`release/ratetest.tos` at `2fd5899`, run on the same Falcon030 on
+2026-09-08:
+
+```
+inherited regs 8900=0500 8920=0043 8930=0010 8932=2000 8934=0002 8936=0003
+phase A bare: frames 24585  words 49170  ssisr $500  clock present
+  regs 8900=0500 8920=0043 8930=0090 8932=2000 8934=0003 8936=0003
+measuring prescale 3 (10 s) ...
+prescale 3: frames 245855  ticks 2000  measured 24585.500 Hz  expected 24584.96
+prescale 1: frames 491711  ticks 2000  measured 49171.100 Hz  expected 49169.92
+prescale 2: frames 327810  ticks 2000  measured 32781.000 Hz  expected 32779.94
+RESULT: PASS (3 runs)
+```
+
+Phase A *is* the bare bring-up that found no clock six days earlier, so the
+bisect stopped at its first probe and steps B through G never ran: the run
+proves the rate model and says nothing about which bring-up step matters.
+The three measurements sit 21.9, 24.0 and 32.1 ppm above the model, a
+consistent positive bias two orders of magnitude inside the 0.1 % gate, so
+the crystal is a hair fast and both the clock source and the divider law are
+confirmed at three points. Word slots came to exactly twice the frames with
+no underrun line, so the polled loop served every slot it was offered.
+
+The failure is therefore unexplained rather than fixed, and the program is
+not the explanation. On the phase A path the two versions issue the same
+calls in the same order — `Locksnd`, `Setmode`, `Settracks`,
+`Dsptristate(1,0)`, `Devconnect` — and the DSP-side changes are additive: a
+word counter, an SSISR read, a re-arm command phase A never sends, and the
+boot register writes moved into `rate_ssi_arm` with `CRB`/`CRA`/`CRB` in
+their original order. Neither version touches `BCR`. What differed was
+outside the program: the machine state the run inherited, which the failing
+run did not record and this one does. Treat the 2026-09-02 result as an
+intermittent, state-dependent dead clock, not as a rule Hatari has to
+enforce, and if it returns, the `inherited regs` line against this one is
+the first discriminator to read.
+
+### Playback on hardware, after the bus fix
+
+The same session played `XEVVERB.TOS` and `XEVIOUS.TOS` on the machine, and
+both sounded good. That is the first audio this player has produced on real
+hardware with the `BCR` clear in the kernel, and it closes the wait-state
+explanation for the "robotic" playback above: the register was measured at
+fifteen wait states, two clocks per external word once cleared, and the
+audible defect is gone with the one-word fix at `start:`.
+
+The listen was not instrumented, so it settles the cause and nothing else.
+No repeat or underrun counter was read, no `Sndstatus(0)` clipping value was
+taken, the material was not the loudest in the corpus, and it ran in one
+video mode for one sitting. Steps 3 to 7 of the hardware soak plan in
+[`architecture.md`](architecture.md#what-the-emulator-cannot-decide) still
+stand, and production playback still has no measured physical-Falcon
+validation or long-duration soak.
