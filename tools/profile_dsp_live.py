@@ -21,6 +21,15 @@ Occupancy is work + host against the hardware budget of
 a DSP-calibrated Hatari; a build that hands the DSP two cycles per 68030 clock
 reports the same work but roughly twice the boundary idle, because it is
 measuring a machine with twice the Falcon's DSP throughput.
+
+The window is counted in boundary catches, but a receive that straddles the
+wrap hands off inside `rt5_early_wait_host` and never passes the catch, so on
+a busy song the window spans more periods than requested. The report therefore
+also normalizes by the payloads actually rendered (entries of
+`command_rt_refill_owned`), which is the per-period cost that decides whether
+a deadline holds. Any MDX plays through `--song`: Xevious keeps the dedicated
+player, every other basename is handed to the general player via AUTOPLAY.INF,
+with its PDX copied beside it when the corpus has one.
 """
 
 from __future__ import annotations
@@ -75,7 +84,9 @@ def main() -> int:
     parser.add_argument("--song", default="XEVIOUS",
                         help="corpus basename to play (default: XEVIOUS)")
     parser.add_argument("--listing", type=Path, default=REPO / "build/dsp/YM2151.LST")
-    parser.add_argument("--player", type=Path, default=REPO / "release/xevious.tos")
+    parser.add_argument("--player", type=Path,
+                        help="player binary (default: release/xevious.tos for XEVIOUS, "
+                             "release/f030mxdrv.tos with AUTOPLAY.INF otherwise)")
     parser.add_argument("--skip", type=int, default=300,
                         help="refills to let pass before arming (default: 300)")
     parser.add_argument("--periods", type=int, default=128,
@@ -91,22 +102,32 @@ def main() -> int:
         sys.exit(f"error: profile-dsp-live needs Hatari ({args.hatari})")
     mdx = args.corpus_dir / f"{args.song}.MDX"
     pdx = args.corpus_dir / f"{args.song}.PDX"
-    for path in (args.player, TOS_ROM, args.listing, mdx, pdx):
+    dedicated = args.song.upper() == "XEVIOUS"
+    if args.player is None:
+        args.player = REPO / ("release/xevious.tos" if dedicated else "release/f030mxdrv.tos")
+    for path in (args.player, TOS_ROM, args.listing, mdx):
         if not path.is_file():
             sys.exit(f"error: missing required file: {path}")
+    if dedicated and not pdx.is_file():
+        sys.exit(f"error: missing required file: {pdx}")
 
     symbols = parse_listing(args.listing)
     # Early-accepted refills bypass command_rt_refill_receive, so count
     # periods at the boundary catch that every switch passes exactly once.
     entry = require_symbol(symbols, "P", "command_rt_refill_at_boundary")
+    owned = require_symbol(symbols, "P", "command_rt_refill_owned")
     host_pcs, boundary_pcs = collect_spins(args.listing, symbols)
 
     (REPO / "build").mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="dsp-live-", dir=REPO / "build") as tmp:
         work = Path(tmp)
-        shutil.copy(args.player, work / "xevious.tos")
+        player = work / ("xevious.tos" if dedicated else "f030mxdrv.tos")
+        shutil.copy(args.player, player)
         shutil.copy(mdx, work)
-        shutil.copy(pdx, work)
+        if pdx.is_file():
+            shutil.copy(pdx, work)
+        if not dedicated:
+            (work / "AUTOPLAY.INF").write_bytes(f"{args.song.upper()}.MDX\r\n".encode())
 
         profile = work / "profile.txt"
         end = work / "end.ini"
@@ -130,8 +151,8 @@ def main() -> int:
              "--fast-boot", "true", "--fast-forward", "true", "--sound", "off",
              "--confirm-quit", "false", "--run-vbls", str(args.run_vbls),
              "--log-file", str(work / "hatari.log"),
-             "--parse", str(start), str(work / "xevious.tos")],
-            cwd=REPO, env=env, stdout=subprocess.DEVNULL,
+             "--parse", str(start), str(player)],
+            cwd=work, env=env, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL, timeout=1800, check=False,
         )
 
@@ -151,6 +172,8 @@ def main() -> int:
     frames = args.periods * FRAMES_PER_PERIOD
     budget_frame = hz / 2.0 / SAMPLE_RATE
     budget_window = budget_frame * frames
+    payloads = sum(i for pc, i, _c, _p in rows if pc == owned)
+    payload_frames = max(payloads, 1) * FRAMES_PER_PERIOD
 
     labels = sorted(
         (address, name) for (space, name), address in symbols.items() if space == "P"
@@ -183,12 +206,17 @@ def main() -> int:
         f"  margin:                     "
         f"{budget_frame - (work_cycles + host) / frames:,.2f} cycles per frame",
         "",
-        "Largest labeled basic blocks:",
+        f"  payloads rendered in window: {payloads} "
+        f"(window / payload periods: {total / (budget_frame * payload_frames):.3f}x)",
+        f"  work per rendered payload:  {(work_cycles + host) / payload_frames:,.2f}"
+        f" cycles per frame, {100.0 * (work_cycles + host) / payload_frames / budget_frame:.1f}% of budget",
+        "",
+        "Largest labeled basic blocks (cycles per rendered payload frame):",
     ]
     for name, cycles in sorted(blocks.items(), key=lambda item: -item[1])[:12]:
         lines.append(
             f"  {cycles * 100.0 / oscillator_cycles:6.2f}%  {cycles / 2.0:12,.0f}"
-            f" instruction cycles  {name}"
+            f" instruction cycles  {cycles / 2.0 / payload_frames:7.2f}/frame  {name}"
         )
 
     report = "\n".join(lines) + "\n"
