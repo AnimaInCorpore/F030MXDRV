@@ -659,7 +659,7 @@ player_stage_payload:
         move.l  d5,-(sp)
         bsr     mxdrv_pdx_mix_block
         move.l  (sp)+,d5
-        addi.l  #DSP_RT_PCM_WORD_COUNT,d5
+        add.l   d0,d5                  ; pan word plus any sample words
         move.l  d5,player_stage_count
         moveq   #0,d0
 player_stage_return:

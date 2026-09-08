@@ -18,7 +18,7 @@ routine receives the register in `d1.b` and data in `d2.b`, mirrors the byte in
 `OPMBuf`, then writes the X68000 OPM ports. `src/m68k/mxdrv_port.s` preserves
 those input conventions and replaces the hardware write with one DSP word.
 
-## Host/DSP protocol v24
+## Host/DSP protocol v25
 
 Every transport unit is one DSP/host 24-bit word. The upper byte is an opcode.
 
@@ -46,8 +46,8 @@ Every transport unit is one DSP/host 24-bit word. The upper byte is an opcode.
 | `14 00 00` | run the 2048-frame block-oriented algorithm-0 channel spike | deterministic checksum `0f 26 66` |
 | `15 00 00` | run the 2048-frame block-oriented algorithm-7 carrier spike | deterministic checksum `89 eb 00` |
 | `16 00 aa` | run the 2048-frame mixed-topology spike for algorithm `aa = 1..6` | per-algorithm deterministic checksum |
-| `17 00 00` | run the 256-block live-SSI decoded-control and envelope engine | deterministic checksum `fe eb ad` |
-| `18 00 00`, then an event count, 0–224 packed writes, PCM8 pan, and 512 mono PCM words after `52 44 59` | accept the first production period, render the realtime FM buffer, and start interrupt-fed SSI | ready token, then `00 00 00` when the upload is owned |
+| `17 00 00` | run the 256-block live-SSI decoded-control and envelope engine | deterministic checksum `fe eb 65` |
+| `18 00 00`, then an event count, 0–224 packed writes, the PCM8 pan word, and 512 mono PCM words after `52 44 59` — none when pan bit 2 flags a silent period | accept the first production period, render the realtime FM buffer, and start interrupt-fed SSI | ready token, then `00 00 00` when the upload is owned |
 | `19 00 00`, with the same variable payload | accept the next production period, render 16 32-frame FM blocks, and switch at the following whole-buffer boundary | ready token, then `00 00 00` when the upload is owned |
 | `1a 00 00` | opt into the boundary-wait host service: a parked `19` refill is received during the previous period's boundary wait, so its whole payload is resident before the handoff that frees its target buffer; the receive itself is boundary-aware and may straddle the wrap, performing the stereo-safe handoff in place. Cleared by reset, stop, and a new realtime start. The production player enables it once per session; conformance and capture flows never do, keeping their scored stream-loop command timing | `00 00 00` |
 | anything else | unsupported command | `ff ff ff` |
@@ -77,13 +77,27 @@ left/right pair as a conformance probe retained after the stream stops.
 
 Commands `18` and `19` are the production realtime counterparts. Each receives
 a count and up to 224 ordered, coalesced YM writes followed by the common PCM8
-pan and 512 signed mono PCM frames. The DSP first receives those event words
-into a short-loop staging array, then queues them at the current rolling
-timestamp after the complete blind TOS bulk upload is safe. It expands the
-mono block into the selected planar 24-bit
-accumulators, applies a two-tap PCM anti-image filter, and renders 16
-operator-major 32-frame blocks into a 1024-word
-SSI buffer. The start command imports the exact register and key image into the
+pan word and, unless that word carries the silent flag (bit 2, protocol v25),
+512 signed mono PCM frames. The host raises the flag whenever no PDX voice is
+active, so an FM-only song never transfers PCM at all; the DSP then leaves
+its planar streams untouched and treats them as unwritten (below), which is
+bit-identical to receiving zeros. Only when the previous period ended on a
+nonzero host point does the DSP synthesize one explicit zero block, because
+the two-tap filter still owes frame 0 half of that point. The DSP first
+receives the event words into a short-loop staging array, then queues them
+at the current rolling timestamp after the complete blind TOS bulk upload is
+safe; a burst longer than the 32-entry queue drains the due entries in place
+while the commit's walker is parked. It expands a received mono block into
+the selected planar 24-bit accumulators, applies the two-tap PCM anti-image
+filter, and renders 16 operator-major 32-frame blocks into a 1024-word SSI
+buffer. Every block starts with a written flag per planar stream, seeded
+from the period's PCM state: the first left-only (right-only) carrier of a
+block whose stream is unwritten stores instead of accumulating, and the
+stereo emit reads only the streams something wrote, choosing one of four
+passes costing nine, seven, seven or five cycles per frame. Pitch-bearing
+register writes (KC, KF, DT1/MUL, DT2) only mark their channel; each drain
+rebuilds every marked channel's four increments once from the final register
+image, so a voice load costs one rebuild instead of eight. The start command imports the exact register and key image into the
 persistent realtime state, backs up the packed lookup tables before its planar
 right stream overlays external Y, derives the noise jump tables, and maps the
 DSP56001 sine ROM. The DSP acknowledges once it owns the host payload; the
@@ -210,17 +224,17 @@ output — and the command checksum — are bit-identical to the cleared-ring
 ordering. Algorithms 6/7 route their already-summed
 carrier rings through a separate decoded-pan path. The command explicitly
 clears a latched SSI underrun before restoring the external Y map and exact
-phase cache. Its checksum is `fe eb ad`.
+phase cache. Its checksum is `fe eb 65`.
 
-Hatari measures 342.89 cycles per codec frame over the 8,192-frame,
-256-block profile against the 489.40-cycle budget, leaving 146.51 cycles
-(29.9%). Dynamic topology/pan routing, planar PDX accumulation, final
+Hatari measures 331.69 cycles per codec frame over the 8,192-frame,
+256-block profile against the 489.40-cycle budget, leaving 157.71 cycles
+(32.2%). Dynamic topology/pan routing, planar PDX accumulation, final
 saturation, live SSI, the full decoded register control path, and decoded
 envelope curvature therefore fit the budget together. That figure is a
 bracketed render window and is not the whole cost: measured across whole
-production periods, the same DSP spends 426.76 cycles per frame on synthesis
-and transport plus 0.45 stalled on the 68030's host-port delivery, so real
-occupancy is 87.3% and the margin is 62.18 cycles rather than 146.51. See
+production periods, the same DSP spends 391.74 cycles per frame on synthesis
+and transport plus 0.44 stalled on the 68030's host-port delivery, so real
+occupancy is 80.1% and the margin is 97.23 cycles rather than 157.71. See
 [`hatari-timing.md`](hatari-timing.md). Envelope-active
 operators advance once per block by a composed full-block affine step from
 generated per-rate tables — exponential attacks toward zero attenuation,
@@ -318,7 +332,7 @@ protocol version in the ping reply whenever either side changes incompatibly.
    time by 47.81x before steady SSI and host-port overhead. That exact kernel is
    retained as the conformance reference. The production block kernel renders
    eight channels, mixed PDX, decoded controls, block envelopes, and live SSI
-   at 342.89 cycles per codec frame against a 489.40-cycle budget. Its relaxed
+   at 331.69 cycles per codec frame against a 489.40-cycle budget. Its relaxed
    boundary is block-rate envelope/LFO evolution and codec-rate synthesis;
    ordered writes split blocks at their first landing frame, and DT1/DT2 plus
    noise-frequency/output substitution are integrated. An embedded second-stage P-memory loader removes the
@@ -556,7 +570,7 @@ Falcon. `SOUND_CLK25M` is therefore the only supported production clock, and
 the 32.780 kHz cadence is chosen from the 25.175 MHz table. The external-clock
 exception is real but requires non-stock hardware: an external 32 MHz
 oscillator on the DSP port is codec-legal and would make 41,666.67 Hz
-available, against a 385-cycle frame budget that the measured 342.89-cycle
+available, against a 385-cycle frame budget that the measured 331.69-cycle
 kernel fits. That remains an optional future mode, not a supported
 configuration.
 

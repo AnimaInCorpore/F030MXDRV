@@ -1,6 +1,6 @@
 ; Host/DSP protocol. Keep in sync with src/m68k/protocol.i.
 
-DSP_PROTOCOL_VERSION equ     24
+DSP_PROTOCOL_VERSION equ     25
 
 DSP_CMD_PING        equ     $010000
 DSP_CMD_WRITE_REG   equ     $020000
@@ -34,6 +34,9 @@ DSP_MIX_FRAME_COUNT equ    1007
 ; exact 1920:1007 ratio and 512 frames form one 15.62 ms transport period.
 DSP_RT_MIX_FRAME_COUNT equ 512
 DSP_RT_PCM_WORD_COUNT equ   513
+; Pan-word flag of the realtime payload: the period carries no PCM sample
+; words at all, the DSP renders the silent block itself.
+DSP_RT_PCM_SILENT_BIT equ   2
 DSP_RT_EVENT_MAX equ        32
 DSP_RT_BATCH_MAX equ        224
 DSP_RT_MIX_BLOCK_COUNT equ 16

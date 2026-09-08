@@ -327,7 +327,7 @@ dsp_render_realtime_audio:
         move.l  d5,-(sp)
         bsr     mxdrv_pdx_mix_block
         move.l  (sp)+,d5
-        addi.l  #DSP_RT_PCM_WORD_COUNT,d5
+        add.l   d0,d5                  ; pan word plus any sample words
 
         move.l  dsp_mixed_words,d0
         bsr     dsp_exchange

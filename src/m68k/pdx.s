@@ -684,11 +684,8 @@ pdx_mix_done:
 ; receive filter suppresses its strongest images without taxing the 68030.
 ; in: a3 = longword-aligned destination
 ; out: [a3] = pan (0-3), followed by DSP_RT_MIX_FRAME_COUNT signed samples
+; out: d0.l = payload words written (the pan word plus any samples)
 mxdrv_pdx_mix_block:
-        moveq   #0,d0
-        move.b  pdx_pcm_pan,d0
-        move.l  d0,(a3)+
-
         ; Count active voices once. No voice emits silence directly; one voice
         ; (the normal legacy-ADPCM case) can render and saturate straight into
         ; the wire payload. Only true PCM8 overlap needs the three-pass clear,
@@ -704,16 +701,27 @@ pdx_mix_block_silence_test:
 pdx_mix_block_silence_next:
         lea     PDX_VOICE_BYTES(a2),a2
         dbra    d1,pdx_mix_block_silence_test
+        moveq   #0,d0
+        move.b  pdx_pcm_pan,d0
         tst.w   d5
         bne     pdx_mix_block_active
-        moveq   #0,d0
-        move.w  #PDX_MIX_BLOCK_FRAMES-1,d4
-pdx_mix_block_silence:
+        ; A silent period sends no sample words at all: the pan word's silent
+        ; flag tells the DSP to produce the block those 512 zeros would have
+        ; produced, filter tail included. That spares this side the zero fill
+        ; and the 512-word paced blast, and the DSP its per-word receive loop;
+        ; an FM-only song never pays for PCM it does not play.
+        bset    #DSP_RT_PCM_SILENT_BIT,d0
         move.l  d0,(a3)+
-        dbra    d4,pdx_mix_block_silence
+        moveq   #1,d0
         rts
 
 pdx_mix_block_active:
+        move.l  d0,(a3)+
+        bsr     pdx_mix_block_voices
+        move.l  #DSP_RT_PCM_WORD_COUNT,d0
+        rts
+
+pdx_mix_block_voices:
         ; Producer seam: splits a dense sequencer drain from the mix passes so
         ; a posted payload never waits behind both. Register-transparent, and
         ; a fall-through while nothing is posted (every conformance path).

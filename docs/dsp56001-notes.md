@@ -449,7 +449,7 @@ fill — so no noise-table words occupy the bounded P-memory image. Cleanup
 disables SSI, reads SSISR and writes TX to clear a latched underrun,
 restores the external Y map, and rebuilds the exact phase cache, including
 the internal-Y frequency-cache words the decoded multiplier/increment arrays
-overlay. The deterministic reply is `$feebad`.
+overlay. The deterministic reply is `$feeb65`.
 
 Decoded envelope curvature runs as a block-boundary pass at `P:$0080` in
 internal P RAM, where instruction fetches avoid the external-memory penalty.
@@ -473,15 +473,15 @@ live in the external island with the generated tables. The capture harness
 derives mid-block levels analytically from the same defining recurrence, so
 no mid-block state is stored.
 
-Hatari measures 2,808,938 instruction cycles for 8,192 frames over 256
-blocks, or 342.89 cycles per frame against the 489.40-cycle budget, leaving
-146.51 cycles (29.9%). The 175.09 ms modeled span fits its 249.91 ms period.
-Those 146.51 cycles are not all spare capacity. The window is bracketed between
+Hatari measures 2,717,214 instruction cycles for 8,192 frames over 256
+blocks, or 331.69 cycles per frame against the 489.40-cycle budget, leaving
+157.71 cycles (32.2%). The 169.38 ms modeled span fits its 249.91 ms period.
+Those 157.71 cycles are not all spare capacity. The window is bracketed between
 two render markers, so it excludes the SSI transmit interrupt, the host-port
 receive and the refill command; `make profile-dsp-live` measures the same DSP
-across 128 whole production periods of Xevious and finds 426.76 cycles per
-frame of synthesis and transport plus 0.45 stalled on the 68030, i.e. 87.3%
-occupancy and a 62.18-cycle margin. At the true 16 MIPS DSP clock the pipelined
+across 128 whole production periods of Xevious and finds 391.74 cycles per
+frame of synthesis and transport plus 0.44 stalled on the 68030, i.e. 80.1%
+occupancy and a 97.23-cycle margin. At the true 16 MIPS DSP clock the pipelined
 Xevious run lands all 1,109 steady boundaries exactly 1024 words apart, down
 from 351 late of 759 before the optimization and 3 late of 1,103 after it. The
 misses that remained at that stage arrived from the 68030 roughly one third of

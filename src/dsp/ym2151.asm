@@ -455,7 +455,7 @@ rt5_ams_previous:
 rt5_lfo_am_channel:
         ds      1                       ; AM walk scratch: channel, operator,
 rt5_lfo_am_op:
-        ds      1                       ; and the channel's multiplier
+        ds      1                       ; (parks n4 across the apply)
 rt5_lfo_am_mult_ch:
         ds      1
 rt5_am_engaged:
@@ -494,9 +494,34 @@ rt5_noise_gain:
         ds      1
 rt5_pcm_previous:
         ds      1                       ; previous host PCM point for 2-tap FIR
+rt5_pcm_present:
+        ds      1                       ; nonzero while the period's planar
+                                        ; streams hold host samples
+; The same write-first idea for the two planar streams: zero while no
+; left-only (right-only) carrier has written this block's left (right)
+; stream. A period carrying host PCM starts every block with both set; a
+; silent period starts them clear, so its first one-sided carrier writes
+; instead of accumulating and the stereo emit never reads a stream nothing
+; touched. Internal RAM is fully allocated, so both ride here in external
+; X: a handful of block-rate accesses, never a per-frame one.
+rt5_pan_left_written:
+        ds      1
+rt5_pan_right_written:
+        ds      1
 ; The burst commit walks r2 through ssi_stream_write_realtime; its slow
 ; path decodes queued writes, which scratch r2, so it parks the walker here.
 ym_queue_saved_r2:
+        ds      1
+; Deferred channel pitch rebuilds: KC/KF/DT1-MUL/DT2 writes only mark their
+; channel, and every drain rebuilds each marked channel once from the final
+; register image. A voice load's eight pitch-bearing writes thus cost one
+; rebuild instead of eight. Entries are one word per channel; the any-flag
+; keeps a clean drain at a single test.
+rt5_pitch_dirty:
+        ds      8
+rt5_pitch_dirty_any:
+        ds      1
+rt5_pitch_flush_channel:
         ds      1
 
 ; Sub-block event-split bookkeeping, touched only while a block renders in
@@ -2274,6 +2299,12 @@ rt5_initialize_pdx_right_done:
         move    x:(r6)+,a
         movep   a1,x:m_tx
         movep   #$5a00,x:m_crb
+        ; The fixture's planar streams always carry host-prepared PDX, so
+        ; the production stream flags stay raised for the whole run: every
+        ; one-sided carrier accumulates, exactly as before the flags existed.
+        move    #>1,a
+        move    a1,x:rt5_pan_left_written
+        move    a1,x:rt5_pan_right_written
 
 rt5_profile_loop_start:
         do      #DSP_RT5_PROFILE_BLOCKS,rt5_profile_blocks_done
@@ -2484,6 +2515,9 @@ rt5_render_runtime_block:
         jsr     rt5_update_support_block
         clr     a
         move    a1,y:rt5_mix_written
+        move    x:rt5_pcm_present,a
+        move    a1,x:rt5_pan_left_written
+        move    a1,x:rt5_pan_right_written
         ; The support pass advanced the native clock to this block's end and
         ; drained everything due at its start, so a remaining head timestamp
         ; below the end clock lies strictly inside the block.
@@ -2506,38 +2540,9 @@ rt5_runtime_whole_block:
         move    #rt5_mix_ring,n6
         jsr     rt5_noise_block
         jsr     rt5_render_runtime_channels
-
-rt5_runtime_emit:
-        move    #rt5_mix_ring,r4
-        move    x:rt5_pan_left_base,r1
-        move    x:rt5_pan_right_base,r7
-        move    x:rt5_runtime_output,r2
-        move    y:rt5_mix_written,a
-        tst     a
-        jne     rt5_runtime_ring_ready
-        clr     a
-        do      #DSP_RT5_BLOCK_FRAMES,rt5_runtime_ring_cleared
-        move    a1,y:(r4)+
-rt5_runtime_ring_cleared:
-        move    #rt5_mix_ring,r4
-rt5_runtime_ring_ready:
-        ; The common ring is internal, so a second read of the same word
-        ; costs nothing: it lands in B beside the left add in place of the
-        ; accumulator copy, and the left store shares an instruction with
-        ; the right fetch (r2 in the X bank, r7 in the Y bank). Output is
-        ; bit-identical; the loop drops from ten cycles per frame to nine.
-        do      #DSP_RT5_BLOCK_FRAMES,rt5_runtime_stereo_done
-        move    x:(r1)+,x0 y:(r4),a
-        add     x0,a y:(r4)+,b
-        move    a,x:(r2)+ y:(r7)+,y0
-        add     y0,b
-        move    b,x:(r2)+
-rt5_runtime_stereo_done:
-        move    r1,x:rt5_pan_left_base
-        move    r7,x:rt5_pan_right_base
-        move    r2,x:rt5_runtime_output
-        move    #63,m5
-        rts
+        ; The stereo emit and its stream-aware variants live in the second
+        ; island; one jump per block keeps the hot stream inside P:$1400.
+        jmp     rt5_runtime_emit
 
 ; Update one 32-frame quality block of global control state at 32.780 kHz.
 ; Every due FIFO event is
@@ -2808,7 +2813,7 @@ rt5_service_event_done:
         move    #>DSP_RT5_BLOCK_FRAMES,x0
         add     x0,a
         move    a1,x:rt5_event_clock
-        rts
+        jmp     rt5_pitch_flush
 
 ; Production read side for the existing rolling 32-entry queue. Writes due at
 ; the current native boundary are mirrored into the exact register image and
@@ -2844,7 +2849,7 @@ rt5_service_transport_due:
         move    a1,x:ym_queue_count
         jmp     rt5_service_transport_event
 rt5_service_transport_done:
-        rts
+        jmp     rt5_pitch_flush
 
 ; Apply one packed command-02 word to both the retained exact register mirror
 ; and the codec-rate decoder. Reloading x1 protects the packed payload across
@@ -2999,51 +3004,9 @@ rt5_render_algorithm3_tail:
         jsr     rt5_route_carrier
         rts
 
-; Algorithm 4: (O1 -> O2) + (O3 -> O4). Each branch routes its own carrier;
-; the O1 and O3 modulation rings can therefore reuse the same internal X line.
-rt5_render_algorithm4:
-        move    #>RT5_MOD_GAIN_OFFSET,n7
-        move    y:(r2+n2),x1
-        jsr     rt5_feedback_write_x
-rt5_render_algorithm4_tail:
-        move    #>RT5_OUT_GAIN_OFFSET,n7
-        move    #>RT5_INC_OP2_POST,n2
-        move    x:(r7+n7),y0
-        move    y:(r2+n2),x1
-        jsr     rt5_route_carrier
-        move    #>RT5_MOD_GAIN_OFFSET,n7
-        move    #>RT5_INC_OP3_POST,n2
-        move    x:(r7+n7),y0
-        move    y:(r2+n2),x1
-        jsr     rt5_independent_write_x
-        move    #>RT5_OUT_GAIN_OFFSET,n7
-        move    #>RT5_INC_OP4_POST,n2
-        move    x:(r7+n7),y0
-        move    y:(r2+n2),x1
-        jsr     rt5_route_carrier
-        rts
-
-; Algorithm 5: O1 modulates O2, O3, and O4 in parallel. Carrier routing only
-; reads the shared X modulation ring, so all three branches consume it intact.
-rt5_render_algorithm5:
-        move    #>RT5_MOD_GAIN_OFFSET,n7
-        move    y:(r2+n2),x1
-        jsr     rt5_feedback_write_x
-rt5_render_algorithm5_tail:
-        move    #>RT5_OUT_GAIN_OFFSET,n7
-        move    #>RT5_INC_OP2_POST,n2
-        move    x:(r7+n7),y0
-        move    y:(r2+n2),x1
-        jsr     rt5_route_carrier
-        move    #>RT5_INC_OP3_POST,n2
-        move    x:(r7+n7),y0
-        move    y:(r2+n2),x1
-        jsr     rt5_route_carrier
-        move    #>RT5_INC_OP4_POST,n2
-        move    x:(r7+n7),y0
-        move    y:(r2+n2),x1
-        jsr     rt5_route_carrier
-        rts
+; Algorithms 4 and 5 carry two and three carriers of one channel; their
+; bodies live in the second island, where the pan class is decoded once per
+; channel instead of once per carrier (see rt5_render_algorithm4 there).
 
 ; Algorithm 6: (O1 -> O2) + O3 + O4. Accumulate all three carriers in X,
 ; then route the completed ring according to the decoded channel pan.
@@ -3109,16 +3072,15 @@ rt5_feedback_write_carrier:
         move    #rt2_stage_ring,r3
         move    l:(r7),b10
         do      n5,rt5_feedback_write_carrier_done
-        move    x:(r2),x0 y:(r4),a
-        add     x0,a a1,x:(r2)
+        move    x:(r2),x0 y:(r4),a      ; x0 = newer history product, a = older
+        add     x0,a x0,y:(r4)          ; out0+out1; the newer product ages into Y
         add     b,a
         and     y1,a1
         move    a1,n0
         mac     x1,y1,b
         move    y:(r0+n0),x0
         mpyr    x0,y0,a y:(r5)+,y0      ; history; y0 becomes carrier
-        move    a,y:(r4)
-        mpyr    x0,y0,a y:(r5)+,y0      ; carrier; y0 becomes history
+        mpyr    x0,y0,a a,x:(r2) y:(r5)+,y0 ; carrier; history enters X; y0 becomes history
         move    a,x:(r3)+
 rt5_feedback_write_carrier_done:
         move    b10,l:(r7)+
@@ -3133,6 +3095,12 @@ rt5_feedback_write_carrier_done:
 ; interrupt. Callers preload each stage's decoded PM-adjusted increment into
 ; x1 and its block gain into y0 before the jsr; rt5_render_channel parks the
 ; channel's feedback-history shift in n1 for the operator-1 stages.
+; Every operator-1 stage keeps the channel's two-frame feedback history with
+; the newest product in the X slot and the older one in the Y slot: the
+; frame's sum reads both, the X word ages into Y beside that add, and the
+; new product lands in X beside the onward multiply, so the store needs no
+; instruction of its own. The pair starts at zero, and the three stages
+; agree on the order, so an algorithm change never reorders a history.
 rt5_feedback_write_x:
         ; Feedback level 0 contributes zero self-modulation, exactly as
         ; ymfm's (out0+out1)>>(10-FB) special-cases it, but that dispatch now
@@ -3150,16 +3118,15 @@ rt5_feedback_write_x:
         move    #rt2_stage_ring,r3
         move    l:(r7),b10
         do      n5,rt5_feedback_write_x_done
-        move    x:(r2),x0 y:(r4),a
-        add     x0,a a1,x:(r2)
+        move    x:(r2),x0 y:(r4),a      ; x0 = newer history product, a = older
+        add     x0,a x0,y:(r4)          ; out0+out1; the newer product ages into Y
         add     b,a
         and     y1,a1
         move    a1,n0
         mac     x1,y1,b
         move    y:(r0+n0),x0
-        mpyr    x0,y0,a y:(r5)+,y0
-        move    a,y:(r4)
-        mpyr    x0,y0,a y:(r5)+,y0
+        mpyr    x0,y0,a y:(r5)+,y0      ; history product; y0 becomes the onward gain
+        mpyr    x0,y0,a a,x:(r2) y:(r5)+,y0 ; onward product; history enters X
         move    a,x:(r3)+
 rt5_feedback_write_x_done:
         move    b10,l:(r7)+
@@ -3187,18 +3154,18 @@ rt5_feedback_add_x:
         move    #rt2_stage_ring,r3
         move    l:(r7),b10
         do      n5,rt5_feedback_add_x_done
-        move    x:(r2),x0 y:(r4),a
-        add     x0,a a1,x:(r2)
+        move    x:(r2),x0 y:(r4),a      ; x0 = newer history product, a = older
+        add     x0,a x0,y:(r4)          ; out0+out1; the newer product ages into Y
         add     b,a
         and     y1,a1
         move    a1,n0
         mac     x1,y1,b
         move    y:(r0+n0),x0
         mpyr    x0,y0,a y:(r5)+,y0
-        move    a,y:(r4)
-        ; The carrier multiply consumes the old sine/gain pair while both
-        ; data buses preload the accumulation word and next history gain.
-        mpyr    x0,y0,a x:(r3),x0 y:(r5)+,y0
+        ; The onward multiply consumes the old sine/gain pair while the
+        ; history product enters its X slot and the next history gain loads.
+        mpyr    x0,y0,a a,x:(r2) y:(r5)+,y0
+        move    x:(r3),x0
         add     x0,a
         move    a,x:(r3)+
 rt5_feedback_add_x_done:
@@ -3248,8 +3215,12 @@ rt5_independent_add_x_done:
         rts
 
 rt5_serial_transform_x:
-        move    #rt2_stage_ring,r3
         move    #rt2_stage_ring,r5
+; Write-first twin for a one-sided stream: r5 already addresses the block's
+; unwritten left stream, so the carrier stores through the same limiter
+; move that adding onto zeros would have produced.
+rt5_serial_write_x:
+        move    #rt2_stage_ring,r3
         move    l:(r7),b10
         move    x:(r3)+,a
         do      n5,rt5_serial_transform_x_done
@@ -3265,19 +3236,23 @@ rt5_serial_transform_x_done:
         rts
 
 rt5_serial_accumulate_x:
+        ; The gain rides in x0 so y0 can serve as the loop's only temporary:
+        ; the R:Y class II move then reloads the next modulation word into A
+        ; beside the ring store, one instruction fewer per frame than the
+        ; store-then-load pair. Same products, same limiter, bit-identical.
         move    #rt2_stage_ring,r3
         move    l:(r7),b10
+        move    y0,x0
         move    x:(r3)+,a
         do      n5,rt5_serial_accumulate_x_done
         add     b,a
         and     y1,a1
         move    a1,n0
         mac     x1,y1,b
-        move    y:(r0+n0),x0
-        mpyr    x0,y0,a y:(r1)+,x0
-        add     x0,a x:(r3)+,x0
-        move    a,y:(r5)+
-        move    x0,a
+        move    y:(r0+n0),y0
+        mpyr    x0,y0,a y:(r1)+,y0
+        add     y0,a x:(r3)+,y0
+        move    y0,a a,y:(r5)+
 rt5_serial_accumulate_x_done:
         move    b10,l:(r7)+
         rts
@@ -3296,16 +3271,16 @@ rt5_serial_mix_common:
 rt5_serial_write_y:
         move    #rt2_stage_ring,r3
         move    l:(r7),b10
+        move    y0,x0
         move    x:(r3)+,a
         do      n5,rt5_serial_write_y_done
         add     b,a
         and     y1,a1
         move    a1,n0
         mac     x1,y1,b
-        move    y:(r0+n0),x0
-        mpyr    x0,y0,a x:(r3)+,x0
-        move    a,y:(r5)+
-        move    x0,a
+        move    y:(r0+n0),y0
+        mpyr    x0,y0,a x:(r3)+,y0
+        move    y0,a a,y:(r5)+
 rt5_serial_write_y_done:
         move    b10,l:(r7)+
         rts
@@ -3343,10 +3318,26 @@ rt5_route_accumulated_carriers:
 rt5_route_accumulated_no_left:
         jclr    #23,a1,rt5_route_accumulated_mute
         move    x:rt5_pan_right_base,r5
-        jmp     rt5_accumulate_ring_y
+        move    x:rt5_pan_right_written,a
+        tst     a
+        jne     rt5_accumulate_ring_y
+        move    #>1,a
+        move    a1,x:rt5_pan_right_written
+        jmp     rt5_write_ring_y
 rt5_route_accumulated_left:
         move    x:rt5_pan_left_base,r5
-        jmp     rt5_accumulate_ring_x
+        move    x:rt5_pan_left_written,a
+        tst     a
+        jne     rt5_accumulate_ring_x
+        move    #>1,a
+        move    a1,x:rt5_pan_left_written
+rt5_write_ring_x:
+        move    #rt2_stage_ring,r3
+        do      n5,rt5_write_ring_x_done
+        move    x:(r3)+,a
+        move    a,x:(r5)+
+rt5_write_ring_x_done:
+        rts
 rt5_route_accumulated_mute:
         rts
 
@@ -3404,12 +3395,26 @@ rt5_route_carrier:
 rt5_route_no_left:
         jclr    #23,a1,rt5_route_mute
 rt5_route_right:
-        move    x:rt5_pan_right_base,r1
         move    x:rt5_pan_right_base,r5
+        move    x:rt5_pan_right_written,a
+        tst     a
+        jne     rt5_route_right_add
+        move    #>1,a
+        move    a1,x:rt5_pan_right_written
+        jmp     rt5_serial_write_y
+rt5_route_right_add:
+        move    x:rt5_pan_right_base,r1
         jmp     rt5_serial_accumulate_x
 rt5_route_left:
-        move    x:rt5_pan_left_base,r1
         move    x:rt5_pan_left_base,r5
+        move    x:rt5_pan_left_written,a
+        tst     a
+        jne     rt5_route_left_add
+        move    #>1,a
+        move    a1,x:rt5_pan_left_written
+        jmp     rt5_serial_write_x
+rt5_route_left_add:
+        move    x:rt5_pan_left_base,r1
         jmp     rt5_serial_accumulate_left_x
 rt5_route_mute:
         jmp     rt5_serial_transform_x
@@ -6087,32 +6092,23 @@ rt5_am_mult_done:
 
         ; rescale the live gain pairs of every channel whose AM sensitivity
         ; is, or last block was, nonzero, and remember whether any channel
-        ; remains scaled for the idle early-out
+        ; remains scaled for the idle early-out. The register mirror and the
+        ; previous-AMS words walk under two pointers; the flag is raised on
+        ; the rare apply path, which is the only place a sensitivity can be
+        ; nonzero, so the common all-zero walk costs no memory traffic.
         clr     b
         move    b1,x:rt5_lfo_am_channel
         move    b1,x:rt5_am_engaged
+        move    #ym_regdata+$38,r1
+        move    #rt5_ams_previous,r2
+        move    #>3,y0
         do      #8,rt5_am_walk_done
-        move    x:rt5_lfo_am_channel,b
-        move    #>ym_regdata+$38,a
-        add     b,a
-        move    a1,r2
-        move    #>rt5_ams_previous,a
-        add     b,a
-        move    a1,r1
-        nop
-        move    x:(r2),a
-        move    #>3,x0
-        and     x0,a
+        move    x:(r1)+,a
+        and     y0,a
         move    a1,y1                   ; ams
-        move    a1,x0
-        move    x:rt5_am_engaged,b
-        or      x0,b
-        move    b1,x:rt5_am_engaged
-        move    x:(r1),b                ; previous ams, then update it
-        move    a1,x:(r1)
-        move    b1,x0
-        or      x0,a                    ; ams | previous
-        tst     a
+        move    x:(r2),b                ; previous ams, then update it
+        move    a1,x:(r2)+
+        or      y1,b                    ; ams | previous
         jeq     rt5_am_walk_next
         jsr     rt5_am_apply_channel
 rt5_am_walk_next:
@@ -6123,71 +6119,6 @@ rt5_am_walk_next:
         nop
 rt5_am_walk_done:
         rts
-
-; Apply one channel's AM multiplier (sensitivity in y1, channel number in
-; x:rt5_lfo_am_channel) to its four live gain pairs. Logical operators
-; M1,C1,M2,C2 read their AM-enable bits from raw D1R rows 0,2,1,3.
-rt5_am_apply_channel:
-        move    #>rt5_am_mult,a
-        add     y1,a
-        move    a1,r1
-        nop
-        move    x:(r1),a
-        move    a1,x:rt5_lfo_am_mult_ch ; channel multiplier
-        clr     b
-        move    b1,x:rt5_lfo_am_op
-        do      #4,rt5_am_apply_done
-        ; raw D1R row for this logical operator
-        move    x:rt5_lfo_am_op,b
-        move    #>rt5_am_d1r_rows,a
-        add     b,a
-        move    a1,r1
-        nop
-        movem   p:(r1),a                ; raw row * 8
-        move    x:rt5_lfo_am_channel,b
-        move    b1,x0
-        add     x0,a
-        move    #>ym_regdata+$a0,x0
-        add     x0,a
-        move    a1,r2
-        move    #>$7fffff,x1            ; unity unless AM-enabled
-        move    y1,b
-        tst     b
-        jeq     rt5_am_apply_scale
-        move    x:(r2),b
-        jclr    #7,b1,rt5_am_apply_scale
-        move    x:rt5_lfo_am_mult_ch,x1
-rt5_am_apply_scale:
-        ; channel-major live slot = channel*4 + logical operator
-        move    x:rt5_lfo_am_channel,b
-        asl     b
-        asl     b
-        move    x:rt5_lfo_am_op,a
-        add     b,a
-        move    a1,n1
-        move    a1,n2
-        move    #rt5_operator_gain_base_out,r1
-        move    #rt5_operator_gain_out,r2
-        nop
-        move    x:(r1+n1),x0
-        mpy     x0,x1,a
-        move    a1,x:(r2+n2)
-        move    #rt5_operator_gain_base_mod,r1
-        move    #rt5_operator_gain_mod,r2
-        nop
-        move    x:(r1+n1),x0
-        mpy     x0,x1,a
-        move    a1,x:(r2+n2)
-        move    x:rt5_lfo_am_op,b
-        move    #>1,x0
-        add     x0,b
-        move    b1,x:rt5_lfo_am_op
-        nop
-rt5_am_apply_done:
-        rts
-
-rt5_am_d1r_rows:
-        dc      0,16,8,24               ; logical M1,C1,M2,C2 raw row * 8
 
 ; The playback start handler runs once per stream, so it rides the
 ; island; the all-carrier feedback stage it displaced stays hot.
@@ -6476,6 +6407,21 @@ rt5_noise_decode_off:
 ; full block, so the pan streams, the common ring, the noise LFSR, and
 ; the boundary dumps stay exactly where the whole-block path leaves them.
 rt5_render_split_block:
+        ; Segments share the block's stream flags, so a silent period's
+        ; block zeroes both planar streams once here and raises the flags
+        ; for every segment: the emit then adds real zeros, as before.
+        move    x:rt5_pcm_present,a
+        tst     a
+        jne     rt5_split_streams_ready
+        move    x:rt5_pan_left_base,r1
+        move    x:rt5_pan_right_base,r7
+        do      #DSP_RT5_BLOCK_FRAMES,rt5_split_streams_cleared
+        move    a,x:(r1)+ a,y:(r7)+
+rt5_split_streams_cleared:
+        move    #>1,a
+rt5_split_streams_ready:
+        move    a1,x:rt5_pan_left_written
+        move    a1,x:rt5_pan_right_written
         ; Recover the block-start clock and DDA remainder from the advanced
         ; state: the support pass added 13 mod 1007 to the remainder and
         ; 61 or 62 to the clock.
@@ -6848,6 +6794,7 @@ rt5_runtime_pitch_loop:
         move    #>$30,x0
         cmp     x0,a
         jlt     rt5_runtime_pitch_loop
+        jsr     rt5_pitch_flush
 
         ; Decode all total levels, which also builds the two initial AM gain
         ; arrays from the released envelope levels.
@@ -7060,7 +7007,7 @@ rt5_event_decode_kc:
         move    #>$3f,x0
         and     x0,a
         move    a1,y0                   ; stored key fraction
-        jmp     rt5_rebuild_channel_pitch
+        jmp     rt5_pitch_mark_dirty
 
         ; KF writes reread the stored KC and rebuild the same four
         ; increments through the shared pitch path.
@@ -7079,7 +7026,7 @@ rt5_event_decode_kf:
         and     x0,a
         move    a1,y0                   ; written key fraction
         move    x:(r0+n0),b             ; b1 = stored key code
-        jmp     rt5_rebuild_channel_pitch
+        jmp     rt5_pitch_mark_dirty
 
         ; DT2/D2R writes decode their envelope rate first, then rebuild the
         ; channel's four increments from the stored KC/KF because the coarse
@@ -7110,9 +7057,11 @@ rt5_event_decode_dt2:
         move    #>$3f,x0
         and     x0,a
         move    a1,y0                   ; stored key fraction
+        jmp     rt5_pitch_mark_dirty
 
         ; Shared pitch rebuild: n1 = channel, b1 = KC, y0 = KF fraction,
-        ; r0 = the register image. The gap-removed position (note row plus
+        ; r0 = the register image. Reached only through rt5_pitch_flush,
+        ; once per marked channel and drain. The gap-removed position (note row plus
         ; fraction) is shared by the channel; each operator folds its DT2
         ; coarse delta in 1/64-semitone units into that position with
         ; ymfm's single-overflow block adjust and top-entry clamp, shifts
@@ -7747,7 +7696,7 @@ rt5_env_tl_gain:
 ; before the new entry is stored, so no write is ever dropped or reordered.
 ; Cold by construction (runs only between refills), so it lives in the
 ; island's tail gap below the phys $2b00 arrays.
-        org     p:$2cc0
+        org     p:$2ac0
 ssi_stream_write_realtime:
         move    x:ym_queue_count,a
         move    #>32,x0
@@ -7791,56 +7740,6 @@ ssi_stream_write_defer:
         move    a1,x:ym_queue_count
         rts
 
-; The realtime block receiver is cold and lives in the final P-memory gap. Its
-; low-memory entry point sends READY and jumps here, leaving the hot render code
-; below the generated-table boundary at P:$1400. Batched writes enter the same
-; rolling queue as the former live-write transactions, in the same order and at
-; the same current synthesis timestamp; the next render drains them at frame 0.
-; Event words first land across both contiguous profile-only event arrays so
-; the blind TOS bulk sender sees a short receive loop; they are queued only
-; after all PCM arrived.
-        org     p:$2acb
-rt5_receive_runtime_pcm_cold:
-        jclr    #0,x:m_hsr,*
-        movep   x:m_hrx,a
-        move    a1,x:rt5_checksum       ; profile checksum is inactive in production
-        move    a1,x:rt5_event_count
-        tst     a
-        jeq     rt5_receive_runtime_events_done
-        move    #rt5_burst_events,r2
-        do      a1,rt5_receive_runtime_events_done
-        jclr    #0,x:m_hsr,*
-        movep   x:m_hrx,x1
-        move    x1,x:(r2)+
-rt5_receive_runtime_events_done:
-
-        ; Event decode borrows the address registers, so recover the planar
-        ; destinations published by both the start and refill callers.
-        move    x:rt5_pan_left_base,r1
-        move    x:rt5_pan_right_base,r7
-        jclr    #0,x:m_hsr,*
-        movep   x:m_hrx,x0             ; global PCM8 pan
-        do      #DSP_RT_MIX_FRAME_COUNT,rt5_receive_runtime_pcm_done
-        jclr    #0,x:m_hsr,*
-        movep   x:m_hrx,a
-        move    x:rt5_pcm_previous,b
-        move    a1,x:rt5_pcm_previous
-        add     b,a
-        asr     a                       ; 2-tap anti-image FIR at 32.780 kHz
-        rep     #8
-        asl     a
-        clr     b
-        jclr    #0,x0,rt5_receive_runtime_left_done
-        move    a1,b
-rt5_receive_runtime_left_done:
-        move    b1,x:(r1)+
-        clr     b
-        jclr    #1,x0,rt5_receive_runtime_right_done
-        move    a1,b
-rt5_receive_runtime_right_done:
-        move    b1,y:(r7)+
-rt5_receive_runtime_pcm_done:
-        rts
 
         ; Generated program-memory noise jump tables and external-Y exact
         ; renderer reservations. No P code follows this include.
@@ -8234,6 +8133,9 @@ rt5_receive_early_events_done:
         move    x:rt5_pan_right_base,r7
         jsr     rt5_early_wait_host
         movep   x:m_hrx,x0             ; global PCM8 pan
+        jset    #DSP_RT_PCM_SILENT_BIT,x0,rt5_pcm_silent_early
+        move    #>1,a
+        move    a1,x:rt5_pcm_present
         do      #DSP_RT_MIX_FRAME_COUNT,rt5_receive_early_pcm_done
         jsr     rt5_early_wait_host
         movep   x:m_hrx,a
@@ -8274,5 +8176,504 @@ rt5_early_wait_host:
 rt5_early_wait_data:
         jclr    #0,x:m_hsr,rt5_early_wait_host
         rts
+
+; Silent PCM periods. A host period with no active PDX voice sets
+; DSP_RT_PCM_SILENT_BIT in its pan word and sends no sample words at all.
+; Normally nothing is written: rt5_pcm_present is cleared, every block then
+; starts with both stream flags clear, one-sided carriers write instead of
+; accumulating, and the stereo emit never reads a stream nothing touched -
+; bit-identical to adding the 512 zeros, at no per-frame cost. Only when the
+; previous period ended on a nonzero host point does the two-tap anti-image
+; filter still owe frame 0 half of it: that one period keeps the explicit
+; zero block, with frame 0 run through the ordinary receive arithmetic on a
+; zero sample, and counts as present. Either way the 68030 skips a 512-word
+; paced blast and the DSP its per-word receive loop, roughly 45 instruction
+; cycles per frame on an FM-only song.
+; In: r1/r7 = planar left/right destinations, x0 = pan word. Leaves a = 0
+; and preserves x0.
+rt5_pcm_silent_head:
+        clr     a                       ; the host point is zero
+        move    x:rt5_pcm_previous,b
+        move    a1,x:rt5_pcm_previous
+        add     b,a
+        asr     a                       ; 2-tap anti-image FIR at 32.780 kHz
+        rep     #8
+        asl     a
+        clr     b
+        jclr    #0,x0,rt5_pcm_silent_head_left
+        move    a1,b
+rt5_pcm_silent_head_left:
+        move    b1,x:(r1)+
+        clr     b
+        jclr    #1,x0,rt5_pcm_silent_head_right
+        move    a1,b
+rt5_pcm_silent_head_right:
+        move    b1,y:(r7)+
+        clr     a
+        rts
+
+; Stream-loop receive: nothing plays from the target half yet, so the
+; remaining frames fill in one pass.
+rt5_pcm_silent_cold:
+        move    x:rt5_pcm_previous,a
+        tst     a
+        jne     rt5_pcm_silent_cold_tail
+        move    a1,x:rt5_pcm_present    ; streams stay untouched and unread
+        rts
+rt5_pcm_silent_cold_tail:
+        jsr     rt5_pcm_silent_head
+        do      #DSP_RT_MIX_FRAME_COUNT-1,rt5_pcm_silent_cold_done
+        move    a,x:(r1)+ a,y:(r7)+
+rt5_pcm_silent_cold_done:
+        move    #>1,a
+        move    a1,x:rt5_pcm_present
+        rts
+
+; Early-accept receive: the fill runs inside the previous period's boundary
+; wait, so it keeps the boundary-aware contract of rt5_early_wait_host by
+; testing the r6 wrap against the active base in y1 between 32-frame
+; chunks and performing the handoff in place; the caller's acknowledgement
+; wait covers a wrap after the last chunk. x0 rides in y0 across the switch
+; exactly as in the per-word path.
+rt5_pcm_silent_early:
+        move    x:rt5_pcm_previous,a
+        tst     a
+        jne     rt5_pcm_silent_early_tail
+        move    a1,x:rt5_pcm_present    ; streams stay untouched and unread
+        rts
+rt5_pcm_silent_early_tail:
+        jsr     rt5_pcm_silent_head
+        do      #31,rt5_pcm_silent_early_first
+        move    a,x:(r1)+ a,y:(r7)+
+rt5_pcm_silent_early_first:
+        do      #DSP_RT_MIX_FRAME_COUNT/32-1,rt5_pcm_silent_early_done
+        move    r6,a
+        cmp     y1,a
+        jne     rt5_pcm_silent_early_chunk
+        move    x0,y0
+        jsr     rt5_perform_handoff
+        move    y0,x0
+        move    #>1,a
+        move    a1,x:rt5_pending_switched
+rt5_pcm_silent_early_chunk:
+        clr     a
+        do      #32,rt5_pcm_silent_early_chunk_done
+        move    a,x:(r1)+ a,y:(r7)+
+rt5_pcm_silent_early_chunk_done:
+        nop
+rt5_pcm_silent_early_done:
+        move    #>1,a
+        move    a1,x:rt5_pcm_present
+        rts
+
+; Apply one channel's AM multiplier (sensitivity in y1, channel number in
+; x:rt5_lfo_am_channel) to its four live gain pairs. Logical operators
+; M1,C1,M2,C2 read their AM-enable bits from raw D1R rows 0,2,1,3; the
+; row pointer steps +16, -8, +16 through them while four post-incremented
+; pointers walk the channel-major gain arrays, unrolled once per operator.
+; A zero sensitivity selects the unity multiplier, restoring the base pair.
+; Preserves the walk's r1/r2/y0 and the render's n4; scratches
+; r0/r3/r4/r5/r7, n0/n3/n5/n7, x0/x1/a/b. Wrap-free under the runtime modifiers: each gain array is
+; 32 words inside a 64-aligned block and the modulation array inside its
+; 256-aligned block, and the D1R rows ride the linear r4.
+rt5_am_apply_channel:
+        move    n4,x:rt5_lfo_am_op      ; n4 is the render's persistent
+                                        ; dispatch offset: park it here
+        move    #>rt5_am_mult,a
+        add     y1,a
+        move    a1,r3
+        move    x:rt5_lfo_am_channel,b
+        move    b1,n4                   ; channel offset inside each D1R row
+        move    x:(r3),a
+        move    a1,x:rt5_lfo_am_mult_ch ; channel multiplier
+        asl     b
+        asl     b
+        move    b1,n3                   ; channel-major slot base = channel*4
+        move    b1,n5                   ; (Rn)+Nn pairs each pointer with its
+        move    b1,n7                   ; own offset register)
+        move    b1,n0
+        move    #rt5_operator_gain_base_out,r3
+        move    #rt5_operator_gain_out,r5
+        move    #rt5_operator_gain_base_mod,r7
+        move    #rt5_operator_gain_mod,r0
+        move    #ym_regdata+$a0,r4
+        lua     (r3)+n3,r3
+        lua     (r5)+n5,r5
+        lua     (r7)+n7,r7
+        lua     (r0)+n0,r0
+        lua     (r4)+n4,r4              ; raw D1R row 0 of this channel
+        move    #>$7fffff,b             ; unity, applied unless AM-enabled
+        ; M1: raw row 0
+        move    x:(r4),a
+        move    b1,x1
+        jclr    #7,a1,rt5_am_apply_m1
+        move    x:rt5_lfo_am_mult_ch,x1
+rt5_am_apply_m1:
+        move    x:(r3)+,x0
+        mpy     x0,x1,a
+        move    a1,x:(r5)+
+        move    #16,n4              ; row step, loaded ahead of the lua
+        move    x:(r7)+,x0
+        mpy     x0,x1,a
+        lua     (r4)+n4,r4              ; next row, a slot ahead of its read
+        move    a1,x:(r0)+
+        ; C1: raw row 2
+        move    x:(r4),a
+        move    b1,x1
+        jclr    #7,a1,rt5_am_apply_c1
+        move    x:rt5_lfo_am_mult_ch,x1
+rt5_am_apply_c1:
+        move    x:(r3)+,x0
+        mpy     x0,x1,a
+        move    a1,x:(r5)+
+        move    #8,n4              ; row step, loaded ahead of the lua
+        move    x:(r7)+,x0
+        mpy     x0,x1,a
+        lua     (r4)-n4,r4              ; next row, a slot ahead of its read
+        move    a1,x:(r0)+
+        ; M2: raw row 1
+        move    x:(r4),a
+        move    b1,x1
+        jclr    #7,a1,rt5_am_apply_m2
+        move    x:rt5_lfo_am_mult_ch,x1
+rt5_am_apply_m2:
+        move    x:(r3)+,x0
+        mpy     x0,x1,a
+        move    a1,x:(r5)+
+        move    #16,n4              ; row step, loaded ahead of the lua
+        move    x:(r7)+,x0
+        mpy     x0,x1,a
+        lua     (r4)+n4,r4              ; next row, a slot ahead of its read
+        move    a1,x:(r0)+
+        ; C2: raw row 3
+        move    x:(r4),a
+        move    b1,x1
+        jclr    #7,a1,rt5_am_apply_c2
+        move    x:rt5_lfo_am_mult_ch,x1
+rt5_am_apply_c2:
+        move    x:(r3)+,x0
+        mpy     x0,x1,a
+        move    a1,x:(r5)+
+        move    x:(r7)+,x0
+        mpy     x0,x1,a
+        move    a1,x:(r0)+
+        move    x:rt5_lfo_am_op,n4
+        rts
+
+; Deferred pitch rebuild. The pitch-bearing decoders end here with the
+; channel in n1: the channel is marked and the rebuild waits for the end of
+; the drain, where every marked channel is rebuilt exactly once from the
+; final register image. Output is identical to rebuilding after each write,
+; because the increments depend only on that image, and no consumer reads
+; them between the writes of one drain and its flush. r1 is free at every
+; decode tail (the drains reload their queue pointers per entry).
+rt5_pitch_mark_dirty:
+        move    #rt5_pitch_dirty,r1
+        move    #>1,a
+        move    a1,x:rt5_pitch_dirty_any
+        move    a1,x:(r1+n1)
+        rts
+
+; Rebuild every marked channel: n1 = channel, b1 = its KC, y0 = its KF
+; fraction and r0 = the register image, exactly as the former immediate
+; KC decode presented them. A clean drain costs one test.
+rt5_pitch_flush:
+        move    x:rt5_pitch_dirty_any,a
+        tst     a
+        jeq     rt5_pitch_flush_done
+        clr     a
+        move    a1,x:rt5_pitch_dirty_any
+        move    a1,x:rt5_pitch_flush_channel
+rt5_pitch_flush_next:
+        move    x:rt5_pitch_flush_channel,a
+        move    a1,n1
+        move    #rt5_pitch_dirty,r1
+        move    #ym_regdata,r0
+        move    x:(r1+n1),b
+        tst     b
+        jeq     rt5_pitch_flush_skip
+        clr     b
+        move    b1,x:(r1+n1)
+        move    a1,b
+        move    #>$28,x0
+        add     x0,b
+        move    b1,n0
+        move    #>$30,x0
+        add     x0,a
+        move    x:(r0+n0),b             ; stored key code
+        move    a1,n0
+        nop
+        move    x:(r0+n0),a
+        rep     #2
+        lsr     a
+        move    #>$3f,x0
+        and     x0,a
+        move    a1,y0                   ; stored key fraction
+        jsr     rt5_rebuild_channel_pitch
+rt5_pitch_flush_skip:
+        move    x:rt5_pitch_flush_channel,a
+        move    #>1,x0
+        add     x0,a
+        move    a1,x:rt5_pitch_flush_channel
+        move    #>8,x0
+        cmp     x0,a
+        jlt     rt5_pitch_flush_next
+rt5_pitch_flush_done:
+        rts
+
+; Stereo emit of one rendered block into the walking SSI output. The common
+; ring is internal, so a second read of the same word costs nothing: it
+; lands in B beside the left add in place of the accumulator copy, and the
+; left store shares an instruction with the right fetch (r2 in the X bank,
+; r7 in the Y bank). Four passes cover the combinations of planar streams
+; written this block: a stream neither host samples nor a one-sided carrier
+; touched is never read, both channels then take the ring alone, and a
+; skipped stream still advances its base by the block so the period's
+; planar layout stays aligned. Every pass stores the full accumulator, so
+; the output is bit-identical to adding the zeros a skipped stream would
+; have held; the pass costs nine, seven, seven or five cycles per frame.
+rt5_runtime_emit:
+        move    #rt5_mix_ring,r4
+        move    x:rt5_pan_left_base,r1
+        move    x:rt5_pan_right_base,r7
+        move    x:rt5_runtime_output,r2
+        move    y:rt5_mix_written,a
+        tst     a
+        jne     rt5_runtime_ring_ready
+        clr     a
+        do      #DSP_RT5_BLOCK_FRAMES,rt5_runtime_ring_cleared
+        move    a1,y:(r4)+
+rt5_runtime_ring_cleared:
+        move    #rt5_mix_ring,r4
+rt5_runtime_ring_ready:
+        move    #DSP_RT5_BLOCK_FRAMES,n1
+        move    #DSP_RT5_BLOCK_FRAMES,n7
+        move    x:rt5_pan_left_written,a
+        tst     a
+        jeq     rt5_runtime_emit_no_left
+        move    x:rt5_pan_right_written,a
+        tst     a
+        jeq     rt5_runtime_emit_left
+        do      #DSP_RT5_BLOCK_FRAMES,rt5_runtime_stereo_done
+        move    x:(r1)+,x0 y:(r4),a
+        add     x0,a y:(r4)+,b
+        move    a,x:(r2)+ y:(r7)+,y0
+        add     y0,b
+        move    b,x:(r2)+
+rt5_runtime_stereo_done:
+        jmp     rt5_runtime_emit_done
+rt5_runtime_emit_left:
+        do      #DSP_RT5_BLOCK_FRAMES,rt5_runtime_emit_left_done
+        move    x:(r1)+,x0 y:(r4),a
+        add     x0,a y:(r4)+,b
+        move    a,x:(r2)+
+        move    b,x:(r2)+
+rt5_runtime_emit_left_done:
+        lua     (r7)+n7,r7
+        jmp     rt5_runtime_emit_done
+rt5_runtime_emit_no_left:
+        move    x:rt5_pan_right_written,a
+        tst     a
+        jeq     rt5_runtime_emit_none
+        do      #DSP_RT5_BLOCK_FRAMES,rt5_runtime_emit_right_done
+        move    y:(r4)+,a
+        move    a,x:(r2)+ y:(r7)+,y0
+        add     y0,a
+        move    a,x:(r2)+
+rt5_runtime_emit_right_done:
+        lua     (r1)+n1,r1
+        jmp     rt5_runtime_emit_done
+rt5_runtime_emit_none:
+        do      #DSP_RT5_BLOCK_FRAMES,rt5_runtime_emit_none_done
+        move    y:(r4)+,a
+        move    a,x:(r2)+
+        move    a,x:(r2)+
+rt5_runtime_emit_none_done:
+        lua     (r1)+n1,r1
+        lua     (r7)+n7,r7
+rt5_runtime_emit_done:
+        move    r2,x:rt5_runtime_output
+        move    r1,x:rt5_pan_left_base
+        move    r7,x:rt5_pan_right_base
+        move    #63,m5
+        rts
+
+; The realtime block receiver is cold and lives in the second island. Its
+; low-memory entry point sends READY and jumps here, leaving the hot render code
+; below the generated-table boundary at P:$1400. Batched writes enter the same
+; rolling queue as the former live-write transactions, in the same order and at
+; the same current synthesis timestamp; the next render drains them at frame 0.
+; Event words first land across both contiguous profile-only event arrays so
+; the blind TOS bulk sender sees a short receive loop; they are queued only
+; after all PCM arrived.
+rt5_receive_runtime_pcm_cold:
+        jclr    #0,x:m_hsr,*
+        movep   x:m_hrx,a
+        move    a1,x:rt5_checksum       ; profile checksum is inactive in production
+        move    a1,x:rt5_event_count
+        tst     a
+        jeq     rt5_receive_runtime_events_done
+        move    #rt5_burst_events,r2
+        do      a1,rt5_receive_runtime_events_done
+        jclr    #0,x:m_hsr,*
+        movep   x:m_hrx,x1
+        move    x1,x:(r2)+
+rt5_receive_runtime_events_done:
+
+        ; Event decode borrows the address registers, so recover the planar
+        ; destinations published by both the start and refill callers.
+        move    x:rt5_pan_left_base,r1
+        move    x:rt5_pan_right_base,r7
+        jclr    #0,x:m_hsr,*
+        movep   x:m_hrx,x0             ; global PCM8 pan
+        jset    #DSP_RT_PCM_SILENT_BIT,x0,rt5_pcm_silent_cold
+        move    #>1,a
+        move    a1,x:rt5_pcm_present
+        do      #DSP_RT_MIX_FRAME_COUNT,rt5_receive_runtime_pcm_done
+        jclr    #0,x:m_hsr,*
+        movep   x:m_hrx,a
+        move    x:rt5_pcm_previous,b
+        move    a1,x:rt5_pcm_previous
+        add     b,a
+        asr     a                       ; 2-tap anti-image FIR at 32.780 kHz
+        rep     #8
+        asl     a
+        clr     b
+        jclr    #0,x0,rt5_receive_runtime_left_done
+        move    a1,b
+rt5_receive_runtime_left_done:
+        move    b1,x:(r1)+
+        clr     b
+        jclr    #1,x0,rt5_receive_runtime_right_done
+        move    a1,b
+rt5_receive_runtime_right_done:
+        move    b1,y:(r7)+
+rt5_receive_runtime_pcm_done:
+        rts
+
+; Algorithm 4: (O1 -> O2) + (O3 -> O4). Each branch routes its own carrier;
+; the O1 and O3 modulation rings can therefore reuse the same internal X line.
+; The channel's pan class is decoded once for both carriers: the first takes
+; its stream's write-first prologue exactly as rt5_route_carrier would, and
+; the second accumulates directly, since that prologue has raised the flag.
+rt5_render_algorithm4:
+        move    #>RT5_MOD_GAIN_OFFSET,n7
+        move    y:(r2+n2),x1
+        jsr     rt5_feedback_write_x
+rt5_render_algorithm4_tail:
+        move    #>RT5_OUT_GAIN_OFFSET,n7
+        move    #>RT5_INC_OP2_POST,n2
+        move    x:(r7+n7),y0
+        move    y:(r2+n2),x1
+        move    x:rt5_current_channel_control,a
+        jclr    #22,a1,rt5_alg4_no_left
+        jclr    #23,a1,rt5_alg4_left
+        move    n6,r1
+        move    n6,r5
+        jsr     rt5_serial_mix_common
+        jsr     rt5_alg4_branch
+        move    n6,r1
+        move    n6,r5
+        jmp     rt5_serial_accumulate_x
+rt5_alg4_no_left:
+        jclr    #23,a1,rt5_alg4_mute
+        jsr     rt5_route_right
+        jsr     rt5_alg4_branch
+        move    x:rt5_pan_right_base,r1
+        move    x:rt5_pan_right_base,r5
+        jmp     rt5_serial_accumulate_x
+rt5_alg4_left:
+        jsr     rt5_route_left
+        jsr     rt5_alg4_branch
+        move    x:rt5_pan_left_base,r1
+        move    x:rt5_pan_left_base,r5
+        jmp     rt5_serial_accumulate_left_x
+rt5_alg4_mute:
+        jsr     rt5_serial_transform_x
+        jsr     rt5_alg4_branch
+        jmp     rt5_serial_transform_x
+; The second branch: its modulator, then the O4 carrier preload.
+rt5_alg4_branch:
+        move    #>RT5_MOD_GAIN_OFFSET,n7
+        move    #>RT5_INC_OP3_POST,n2
+        move    x:(r7+n7),y0
+        move    y:(r2+n2),x1
+        jsr     rt5_independent_write_x
+        move    #>RT5_OUT_GAIN_OFFSET,n7
+        move    #>RT5_INC_OP4_POST,n2
+        move    x:(r7+n7),y0
+        move    y:(r2+n2),x1
+        rts
+
+; Algorithm 5: O1 modulates O2, O3, and O4 in parallel. Carrier routing only
+; reads the shared X modulation ring, so all three branches consume it intact.
+; As in algorithm 4, the pan class is decoded once: the first carrier runs the
+; write-first prologue, the other two accumulate with their bases reloaded.
+rt5_render_algorithm5:
+        move    #>RT5_MOD_GAIN_OFFSET,n7
+        move    y:(r2+n2),x1
+        jsr     rt5_feedback_write_x
+rt5_render_algorithm5_tail:
+        move    #>RT5_OUT_GAIN_OFFSET,n7
+        move    #>RT5_INC_OP2_POST,n2
+        move    x:(r7+n7),y0
+        move    y:(r2+n2),x1
+        move    x:rt5_current_channel_control,a
+        jclr    #22,a1,rt5_alg5_no_left
+        jclr    #23,a1,rt5_alg5_left
+        move    n6,r1
+        move    n6,r5
+        jsr     rt5_serial_mix_common
+        move    #>RT5_INC_OP3_POST,n2
+        move    x:(r7+n7),y0
+        move    y:(r2+n2),x1
+        move    n6,r1
+        move    n6,r5
+        jsr     rt5_serial_accumulate_x
+        move    #>RT5_INC_OP4_POST,n2
+        move    x:(r7+n7),y0
+        move    y:(r2+n2),x1
+        move    n6,r1
+        move    n6,r5
+        jmp     rt5_serial_accumulate_x
+rt5_alg5_no_left:
+        jclr    #23,a1,rt5_alg5_mute
+        jsr     rt5_route_right
+        move    #>RT5_INC_OP3_POST,n2
+        move    x:(r7+n7),y0
+        move    y:(r2+n2),x1
+        move    x:rt5_pan_right_base,r1
+        move    x:rt5_pan_right_base,r5
+        jsr     rt5_serial_accumulate_x
+        move    #>RT5_INC_OP4_POST,n2
+        move    x:(r7+n7),y0
+        move    y:(r2+n2),x1
+        move    x:rt5_pan_right_base,r1
+        move    x:rt5_pan_right_base,r5
+        jmp     rt5_serial_accumulate_x
+rt5_alg5_left:
+        jsr     rt5_route_left
+        move    #>RT5_INC_OP3_POST,n2
+        move    x:(r7+n7),y0
+        move    y:(r2+n2),x1
+        move    x:rt5_pan_left_base,r1
+        move    x:rt5_pan_left_base,r5
+        jsr     rt5_serial_accumulate_left_x
+        move    #>RT5_INC_OP4_POST,n2
+        move    x:(r7+n7),y0
+        move    y:(r2+n2),x1
+        move    x:rt5_pan_left_base,r1
+        move    x:rt5_pan_left_base,r5
+        jmp     rt5_serial_accumulate_left_x
+rt5_alg5_mute:
+        jsr     rt5_serial_transform_x
+        move    #>RT5_INC_OP3_POST,n2
+        move    x:(r7+n7),y0
+        move    y:(r2+n2),x1
+        jsr     rt5_serial_transform_x
+        move    #>RT5_INC_OP4_POST,n2
+        move    x:(r7+n7),y0
+        move    y:(r2+n2),x1
+        jmp     rt5_serial_transform_x
 
         end
