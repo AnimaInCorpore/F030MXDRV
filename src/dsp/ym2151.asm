@@ -494,6 +494,10 @@ rt5_noise_gain:
         ds      1
 rt5_pcm_previous:
         ds      1                       ; previous host PCM point for 2-tap FIR
+; The burst commit walks r2 through ssi_stream_write_realtime; its slow
+; path decodes queued writes, which scratch r2, so it parks the walker here.
+ym_queue_saved_r2:
+        ds      1
 
 ; Sub-block event-split bookkeeping, touched only while a block renders in
 ; segments: the block-start native clock and DDA remainder, the walking
@@ -7743,21 +7747,30 @@ rt5_env_tl_gain:
 ; before the new entry is stored, so no write is ever dropped or reordered.
 ; Cold by construction (runs only between refills), so it lives in the
 ; island's tail gap below the phys $2b00 arrays.
-        org     p:$2aa4
+        org     p:$2cc0
 ssi_stream_write_realtime:
         move    x:ym_queue_count,a
         move    #>32,x0
         cmp     x0,a
         jlt     ssi_stream_write_defer
+        ; Full queue: drain what is due, then store or apply the new write.
+        ; The decoders behind the drain scratch r2, which the burst commit
+        ; (rt5_commit_runtime_events) is walking through its staged events,
+        ; so r2 is parked across this path; a burst longer than the queue
+        ; used to lose every event after the 32nd to a stale walker.
+        move    r2,x:ym_queue_saved_r2
         move    x1,x:ym_queue_timestamp
         jsr     rt5_service_transport_event
         move    x:ym_queue_timestamp,x1
         move    x:ym_queue_count,a
         move    #>32,x0
         cmp     x0,a
-        jlt     ssi_stream_write_defer
+        jlt     ssi_stream_write_restore_defer
         jsr     rt5_apply_packed_write  ; queue held only future entries:
-        rts                             ; apply immediately as before
+        move    x:ym_queue_saved_r2,r2  ; apply immediately as before
+        rts
+ssi_stream_write_restore_defer:
+        move    x:ym_queue_saved_r2,r2
 ssi_stream_write_defer:
         move    x:ym_queue_read_index,a
         move    x:ym_queue_count,x0
