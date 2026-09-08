@@ -59,12 +59,12 @@ All eleven bracketed profile reports are byte-identical between the two builds:
 | `profile-dsp-rt2` | 37.75 per codec frame (301.98 projected) | 326.27 | 0.93x |
 | `profile-dsp-rt3` | 37.70 per codec frame (301.61 projected) | 326.27 | 0.92x |
 | `profile-dsp-rt4-alg1..6` | 35.98-39.05 per codec frame (287.86-312.37 projected) | 326.27 | 0.88-0.96x |
-| `profile-dsp-rt5` | 342.89 per codec frame | 489.40 | 0.71x |
+| `profile-dsp-rt5` | 331.69 per codec frame | 489.40 | 0.68x |
 
 This is the expected result and it is worth stating plainly: the static budget
 analysis in [`dsp56001-notes.md`](dsp56001-notes.md) was never inflated by the
 emulator. `489.40 = 32,084,988 / 2 / 32,779.95` is the hardware's 16 MIPS, so
-the rt5 figure of 342.89 cycles per frame with 29.9% spare is a
+the rt5 figure of 331.69 cycles per frame with 32.2% spare is a
 statement about a real Falcon. Only the *emulated machine* was twice as fast as
 the one those numbers describe.
 
@@ -115,13 +115,17 @@ bracketed `profile-dsp-rt*` windows exclude. Xevious, 16 MHz 68030:
 
 ```
   instruction cycles per codec frame (budget 489.40):
-    synthesis and transport:    426.76     87.2% of budget
-    stalled on the host port:     0.45      0.1% of budget
-    idle at the SSI boundary:    66.00     13.5% of budget
+    synthesis and transport:    391.74     80.0% of budget
+    stalled on the host port:     0.44      0.1% of budget
+    idle at the SSI boundary:    97.22     19.9% of budget
 
-  DSP occupancy:              87.3% of real time
-  margin:                     62.18 cycles per frame
+  DSP occupancy:              80.1% of real time
+  margin:                     97.23 cycles per frame
 ```
+
+(Before the eight-track work below, the same window read 426.76 work, 87.3%
+occupancy and a 62.18-cycle margin; the receive of an all-zero PCM period
+alone cost 28 of the difference.)
 
 With the early-accept pipeline the host-port stall is nearly gone: the
 payload transfer happens inside the previous period's boundary wait, so its
@@ -192,6 +196,80 @@ clock and the host port each accounted for roughly half the original deficit. Th
 control is not a host-side isolation — the calibrated build derives DSP cycles
 from CPU cycles, so doubling the CPU clock doubles the DSP too and reproduces
 stock behaviour. It confirms the mechanism rather than apportioning it.
+
+## Eight-track FM songs
+
+Two eight-track, FM-only MDX files from the same composer (`STAGE5.MDX` and
+`STAGE6.MDX`, kept outside the corpus) sounded blurry on the physical Falcon
+on 2026-09-08, STAGE5 from the first note and STAGE6 after a few seconds.
+The calibrated emulator reproduced the first case outright and explained the
+second: the DSP, not the host, was the wall. Its per-payload cost was
+measured with a variant of `profile_dsp_live.py` that plays any MDX through
+`AUTOPLAY.INF`, divides by the number of payloads actually rendered rather
+than by boundary catches (a receive that straddles the wrap hands off inside
+`rt5_early_wait_host`, never at `command_rt_refill_at_boundary`, so the
+profiler's period count undercounts on a busy song), and with a chain of
+one-handoff `dp save` snapshots that records every payload on its own.
+
+| song, calibrated 16 MHz | late boundaries | DSP work per payload | note |
+| --- | ---: | ---: | --- |
+| STAGE5, before | 314 of 846 (37.1%) | 518 cycles/frame, 106% | misses from the first second |
+| STAGE6, before | 0 of 1162 | 428 cycles/frame, 87% | no margin left for hardware |
+| STAGE5, after | 24 of 1135 (2.1%) | 400–430 typical, 480–517 at peaks | peaks are envelope and event bursts |
+| STAGE6, after | 0 of 1161 | 358 cycles/frame, 73% | |
+| Xevious `stock-audio`, after | 0 of 1109 | unchanged 1109 × 1024 | |
+
+Where the STAGE5 period went, per payload frame against the 489.40-cycle
+budget: carrier passes 152, feedback stages 76, receiving 512 PCM words that
+were all zero 46, envelope pass ~40, block AM ~36, per-block dispatch ~26,
+emit 9, the SSI interrupt 6. The host was never late: the boundary wait left
+through its "payload resident" test on all but one iteration per period.
+
+The changes, every one proven bit-identical by byte-equal capture vectors
+against the previous build and by the unchanged smoke mix checksum:
+
+- **Silent PCM periods send nothing** (protocol v25). A period with no active
+  PDX voice sets bit 2 of its pan word and carries no sample words; the 68030
+  skips a 512-word paced blast and the DSP its per-word receive loop, about
+  45 cycles per frame on an FM-only song. The DSP marks its planar streams
+  unwritten instead of zeroing them (see below) and synthesizes one explicit
+  zero block only when the two-tap filter still owes frame 0 half of the
+  previous period's last host point.
+- **Fused Y-ring carrier loops.** The R:Y class II move `y0,a a,y:(r5)+`
+  reloads the next modulation word beside the ring store, one instruction
+  per frame per both- or right-panned carrier; the gain rides in `x0`.
+- **Feedback stages store through the onward multiply.** The newest history
+  product lives in the X slot and ages into Y beside the sum, so the store
+  needs no instruction of its own: 11 instructions per frame become 10.
+- **AM pass rewritten** with walking pointers and one unrolled apply per
+  channel: about 20 cycles per frame less while the LFO is engaged.
+- **Write-first planar streams and four emit passes.** Each block seeds a
+  written flag per stream from the period's PCM state; the first one-sided
+  carrier of an unwritten stream stores, and the emit reads only written
+  streams (nine, seven, seven or five cycles per frame).
+- **Pitch rebuilds deferred to the end of each drain**, once per marked
+  channel. A voice load carries eight pitch-bearing writes; it used to pay
+  eight four-operator rebuilds of about 600 cycles each.
+- **Algorithms 4 and 5 decode the pan class once per channel**, not once
+  per carrier, from the second island.
+- **Burst-commit bug fixed.** When a period's batch exceeded the 32-entry
+  rolling queue, the full-queue path drained the due entries through the
+  decoders, which scratch `r2`, while `rt5_commit_runtime_events` was walking
+  `r2` through the staged burst; every write after the 32nd was replaced by
+  whatever the stale pointer addressed. STAGE5 batches reach 137 words,
+  STAGE6 38, Xevious 43. The walker is now parked across the drain.
+
+The `$17` profile checksum moved from `fe eb ad` to `fe eb 65`: it folds the
+packed dispatch word of channel 7, whose entry address moved by exactly 72
+words when algorithms 4 and 5 left the main stream, and by nothing else.
+
+What remains is measured, not guessed: the STAGE5 payloads that still miss
+are key-on and voice-load bursts where the envelope walk and gain rebuilds
+add 80–100 cycles per frame on top of a 400-cycle base. The envelope pass
+lives in internal P RAM, which is full to the last word, so the next step
+there is to move cold command-loop code out of that window first. Neither
+song has been played on the Falcon since these changes; the hardware verdict
+is still owed, and so is the soak.
 
 ## What this does not say
 

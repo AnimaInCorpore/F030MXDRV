@@ -18,6 +18,13 @@ supports bounded 9- and 16-track MDX execution, automatic PDX lookup, eight
 PCM voices, realtime FM/PDX mixing, interrupt-fed double buffering, two-loop
 playback, and fadeout.
 
+Dense eight-track FM songs fit the DSP budget as well: an FM-only period
+sends no PCM words (protocol v25's silent flag), the carrier, feedback and AM
+passes were fused bit-identically, pitch rebuilds are deferred to once per
+channel and drain, and a burst-commit bug that dropped every YM write after
+the 32nd of a period is fixed. The measured result is in
+[`docs/hatari-timing.md`](docs/hatari-timing.md#eight-track-fm-songs).
+
 Realtime playback holds its deadlines through a producer/consumer pipeline on
 both processors: the 68030 keeps one completed refill payload announced to
 the DSP and one queued behind it while it prepares a third, delivering the
@@ -60,15 +67,16 @@ The exact support boundary is documented in
 - Reproducible native-oracle, perceptual, smoke, stock-clock timing, endurance,
   and DSP-cycle gates.
 
-The integrated worst-case DSP profile measures 342.89 instruction cycles per
+The integrated worst-case DSP profile measures 331.69 instruction cycles per
 32.780 kHz frame against a 489.40-cycle budget. The exact scalar renderer costs
 12,271.21 cycles per native 62.5 kHz sample against a 256.68-cycle budget, so it
 is deliberately a test oracle rather than the production renderer.
 
 Measured on production material rather than on a bracketed fixture, the DSP
-now occupies 87.3% of that budget — 426.76 cycles of synthesis and transport
-plus 0.45 cycles stalled on the 68030 — leaving 62.18 cycles per frame. The
-rise from the pre-pipeline 407.59 cycles is the payload receive moving into the
+now occupies 80.1% of that budget — 391.74 cycles of synthesis and transport
+plus 0.44 cycles stalled on the 68030 — leaving 97.23 cycles per frame (it
+was 87.3% and 62.18 cycles before the eight-track FM work). The
+rise from the pre-pipeline 407.59 cycles was the payload receive moving into the
 previous period's boundary wait, where it counts as work rather than as a host
 stall; it is not new synthesis cost. See
 [`docs/hatari-timing.md`](docs/hatari-timing.md); it also explains why the
@@ -217,7 +225,7 @@ The 68030 owns the MXDRV-compatible API, file validation, track state, timing,
 and PDX decoding. The DSP owns YM2151 state, realtime FM synthesis, final PCM
 mixing, saturation, and SSI transport.
 
-Protocol v24 uses 24-bit host words. Production refills batch up to 224
+Protocol v25 uses 24-bit host words. Production refills batch up to 224
 coalesced YM writes and 512 mono PDX frames; the DSP stages those writes into a
 32-entry rolling event FIFO, renders sixteen 32-frame blocks, and switches the
 inactive 1024-word stereo SSI buffer at the next complete boundary. A
