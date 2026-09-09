@@ -95,6 +95,24 @@ The supported build flow expects a POSIX shell plus:
   [`docs/hatari-timing.md`](docs/hatari-timing.md), because stock Hatari runs
   the Falcon DSP at twice its hardware speed.
 
+On Windows that POSIX shell is MSYS2, and the build must run in its **UCRT64**
+environment rather than MINGW64: `rg` and the C++17 compiler are packaged
+there, and the two environments ship incompatible `libstdc++`/`libgcc`
+runtimes. If `/mingw64/bin` precedes `/ucrt64/bin` on `PATH`, the UCRT64-linked
+native oracles load the MINGW64 copies and segfault instead of reporting an
+error, which reads as a miscompiled oracle rather than as a search-path fault.
+
+Native GCC also resolves its temporary directory through `GetTempPath()`, which
+reads `TMP` and `TEMP` and ignores `TMPDIR`. Recipes that inherit neither fall
+back to the unwritable Windows directory, so export both to a writable
+Windows-style path:
+
+```sh
+export PATH="/c/msys64/ucrt64/bin:/c/msys64/usr/bin:$PATH"
+make --eval='export TMP := C:\Users\you\AppData\Local\Temp' \
+     --eval='export TEMP := C:\Users\you\AppData\Local\Temp' check
+```
+
 DOSBox is needed only to run Motorola's DOS `ASM56000` binary. The `dsptools`
 project carries `asm56000c`, the same 4.1.1 assembler ported to C under a 0BSD
 license, which would remove that dependency; it has not been evaluated here,
