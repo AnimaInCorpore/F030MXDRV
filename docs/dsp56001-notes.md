@@ -170,7 +170,19 @@ it into one `2^(-(am<<(AMS-1))/64)` multiplier per sensitivity through the
 envelope fraction table, and rescales the live gain pairs of every channel
 whose AMS is (or just stopped being) nonzero from AM-free base pairs;
 operators opt in through D1R bit 7 exactly as on chip. The same index byte
-feeds the block PM offset.
+feeds the block PM value: ymfm's `m_lfo_pm` from the waveform's signed PM
+shape times the `$19` depth, shifted per channel by PMS into a delta in
+1/64 semitones exactly as `compute_phase_step` does. Instead of looking the
+four phase steps up at the shifted position every block, the kernel
+multiplies the channel's PM-free base increments by `2^(delta/768)` from
+`rt5_pm_multiplier`, 1024 words at external `Y:$3800` divided out of the
+chip-verified phase-step table at every realtime start (`T[j]/(2*T[0])`,
+one octave down `T[j]/(4*T[0])`, 24-step `DIV`, exactly the truncated
+quotient). That reproduces the depth law of the same table and differs
+from ymfm only by the DT1 detune riding the multiplier, a fraction of a
+percent at PMS 7; the `lfo-pm` scenario grades the phase advance per
+quarter within 2%. The pass costs about 45 cycles per PM channel and block
+and skips entirely while the depth or the block's PM value is zero.
 
 The amplitude convention matches ymfm's relative levels: a full-volume
 operator peaks at 2^21 of the 0.23 domain — one quarter of the signed
@@ -438,8 +450,9 @@ five key on/off edges
 driving real attack/release state, one write from each of the four
 envelope-rate groups that rebuilds the live affine constants when its class
 matches the operator's ADSR state, LFO rate/depth/waveform writes, and
-Timer B plus timer control load/run/status handling. The scaled `$19` PM depth multiplies the
-low eight control bits into this block's signed increment offset, and
+Timer B plus timer control load/run/status handling. The `$19` PM depth
+and each channel's PMS drive the block PM multiplier pass described under
+the production path, and
 control bit 16 still selects full or 0.75 AM gain in all four stages.
 Full-accumulator moves invoke the DSP56001 limiter only after the complete
 mix. The exact 32-step Galois noise transform is applied through three
@@ -449,7 +462,7 @@ fill — so no noise-table words occupy the bounded P-memory image. Cleanup
 disables SSI, reads SSISR and writes TX to clear a latched underrun,
 restores the external Y map, and rebuilds the exact phase cache, including
 the internal-Y frequency-cache words the decoded multiplier/increment arrays
-overlay. The deterministic reply is `$feeb65`.
+overlay. The deterministic reply is `$984e55`.
 
 Decoded envelope curvature runs as a block-boundary pass at `P:$0080` in
 internal P RAM, where instruction fetches avoid the external-memory penalty.
@@ -473,15 +486,15 @@ live in the external island with the generated tables. The capture harness
 derives mid-block levels analytically from the same defining recurrence, so
 no mid-block state is stored.
 
-Hatari measures 2,717,214 instruction cycles for 8,192 frames over 256
-blocks, or 331.69 cycles per frame against the 489.40-cycle budget, leaving
-157.71 cycles (32.2%). The 169.38 ms modeled span fits its 249.91 ms period.
-Those 157.71 cycles are not all spare capacity. The window is bracketed between
+Hatari measures 2,757,432 instruction cycles for 8,192 frames over 256
+blocks, or 336.60 cycles per frame against the 489.40-cycle budget, leaving
+152.80 cycles (31.2%). The 171.88 ms modeled span fits its 249.91 ms period.
+Those 152.80 cycles are not all spare capacity. The window is bracketed between
 two render markers, so it excludes the SSI transmit interrupt, the host-port
 receive and the refill command; `make profile-dsp-live` measures the same DSP
-across 128 whole production periods of Xevious and finds 391.74 cycles per
+across 128 whole production periods of Xevious and finds 391.80 cycles per
 frame of synthesis and transport plus 0.44 stalled on the 68030, i.e. 80.1%
-occupancy and a 97.23-cycle margin. At the true 16 MIPS DSP clock the pipelined
+occupancy and a 97.16-cycle margin. At the true 16 MIPS DSP clock the pipelined
 Xevious run lands all 1,109 steady boundaries exactly 1024 words apart, down
 from 351 late of 759 before the optimization and 3 late of 1,103 after it. The
 misses that remained at that stage arrived from the 68030 roughly one third of

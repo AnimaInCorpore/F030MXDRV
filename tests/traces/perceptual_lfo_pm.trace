@@ -1,0 +1,22 @@
+# native sample  register  data
+# The sustained carrier of perceptual_lfo.trace with its AM switched off
+# (AMD 0, AMS 0) and its PM at the deepest setting (PMD 127, PMS 7): a
+# saw vibrato of almost an octave, graded on the operator's phase advance
+# per quarter against the oracle and on the audio spectrum, so a kernel
+# whose PM depth law differs from ymfm's is rejected.
+
+0 18 a8
+0 19 00
+0 19 ff
+0 1b 00
+0 38 70
+0 20 c7
+0 28 4c
+0 30 00
+0 58 01
+0 78 00
+0 98 1f
+0 b8 80
+0 d8 00
+0 f8 0f
+0 08 40

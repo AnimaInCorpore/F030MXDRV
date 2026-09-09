@@ -7,7 +7,7 @@ gate turns that relaxed boundary into deterministic data and pass/fail rules.
 
 ## Reference corpus
 
-`make check` generates 23 TSV files under
+`make check` generates 24 TSV files under
 `build/reference/ym2151-perceptual/`:
 
 - sustained pitch, non-aligned key/register-write timing, a complete ADSR
@@ -23,10 +23,13 @@ gate turns that relaxed boundary into deterministic data and pass/fail rules.
   sensitivity, returning to zero mid-note (`lfo-am-off`), graded on the
   whole-window spectrum and the closing quarter's amplitude, because a block
   AM pass that stops walking at zero depth leaves the last scaled gain pair
-  in place. PM is off there for a reason still open: with PMS 7 and PMD 127
-  the oracle's tone sweeps upward through the window while the kernel's
-  block PM offset barely moves it (dominant 16 Hz bins 37 to 43 against a
-  constant 33), so no scenario grades PM depth yet;
+  in place;
+- the same carrier with its AM off and its PM at the deepest setting, PMS 7
+  and PMD 127 (`lfo-pm`), a saw vibrato of almost an octave, graded on the
+  operator's phase advance per quarter against the oracle (within 2%) and
+  on the audio spectrum. Before the block PM multiplier pass the kernel's
+  PM offset barely moved the tone (dominant 16 Hz bins 37 to 43 in the
+  oracle against a constant 33), and nothing graded it;
 - algorithms 0-7 with operator-1 feedback level 4;
 - algorithm 0 at feedback levels 0 and 7; and
 - two real voices sustained at feedback level 7 for eighty 512-frame periods

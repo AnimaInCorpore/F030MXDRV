@@ -67,14 +67,14 @@ The exact support boundary is documented in
 - Reproducible native-oracle, perceptual, smoke, stock-clock timing, endurance,
   and DSP-cycle gates.
 
-The integrated worst-case DSP profile measures 331.69 instruction cycles per
+The integrated worst-case DSP profile measures 336.60 instruction cycles per
 32.780 kHz frame against a 489.40-cycle budget. The exact scalar renderer costs
 12,271.21 cycles per native 62.5 kHz sample against a 256.68-cycle budget, so it
 is deliberately a test oracle rather than the production renderer.
 
 Measured on production material rather than on a bracketed fixture, the DSP
-now occupies 80.1% of that budget — 391.74 cycles of synthesis and transport
-plus 0.44 cycles stalled on the 68030 — leaving 97.23 cycles per frame (it
+now occupies 80.1% of that budget — 391.80 cycles of synthesis and transport
+plus 0.44 cycles stalled on the 68030 — leaving 97.16 cycles per frame (it
 was 87.3% and 62.18 cycles before the eight-track FM work). The
 rise from the pre-pipeline 407.59 cycles was the payload receive moving into the
 previous period's boundary wait, where it counts as work rather than as a host

@@ -107,7 +107,7 @@ help:
 	@echo "  all              build the Falcon executables and DSP image"
 	@echo "  check            build everything and validate generated references"
 	@echo "  smoke            run the full non-interactive Hatari integration test"
-	@echo "  capture-realtime capture and compare all 23 perceptual scenarios"
+	@echo "  capture-realtime capture and compare all 24 perceptual scenarios"
 	@echo "  stock-audio      gate stock-clock SSI timing (needs Xevious corpus files)"
 	@echo "  endurance        play Xevious through two loops and fade under Hatari"
 	@echo "  endurance-batch  play every uppercase MDX in CORPUS_DIR under Hatari"
@@ -197,6 +197,7 @@ $(YM2151_PERCEPTUAL_STAMP): $(YM2151_ORACLE) \
 		tests/traces/noise_channel7_left.trace \
 		tests/traces/noise_channel7_right.trace \
 		tests/traces/perceptual_lfo_am_off.trace \
+		tests/traces/perceptual_lfo_pm.trace \
 		tests/traces/perceptual_pitch.trace \
 		tests/traces/perceptual_detune.trace \
 		tests/traces/perceptual_timing.trace \
@@ -233,6 +234,8 @@ $(YM2151_PERCEPTUAL_STAMP): $(YM2151_ORACLE) \
 			> $$output_dir/noise-right.tsv || exit 1; \
 		$(YM2151_ORACLE) $$mode tests/traces/perceptual_lfo_am_off.trace 8192 \
 			> $$output_dir/lfo-am-off.tsv || exit 1; \
+		$(YM2151_ORACLE) $$mode tests/traces/perceptual_lfo_pm.trace 8192 \
+			> $$output_dir/lfo-pm.tsv || exit 1; \
 		for algorithm in 0 1 2 3 4 5 6 7; do \
 			$(YM2151_ORACLE) $$mode tests/traces/perceptual_topology.trace 4096 \
 				--algorithm $$algorithm --feedback 4 \
@@ -526,7 +529,7 @@ smoke: check
 	@rg -q "Direct Transfer 0x01c5de" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x01c6c0" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x170000" build/hatari-smoke.trace
-	@rg -q "Transfer 0xfeeb65" build/hatari-smoke.trace
+	@rg -q "Transfer 0x984e55" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x01c6de" build/hatari-smoke.trace
 	@rg -q "XBIOS 0x80 Locksnd" build/hatari-smoke.trace
 	@rg -q "XBIOS 0x89 Dsptristate\\(0x1, 0x0\\)" build/hatari-smoke.trace

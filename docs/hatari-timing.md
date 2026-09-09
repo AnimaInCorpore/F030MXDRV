@@ -59,12 +59,12 @@ All eleven bracketed profile reports are byte-identical between the two builds:
 | `profile-dsp-rt2` | 37.75 per codec frame (301.98 projected) | 326.27 | 0.93x |
 | `profile-dsp-rt3` | 37.70 per codec frame (301.61 projected) | 326.27 | 0.92x |
 | `profile-dsp-rt4-alg1..6` | 35.98-39.05 per codec frame (287.86-312.37 projected) | 326.27 | 0.88-0.96x |
-| `profile-dsp-rt5` | 331.69 per codec frame | 489.40 | 0.68x |
+| `profile-dsp-rt5` | 336.60 per codec frame | 489.40 | 0.69x |
 
 This is the expected result and it is worth stating plainly: the static budget
 analysis in [`dsp56001-notes.md`](dsp56001-notes.md) was never inflated by the
 emulator. `489.40 = 32,084,988 / 2 / 32,779.95` is the hardware's 16 MIPS, so
-the rt5 figure of 331.69 cycles per frame with 32.2% spare is a
+the rt5 figure of 336.60 cycles per frame with 31.2% spare is a
 statement about a real Falcon. Only the *emulated machine* was twice as fast as
 the one those numbers describe.
 
@@ -95,7 +95,7 @@ punctuality and the capture path is blocking rather than real-time paced:
 | --- | --- | --- |
 | `check` | pass | pass (no emulator) |
 | `smoke` | pass | pass |
-| `capture-realtime` | pass | pass, 23/23 scenarios |
+| `capture-realtime` | pass | pass, 24/24 scenarios |
 | `endurance` | pass | pass |
 | `endurance-batch` | pass | pass, 19/19 corpus songs |
 | `stock-audio` | pass | pass — 0 missed boundaries with the pipeline |
@@ -115,12 +115,12 @@ bracketed `profile-dsp-rt*` windows exclude. Xevious, 16 MHz 68030:
 
 ```
   instruction cycles per codec frame (budget 489.40):
-    synthesis and transport:    391.74     80.0% of budget
+    synthesis and transport:    391.80     80.1% of budget
     stalled on the host port:     0.44      0.1% of budget
-    idle at the SSI boundary:    97.22     19.9% of budget
+    idle at the SSI boundary:    97.15     19.9% of budget
 
   DSP occupancy:              80.1% of real time
-  margin:                     97.23 cycles per frame
+  margin:                     97.16 cycles per frame
 ```
 
 (Before the eight-track work below, the same window read 426.76 work, 87.3%
@@ -276,10 +276,23 @@ depth returned to zero the pass stopped walking and every scaled gain pair
 stayed scaled - a sustained note fell from about ±8,192 to ±1. Fixing the
 noise path also exposed an older defect: right-only noise had always
 accumulated into X memory at the right stream's Y address, i.e. into the
-SSI buffers, and never reached the right output. The gate now has 23
+SSI buffers, and never reached the right output. The gate now has 24
 scenarios: `noise-left`, `noise-right` and `lfo-am-off` grade the panned
 noise level, its leak into the other output, and the amplitude after AM
 turns off.
+
+The vibrato depth came last. The kernel's PM had been a global linear
+increment offset, index times depth over 64, blind to PMS and to the pitch
+it moved, which at PMS 7 barely stirred a tone the oracle sweeps by almost
+an octave. It now derives ymfm's `m_lfo_pm` per block and multiplies each
+PM channel's base increments by `2^(delta/768)` from a table divided out of
+the phase-step table at start (see `dsp56001-notes.md`). The `lfo-pm`
+scenario holds the operator's phase advance within 2% of the oracle per
+quarter. The pass costs about 45 cycles per PM channel and block: STAGE5,
+which drives two channels with the OPM LFO, renders its typical payload at
+422 cycles per frame instead of 415 and misses 40 boundaries instead of 25;
+STAGE6 still misses none, and the rt5 profile gate rises from 331.69 to
+336.60 cycles per frame.
 
 What remains is measured, not guessed: the STAGE5 payloads that still miss
 are key-on and voice-load bursts where the envelope walk and gain rebuilds

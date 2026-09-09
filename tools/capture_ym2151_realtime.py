@@ -54,6 +54,9 @@ SCENARIOS: dict[str, tuple[str, int, int | None, int | None]] = {
     # AM depth, then AM sensitivity, return to zero on a sustained carrier;
     # the block AM pass must keep walking until every scaled pair is restored.
     "lfo-am-off": ("perceptual_lfo_am_off.trace", 8192, None, None),
+    # The same carrier under the deepest PM only, grading the vibrato depth
+    # law through the operator's phase advance and the audio spectrum.
+    "lfo-pm": ("perceptual_lfo_pm.trace", 8192, None, None),
     **{
         f"algorithm-{index}": ("perceptual_topology.trace", 4096, index, 4)
         for index in range(8)
@@ -91,10 +94,14 @@ STATE_RANGES: tuple[tuple[str, str, str, int], ...] = (
     ("y", "rt5_env_b", "rt5_env_b", 31),
     ("x", "rt5_channel_control", "rt5_channel_control", 7),
     ("x", "ym_queue_count", "ssi_refill_buffer", 0),
+    ("x", "rt5_lfo_pm_block", "rt5_lfo_pm_block", 0),
 )
 BUFFER_RANGES: tuple[tuple[str, str, str, int], ...] = (
     ("x", "ssi_buffer_a", "ssi_buffer_a", 1023),
     ("x", "ssi_buffer_b", "ssi_buffer_b", 1023),
+    # the block PM multipliers, built once per start: read from the dump
+    # rather than modelled, so the division's rounding needs no mirror
+    ("y", "rt5_pm_multiplier", "rt5_pm_multiplier", 1023),
 )
 STATE_MARKER = 0
 BUFFER_MARKER = 1
@@ -374,8 +381,9 @@ class Boundary:
     env_states: list[int]  # operator-major raw DSP state bits
     env_a: list[int]  # operator-major 0.23 block multiplier
     env_b: list[int]  # operator-major signed 10.13 block addend
-    pm_scale: int  # decoded signed PM depth for the block PM offset
-    lfo_waveform: int  # waveform bits; bit 0 flips the block PM sign
+    lfo_pmd: int  # $19 PM depth 0-127
+    lfo_pm: int  # the kernel's published block m_lfo_pm (signed)
+    lfo_waveform: int  # waveform bits
     noise_threshold: int  # (ymfm frequency+1)*1007; zero while disabled
     noise_counter: int  # 3840-per-frame latch DDA position
     noise_snap: int  # LFSR snapshot at the last latch
@@ -407,7 +415,8 @@ def read_boundary(record: Record, symbols: dict[tuple[str, str], int]) -> Bounda
         env_states=record.array("x", x_addr("rt5_env_state"), 32),
         env_a=record.array("y", y_addr("rt5_env_a"), 32),
         env_b=[signed24(v) for v in record.array("y", y_addr("rt5_env_b"), 32)],
-        pm_scale=signed24(record.words[("x", x_addr("rt5_pm_scale"))]),
+        lfo_pmd=record.words[("x", x_addr("rt5_lfo_pmd"))],
+        lfo_pm=signed24(record.words[("x", x_addr("rt5_lfo_pm_block"))]),
         lfo_waveform=record.words[("x", x_addr("rt5_lfo_waveform"))],
         noise_threshold=record.words[("x", x_addr("rt5_noise_threshold"))],
         noise_counter=record.words[("x", x_addr("rt5_noise_counter"))],
@@ -519,16 +528,15 @@ def load_pitch_tables(source_path: Path) -> tuple[list[int], list[int]]:
     return phase, detune
 
 
-def block_pm_offset(boundary: Boundary) -> int:
-    """The block PM offset in increment units, exactly as the support pass
-    derives it: the published LFO index byte times the decoded depth through
-    the doubling multiply plus one shift, sign-flipped by waveform bit 0,
-    then the product's high word."""
-    value = (boundary.lfo_phase & 0xFF) * boundary.pm_scale
-    value <<= 2
-    if boundary.lfo_waveform & 1:
-        value = -value
-    return value >> 24
+def pm_delta(regs: dict[int, int], channel: int, lfo_pm: int) -> int:
+    """ymfm's PM delta in 1/64-semitone units: m_lfo_pm shifted by the
+    channel's PM sensitivity (register $38 bits 4-6)."""
+    sensitivity = (regs.get(0x38 + channel, 0) >> 4) & 7
+    if sensitivity == 0 or lfo_pm == 0:
+        return 0
+    if sensitivity < 6:
+        return lfo_pm >> (6 - sensitivity)
+    return lfo_pm << (sensitivity - 5)
 
 
 def channel_increments(
@@ -536,8 +544,14 @@ def channel_increments(
     channel: int,
     phase_table: list[int],
     detune_table: list[int],
-    pm_offset: int = 0,
+    lfo_pm: int = 0,
+    multipliers: list[int] | None = None,
 ) -> list[int]:
+    """The channel's four operator increments exactly as the kernel holds
+    them: the PM-free base from the register mirror, then - for a nonzero
+    PM delta - scaled by the kernel's 2^(delta/768) multiplier through the
+    same doubling multiply and shift the block PM pass uses."""
+    pm_shift = pm_delta(regs, channel, lfo_pm)
     kc = regs.get(0x28 + channel, 0) & 0x7F
     kf = (regs.get(0x30 + channel, 0) >> 2) & 0x3F
     block = (kc >> 4) & 7
@@ -565,9 +579,14 @@ def channel_increments(
         mul2 = mul * 2 if mul else 1
         product = (step * mul2) >> 1
         inc = (product * PITCH_DDA_SCALE) >> 18
-        inc = (inc + pm_offset) & 0xFFFFFF
+        inc &= 0xFFFFFF
         if inc & 0x800000:
             inc -= 0x1000000
+        if pm_shift:
+            assert multipliers is not None
+            inc = ((inc * multipliers[pm_shift + 512]) >> 22) & 0xFFFFFF
+            if inc & 0x800000:
+                inc -= 0x1000000
         increments.append(inc)
     return increments
 
@@ -678,16 +697,17 @@ def reconstruct_rows(
     seg_incs: list[list[tuple[int, list[int]]]] = []
     pitch_mirror: dict[int, int] = {}
     cursor = 0
+    multipliers = final.array("y", require_symbol(symbols, "Y", "rt5_pm_multiplier"), 1024)
     for block in range(blocks):
-        # The dumped increments carry this block's PM offset, derived from
-        # the LFO state the support pass published — visible in the next
-        # boundary's dump — and shared by every segment's mid-block rebuild.
-        pm_offset = block_pm_offset(boundaries[block + 1])
+        # The dumped increments carry this block's PM, the m_lfo_pm the
+        # support pass published — visible in the next boundary's dump — and
+        # shared by every segment's mid-block rebuild.
+        lfo_pm = boundaries[block + 1].lfo_pm
         while cursor < len(events) and landing_frame(events[cursor].sample) <= block * BLOCK_FRAMES:
             pitch_mirror[events[cursor].reg] = events[cursor].data
             cursor += 1
         segments = [
-            (0, channel_increments(pitch_mirror, 0, phase_table, detune_table, pm_offset))
+            (0, channel_increments(pitch_mirror, 0, phase_table, detune_table, lfo_pm, multipliers))
         ]
         while cursor < len(events) and landing_frame(events[cursor].sample) < (block + 1) * BLOCK_FRAMES:
             frame = landing_frame(events[cursor].sample)
@@ -697,7 +717,7 @@ def reconstruct_rows(
             segments.append(
                 (
                     frame % BLOCK_FRAMES,
-                    channel_increments(pitch_mirror, 0, phase_table, detune_table, pm_offset),
+                    channel_increments(pitch_mirror, 0, phase_table, detune_table, lfo_pm, multipliers),
                 )
             )
         seg_incs.append(segments)

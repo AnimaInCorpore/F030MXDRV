@@ -22,7 +22,7 @@ PHASE_MODULUS = 1 << 22
 SLOW_NOISE_LATCH_NATIVE_SAMPLES = 8
 BASE_SCENARIOS = (
     "pitch", "detune", "timing", "envelope", "lfo", "noise", "noise-slow",
-    "noise-left", "noise-right", "lfo-am-off",
+    "noise-left", "noise-right", "lfo-am-off", "lfo-pm",
 )
 ALGORITHM_SCENARIOS = tuple(f"algorithm-{index}" for index in range(8))
 FEEDBACK_SCENARIOS = ("feedback-0", "feedback-7", "feedback-7-algorithm-5")
@@ -479,6 +479,36 @@ def compare_suites(
     notes.append(
         f"lfo-am-off: spectral_cosine={am_off_cosine:.4f}, log_rmse={am_off_rmse:.2f} dB, "
         f"energy_ratio={am_off_energy:.3f}, tail_rms_ratio={am_off_tail_ratio:.3f}"
+    )
+
+    # PM depth: the deepest saw vibrato sweeps the carrier by almost an
+    # octave across the window. The operator's phase advance per quarter
+    # must track the oracle's within 2% - a kernel with a shallower or
+    # deeper depth law drifts out of that band within the first quarter -
+    # and the audio spectrum of the closing window must still match.
+    pm_reference = unwrapped_phase(reference["lfo-pm"], 3)
+    pm_candidate = unwrapped_phase(candidate["lfo-pm"], 3)
+    quarter = len(pm_reference) // 4
+    pm_ratios = []
+    for index in range(4):
+        start, stop = index * quarter, (index + 1) * quarter - 1
+        reference_advance = pm_reference[stop] - pm_reference[start]
+        candidate_advance = pm_candidate[stop] - pm_candidate[start]
+        pm_ratios.append(candidate_advance / max(reference_advance, 1e-9))
+    pm_cosine, pm_rmse, pm_energy = spectral_metrics(
+        audio(reference["lfo-pm"]), audio(candidate["lfo-pm"])
+    )
+    for index, ratio in enumerate(pm_ratios):
+        if not 0.98 <= ratio <= 1.02:
+            errors.append(
+                f"lfo-pm: quarter {index} phase advance ratio {ratio:.4f} is outside 0.98-1.02"
+            )
+    if pm_cosine < 0.90:
+        errors.append(f"lfo-pm: spectral cosine {pm_cosine:.4f} is below 0.90")
+    notes.append(
+        "lfo-pm: quarter_advance_ratios=" + ",".join(f"{r:.4f}" for r in pm_ratios)
+        + f", spectral_cosine={pm_cosine:.4f}, log_rmse={pm_rmse:.2f} dB, "
+        f"energy_ratio={pm_energy:.3f}"
     )
 
     for scenario in ("noise", "noise-slow", "noise-left", "noise-right"):

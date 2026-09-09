@@ -279,8 +279,8 @@ rt5_lfo_step_tick:
         org     x:$d8
 rt5_envelope_level:
         ds      32
-rt5_pm_scale:
-        ds      1
+rt5_lfo_pmd:
+        ds      1                       ; $19 PM depth 0-127 (ymfm lfo_pm_depth)
 rt5_lfo_amd:
         ds      1
 rt5_lfo_waveform:
@@ -523,6 +523,13 @@ rt5_pitch_dirty_any:
         ds      1
 rt5_pitch_flush_channel:
         ds      1
+; Block PM: ymfm's m_lfo_pm for this block (waveform PM shape of the
+; published LFO index byte times the depth, >> 7) and the parked dispatch
+; offset n4 while the pass indexes the multiplier table through r4.
+rt5_lfo_pm_block:
+        ds      1
+rt5_pm_saved_n4:
+        ds      1
 
 ; Sub-block event-split bookkeeping, touched only while a block renders in
 ; segments: the block-start native clock and DDA remainder, the walking
@@ -544,8 +551,6 @@ rt5_seg_start:
 rt5_seg_pan_left:
         ds      1
 rt5_seg_pan_right:
-        ds      1
-rt5_seg_pm:
         ds      1
 rt5_seg_drain_consumed:
         ds      1
@@ -601,6 +606,15 @@ rt5_noise_jump_mid6:
         org     y:$1780
 rt5_pan_right_stream:
         ds      DSP_RT_PROFILE_FRAMES
+
+; Block PM multipliers: 2^(delta/768) in 0.22 units for the PM delta
+; -512..511 (index delta+512), built at every realtime start by 24-step
+; division from the chip-verified phase-step table, T[j]/(2*T[0]) for a
+; non-negative delta and T[j]/(4*T[0]) one octave below. External Y above
+; every code island, untouched by the stream overlays.
+        org     y:$3800
+rt5_pm_multiplier:
+        ds      1024
 
 ; Envelope-active bookkeeping lives in the physically free window above the
 ; 8,192-word external X/Y reservations. External P aliases external Y word
@@ -2037,8 +2051,9 @@ rt5_profile_ams_previous_done:
         ; both scaled step pairs derived by the shared handler
         move    #>$01,y1
         jsr     rt5_lfo_rate_decode
-        move    #>$400000,a             ; $19 depth $40 is unity after MPY+ASL
-        move    a1,x:rt5_pm_scale
+        move    #>$40,a                 ; $19 PM depth $40
+        move    a1,x:rt5_lfo_pmd
+        jsr     rt5_build_pm_multipliers
 
         ; Envelope bookkeeping: unity multipliers, zero addends, and an
         ; empty active list. Operators of channels 0-3 wait released for
@@ -2677,35 +2692,64 @@ rt5_noise_jump_skipped:
         ; rescale of every AM-affected channel's live gain pairs.
         jsr     rt5_lfo_am_block
 
-        ; This block's PM offset scales the published LFO index byte by the
-        ; decoded $19 depth: the doubling MPY plus one ASL make depth $40
-        ; exactly unity. LFO waveform bit 0 selects the offset sign.
+        ; This block's LFO PM value, ymfm's m_lfo_pm: the published index
+        ; byte through the waveform's signed PM shape - the same shapes the
+        ; exact renderer derives per sample, with the block-jumped LFSR's low
+        ; byte standing in for the noise history - times the $19 depth, >> 7.
         move    x:rt5_lfo_phase,a
-        move    #>$ff,y1
-        and     y1,a1
-        move    a1,x0
-        move    x:rt5_pm_scale,y0
-        mpy     x0,y0,a
-        asl     a
+        move    #>$ff,y0
+        and     y0,a1
         move    x:rt5_lfo_waveform,b
-        jclr    #0,b1,rt5_pm_sign_ready
-        neg     a
-rt5_pm_sign_ready:
-        move    a1,x1
+        move    #>2,x0
+        cmp     x0,b
+        jeq     rt5_pm_wave_triangle
+        jgt     rt5_pm_wave_noise
+        move    #>1,x0
+        cmp     x0,b
+        jne     rt5_pm_wave_signed      ; sawtooth: the index as a signed byte
+        jset    #7,a1,rt5_pm_square_high
+        move    #>$7f,a
+        jmp     rt5_pm_wave_ready
+rt5_pm_square_high:
+        move    #>$ffff80,a
+        jmp     rt5_pm_wave_ready
+rt5_pm_wave_triangle:
+        move    a1,b                    ; keep the index for its bit 6
+        jset    #7,a1,rt5_pm_tri_high
+        eor     y0,a                    ; index ^ $ff
+rt5_pm_tri_high:
+        asl     a
+        and     y0,a                    ; the AM shape
+        jset    #6,b1,rt5_pm_wave_signed
+        move    a1,x0
+        move    y0,a
+        sub     x0,a                    ; $ff - shape
+        jmp     rt5_pm_wave_signed
+rt5_pm_wave_noise:
+        move    x:rt5_noise_lfsr,a
+rt5_pm_wave_signed:
+        jsr     ym_sign_extend_byte
+rt5_pm_wave_ready:
+        move    a1,x0
+        move    x:rt5_lfo_pmd,y0
+        mpy     x0,y0,a                 ; raw * depth, doubled at the A0 end
+        rep     #8
+        asr     a
+        move    a0,x:rt5_lfo_pm_block   ; (raw * depth) >> 7
 
-        ; Two-instruction per-operator increment rebuild: the dual XY move
-        ; stores the previous finished sum while fetching the next base, so B
-        ; runs one iteration ahead and the final store consumes the cleared
-        ; guard word after the 32 bases. Envelope levels no longer ride this
-        ; loop; the island pass below moves only envelope-active operators.
+        ; Copy the 32 PM-free base increments, one XY move per operator with
+        ; the store trailing the load by one so the final store consumes the
+        ; cleared guard word after the 32 bases; the block PM pass then
+        ; rescales every channel with a nonzero sensitivity. Envelope levels
+        ; no longer ride this loop; the island pass below moves only
+        ; envelope-active operators.
         move    #rt5_increment_base,r2
         move    #rt5_operator_increment,r7
-        move    x:(r2)+,b
-        add     x1,b
+        move    x:(r2)+,a
         do      #32,rt5_operator_update_done
-        move    x:(r2)+,b       b,y:(r7)+
-        add     x1,b
+        move    x:(r2)+,a       a,y:(r7)+
 rt5_operator_update_done:
+        jsr     rt5_pm_block_pass
         jmp     rt5_env_scan
 
 ; Drain every due block-boundary event from the profile-local FIFO and update
@@ -6475,20 +6519,8 @@ rt5_split_phase_ready:
         move    a1,x:rt5_seg_pan_left
         move    x:rt5_pan_right_base,a
         move    a1,x:rt5_seg_pan_right
-        ; this block's PM offset, recomputed for the mid-block increment
-        ; rebuilds exactly as the support pass derived it
-        move    x:rt5_lfo_phase,a
-        move    #>$ff,y1
-        and     y1,a1
-        move    a1,x0
-        move    x:rt5_pm_scale,y0
-        mpy     x0,y0,a
-        asl     a
-        move    x:rt5_lfo_waveform,b
-        jclr    #0,b1,rt5_split_pm_ready
-        neg     a
-rt5_split_pm_ready:
-        move    a1,x:rt5_seg_pm
+        ; this block's PM value in x:rt5_lfo_pm_block, derived by the
+        ; support pass, serves every mid-block increment rebuild below
 
 rt5_split_segment_loop:
         ; Map the queue head onto its landing frame. An empty queue or a
@@ -6597,15 +6629,13 @@ rt5_split_drain:
         jsr     rt5_service_transport_event
         move    x:rt5_seg_clock_hold,a
         move    a1,x:ssi_native_sample_count
-        move    x:rt5_seg_pm,x1
         move    #rt5_increment_base,r2
         move    #rt5_operator_increment,r7
-        move    x:(r2)+,b
-        add     x1,b
+        move    x:(r2)+,a
         do      #32,rt5_split_increments_done
-        move    x:(r2)+,b       b,y:(r7)+
-        add     x1,b
+        move    x:(r2)+,a       a,y:(r7)+
 rt5_split_increments_done:
+        jsr     rt5_pm_block_pass
         jmp     rt5_split_segment_loop
 
 rt5_split_done:
@@ -6693,6 +6723,7 @@ ym_clock_timers_done:
 ; so pending ym_key_live bits recreate key edges into freshly released
 ; envelopes while phase and feedback begin at reset.
 rt5_initialize_runtime:
+        jsr     rt5_build_pm_multipliers
         clr     b
         move    #rt5_phase,r4
         do      #32,rt5_runtime_clear_phase_done
@@ -6728,7 +6759,7 @@ rt5_runtime_levels_done:
         move    a1,x:rt5_lfo_step_tick_lo
         move    a1,y:rt5_lfo_acc_hi
         move    a1,y:rt5_lfo_acc_lo
-        move    a1,x:rt5_pm_scale
+        move    a1,x:rt5_lfo_pmd
         move    a1,x:rt5_lfo_amd
         move    a1,x:rt5_lfo_waveform
         move    a1,x:rt5_timer_status
@@ -7299,9 +7330,7 @@ rt5_event_decode_lfo_depth:
         move    y1,a
         move    #>$7f,x0
         and     x0,a
-        rep     #16
-        asl     a
-        move    a1,x:rt5_pm_scale
+        move    a1,x:rt5_lfo_pmd
         rts
 rt5_lfo_amd_write:
         move    y1,a
@@ -8766,6 +8795,118 @@ rt5_noise_pass_y_value:
         add     y0,a
         move    a,y:(r1)+
 rt5_noise_pass_y_done:
+        rts
+
+; Build rt5_pm_multiplier from the chip-verified phase-step table: entry
+; delta+512 holds 2^(delta/768) in 0.22 units, i.e. T[j]/(2*T[0]) as a 0.23
+; fraction for delta = j >= 0 and T[j]/(4*T[0]) for delta = j-768 < 0. Each
+; quotient is a 24-step nonrestoring division of positive operands; the
+; dividend always sits below the divisor (T[767] < 2*T[0]), so the quotient
+; is the truncated fraction. About 32,000 cycles, once per realtime start.
+rt5_build_pm_multipliers:
+        move    #opm_phase_step,r1
+        move    #rt5_pm_multiplier,r4
+        move    y:(r1),a
+        asl     a
+        move    a1,y1                   ; 2*T[0]
+        asl     a
+        move    a1,y0                   ; 4*T[0]
+        move    #opm_phase_step+256,r1  ; deltas -512..-1 read T[256..767]
+        do      #512,rt5_build_pm_low_done
+        move    y:(r1)+,a
+        and     #$fe,ccr
+        rep     #24
+        div     y0,a
+        move    a0,y:(r4)+
+rt5_build_pm_low_done:
+        move    #opm_phase_step,r1      ; deltas 0..511 read T[0..511]
+        do      #512,rt5_build_pm_high_done
+        move    y:(r1)+,a
+        and     #$fe,ccr
+        rep     #24
+        div     y1,a
+        move    a0,y:(r4)+
+rt5_build_pm_high_done:
+        rts
+
+; Block PM pass: rescale every channel with a nonzero PM sensitivity. ymfm
+; shifts m_lfo_pm by the sensitivity into a delta in 1/64-semitone units
+; and looks its phase steps up at the shifted position; the kernel instead
+; multiplies the channel's four PM-free base increments by 2^(delta/768)
+; from rt5_pm_multiplier. That reproduces the depth law of the same
+; chip-verified table and folds only the DT1 detune in with the tone, a
+; fraction of a percent at the deepest setting. Runs after the base copy,
+; so a channel whose sensitivity or depth returns to zero simply keeps its
+; base increments. Scratches r0/r1/r2/r4/r5/r7, n0/n5, x0/x1/y0/y1, a/b;
+; parks n4 (the render's dispatch offset) while r4 indexes the table.
+; (r0)+n0 walks the base inside its 256-aligned block under m0, and
+; (r5)+n5 the live increments inside the modulo-64 window under m5.
+rt5_pm_block_pass:
+        move    x:rt5_lfo_pm_block,y1
+        move    y1,a
+        tst     a
+        jeq     rt5_pm_block_done
+        move    n4,x:rt5_pm_saved_n4
+        move    #ym_regdata+$38,r1
+        move    #rt5_increment_base,r2
+        move    #rt5_operator_increment,r7
+        move    #rt5_pm_multiplier,r4
+        move    #8,n0
+        move    #8,n5
+        do      #8,rt5_pm_channels_done
+        move    x:(r1)+,a
+        rep     #4
+        lsr     a
+        move    #>7,x0
+        and     x0,a                    ; PMS
+        jeq     rt5_pm_channel_next
+        move    #>6,x0
+        cmp     x0,a
+        jge     rt5_pm_sens_high
+        move    x0,b
+        sub     a,b                     ; 6 - PMS: right shift 1-5
+        move    b1,x0
+        move    y1,a
+        rep     x0
+        asr     a
+        jmp     rt5_pm_delta_ready
+rt5_pm_sens_high:
+        move    #>5,x0
+        sub     x0,a                    ; PMS - 5: left shift 1-2
+        move    a1,x0
+        move    y1,a
+        rep     x0
+        asl     a
+rt5_pm_delta_ready:
+        move    #>512,x0
+        add     x0,a
+        move    a1,n4
+        move    r2,r0
+        move    r7,r5
+        move    y:(r4+n4),y0            ; 2^(delta/768), 0.22
+        move    x:(r0)+n0,x1
+        mpy     x1,y0,a
+        asl     a
+        move    a1,y:(r5)+n5
+        move    x:(r0)+n0,x1
+        mpy     x1,y0,a
+        asl     a
+        move    a1,y:(r5)+n5
+        move    x:(r0)+n0,x1
+        mpy     x1,y0,a
+        asl     a
+        move    a1,y:(r5)+n5
+        move    x:(r0)+n0,x1
+        mpy     x1,y0,a
+        asl     a
+        move    a1,y:(r5)+n5
+rt5_pm_channel_next:
+        move    (r2)+
+        move    (r7)+
+        nop
+rt5_pm_channels_done:
+        move    x:rt5_pm_saved_n4,n4
+rt5_pm_block_done:
         rts
 
         end
