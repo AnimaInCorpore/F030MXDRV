@@ -9,6 +9,17 @@ VLINK_DIR := $(TOOLS_DIR)/vlink
 VASM := $(VASM_DIR)/vasmm68k_mot
 VLINK := $(VLINK_DIR)/vlink
 
+# vlink's vendored dir.c calls chmod() from its _WIN32 branch without a
+# declaration. MSVC, the compiler that branch was written for, accepted the
+# implicit declaration; GCC 14 and later reject it outright, and the stock
+# -std=c99 -pedantic also hides mingw's non-ANSI prototypes. gnu99 plus a
+# forced io.h supplies the real declaration. The UNIX branch includes
+# sys/stat.h and needs none of this, so only override on Windows hosts.
+HOST_UNAME := $(shell uname -s)
+ifneq (,$(filter MINGW% MSYS% CYGWIN%,$(HOST_UNAME)))
+VLINK_MAKE_ARGS := COPTS="-std=gnu99 -O2 -fomit-frame-pointer -c -include io.h"
+endif
+
 M68K_BUILD := build/m68k
 XEVIOUS_M68K_BUILD := build/m68k-xevious
 DSP_BUILD := build/dsp
@@ -147,7 +158,7 @@ $(TOOLS_DIR)/.vlink-unpacked: $(VLINK_ARCHIVE)
 	@touch $@
 
 $(VLINK): $(TOOLS_DIR)/.vlink-unpacked
-	$(MAKE) -C $(VLINK_DIR)
+	$(MAKE) -C $(VLINK_DIR) $(VLINK_MAKE_ARGS)
 
 $(YM2151_ORACLE): tools/ym2151_oracle.cpp $(YMFM_SOURCE)/ymfm_opm.cpp \
 		$(YMFM_SOURCE)/ymfm_opm.h $(YMFM_SOURCE)/ymfm_fm.h \
@@ -355,7 +366,7 @@ $(DSP_BUILD)/.assembled: $(DSP_BUILD)/BUILD.BAT
 		$(DSP_BUILD)/YMBOOT.CLD $(DSP_BUILD)/YMBOOT.LOD $(DSP_BUILD)/YMBOOT.LST \
 		$(DSP_BUILD)/RATETEST.CLD $(DSP_BUILD)/RATETEST.LOD $(DSP_BUILD)/RATETEST.LST \
 		$(DSP_BUILD)/DSPPROBE.CLD $(DSP_BUILD)/DSPPROBE.LOD $(DSP_BUILD)/DSPPROBE.LST
-	$(DOSBOX) $(DOSBOX_FLAGS) $(abspath $(DSP_BUILD)/BUILD.BAT)
+	"$(DOSBOX)" $(DOSBOX_FLAGS) "$(abspath $(DSP_BUILD)/BUILD.BAT)"
 	@test -s $(DSP_BUILD)/YM2151.LOD
 	@test -s $(DSP_BUILD)/YMBOOT.LOD
 	@test -s $(DSP_BUILD)/RATETEST.LOD
