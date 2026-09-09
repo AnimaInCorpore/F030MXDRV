@@ -90,6 +90,13 @@ F030ARCADE ?= $(HOME)/Work/F030Arcade
 HATARI_CALIBRATED := $(F030ARCADE)/third_party/hatari/build/src/hatari
 HATARI ?= $(firstword $(wildcard $(HATARI_CALIBRATED)) hatari)
 
+# Hatari splits the program argument into a GEMDOS directory and a filename
+# using the host's separator, so a forward-slash path mounts the wrong root on
+# Windows and boots to the desktop instead of running the program -- silently,
+# with a zero exit status. Every target therefore cd's into the program's own
+# directory and passes a bare filename, and spells every other path it hands
+# Hatari absolutely through $(CURDIR).
+#
 # A missing calibrated build is not an error -- every static gate still works
 # -- but a real-time result from a stock build describes a DSP running at twice
 # the Falcon's speed, so say so rather than reporting it as a clean pass.
@@ -471,15 +478,15 @@ compare-realtime: $(YM2151_PERCEPTUAL_STAMP)
 smoke: check
 	$(call require_hatari,smoke)
 	@rm -f build/hatari-smoke.log build/hatari-smoke.trace
-	@SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy $(HATARI) \
+	@cd $(RELEASE_DIR) && SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy $(HATARI) \
 		--machine falcon --dsp emu \
-		--tos third_party/f030dsp3d/tools/tos402.rom --patch-tos true \
+		--tos $(CURDIR)/third_party/f030dsp3d/tools/tos402.rom --patch-tos true \
 		--fast-boot true --fast-forward true --sound off \
 		--confirm-quit false --run-vbls 1700 \
-		--log-file build/hatari-smoke.log \
-		--trace-file build/hatari-smoke.trace \
+		--log-file $(CURDIR)/build/hatari-smoke.log \
+		--trace-file $(CURDIR)/build/hatari-smoke.trace \
 		--trace gemdos,dsp_host_interface,xbios \
-		$(RELEASE_DIR)/f030mxdrv.tos
+		f030mxdrv.tos
 	@rg -q "XBIOS 0x6E Dsp_ExecBoot" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x4d584c" build/hatari-smoke.trace
 	@rg -q "Transfer 0x4c4f41" build/hatari-smoke.trace
@@ -596,15 +603,15 @@ profile-dsp: check tools/profile_dsp.py
 		--listing $(DSP_BUILD)/YM2151.LST \
 		--output-dir $(DSP_PROFILE_DIR) \
 		--marker 0x01c1c0
-	@SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy $(HATARI) \
+	@cd $(RELEASE_DIR) && SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy $(HATARI) \
 		--machine falcon --dsp emu \
-		--tos third_party/f030dsp3d/tools/tos402.rom --patch-tos true \
+		--tos $(CURDIR)/third_party/f030dsp3d/tools/tos402.rom --patch-tos true \
 		--fast-boot true --fast-forward true --sound off \
 		--confirm-quit false --run-vbls 1200 \
-		--parse $(DSP_PROFILE_DIR)/start.ini \
-		$(RELEASE_DIR)/f030mxdrv.tos \
-		> $(DSP_PROFILE_DIR)/debug.log 2>&1 || { \
-			tail -n 100 $(DSP_PROFILE_DIR)/debug.log >&2; \
+		--parse $(CURDIR)/$(DSP_PROFILE_DIR)/start.ini \
+		f030mxdrv.tos \
+		> $(CURDIR)/$(DSP_PROFILE_DIR)/debug.log 2>&1 || { \
+			tail -n 100 $(CURDIR)/$(DSP_PROFILE_DIR)/debug.log >&2; \
 			exit 1; \
 		}
 	@test -s $(DSP_PROFILE_DIR)/profile.txt || { \
@@ -626,15 +633,15 @@ profile-dsp-rt: check tools/profile_dsp.py
 		--marker 0x01c2c0 \
 		--start-symbol rt_profile_loop_start \
 		--end-symbol rt_profile_loop_done
-	@SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy $(HATARI) \
+	@cd $(RELEASE_DIR) && SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy $(HATARI) \
 		--machine falcon --dsp emu \
-		--tos third_party/f030dsp3d/tools/tos402.rom --patch-tos true \
+		--tos $(CURDIR)/third_party/f030dsp3d/tools/tos402.rom --patch-tos true \
 		--fast-boot true --fast-forward true --sound off \
 		--confirm-quit false --run-vbls 1200 \
-		--parse $(DSP_RT_PROFILE_DIR)/start.ini \
-		$(RELEASE_DIR)/f030mxdrv.tos \
-		> $(DSP_RT_PROFILE_DIR)/debug.log 2>&1 || { \
-			tail -n 100 $(DSP_RT_PROFILE_DIR)/debug.log >&2; \
+		--parse $(CURDIR)/$(DSP_RT_PROFILE_DIR)/start.ini \
+		f030mxdrv.tos \
+		> $(CURDIR)/$(DSP_RT_PROFILE_DIR)/debug.log 2>&1 || { \
+			tail -n 100 $(CURDIR)/$(DSP_RT_PROFILE_DIR)/debug.log >&2; \
 			exit 1; \
 		}
 	@test -s $(DSP_RT_PROFILE_DIR)/profile.txt || { \
@@ -662,15 +669,15 @@ profile-dsp-rt2: check tools/profile_dsp.py
 		--marker 0x01c3c0 \
 		--start-symbol rt2_profile_loop_start \
 		--end-symbol rt2_profile_loop_done
-	@SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy $(HATARI) \
+	@cd $(RELEASE_DIR) && SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy $(HATARI) \
 		--machine falcon --dsp emu \
-		--tos third_party/f030dsp3d/tools/tos402.rom --patch-tos true \
+		--tos $(CURDIR)/third_party/f030dsp3d/tools/tos402.rom --patch-tos true \
 		--fast-boot true --fast-forward true --sound off \
 		--confirm-quit false --run-vbls 1200 \
-		--parse $(DSP_RT2_PROFILE_DIR)/start.ini \
-		$(RELEASE_DIR)/f030mxdrv.tos \
-		> $(DSP_RT2_PROFILE_DIR)/debug.log 2>&1 || { \
-			tail -n 100 $(DSP_RT2_PROFILE_DIR)/debug.log >&2; \
+		--parse $(CURDIR)/$(DSP_RT2_PROFILE_DIR)/start.ini \
+		f030mxdrv.tos \
+		> $(CURDIR)/$(DSP_RT2_PROFILE_DIR)/debug.log 2>&1 || { \
+			tail -n 100 $(CURDIR)/$(DSP_RT2_PROFILE_DIR)/debug.log >&2; \
 			exit 1; \
 		}
 	@test -s $(DSP_RT2_PROFILE_DIR)/profile.txt || { \
@@ -698,15 +705,15 @@ profile-dsp-rt3: check tools/profile_dsp.py
 		--marker 0x01c4c0 \
 		--start-symbol rt3_profile_loop_start \
 		--end-symbol rt3_profile_loop_done
-	@SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy $(HATARI) \
+	@cd $(RELEASE_DIR) && SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy $(HATARI) \
 		--machine falcon --dsp emu \
-		--tos third_party/f030dsp3d/tools/tos402.rom --patch-tos true \
+		--tos $(CURDIR)/third_party/f030dsp3d/tools/tos402.rom --patch-tos true \
 		--fast-boot true --fast-forward true --sound off \
 		--confirm-quit false --run-vbls 1200 \
-		--parse $(DSP_RT3_PROFILE_DIR)/start.ini \
-		$(RELEASE_DIR)/f030mxdrv.tos \
-		> $(DSP_RT3_PROFILE_DIR)/debug.log 2>&1 || { \
-			tail -n 100 $(DSP_RT3_PROFILE_DIR)/debug.log >&2; \
+		--parse $(CURDIR)/$(DSP_RT3_PROFILE_DIR)/start.ini \
+		f030mxdrv.tos \
+		> $(CURDIR)/$(DSP_RT3_PROFILE_DIR)/debug.log 2>&1 || { \
+			tail -n 100 $(CURDIR)/$(DSP_RT3_PROFILE_DIR)/debug.log >&2; \
 			exit 1; \
 		}
 	@test -s $(DSP_RT3_PROFILE_DIR)/profile.txt || { \
@@ -739,15 +746,15 @@ profile-dsp-rt4-alg%: check tools/profile_dsp.py
 		--marker 0x01c50$* \
 		--start-symbol rt4_algorithm$*_loop_start \
 		--end-symbol rt4_profile_loop_done
-	@SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy $(HATARI) \
+	@cd $(RELEASE_DIR) && SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy $(HATARI) \
 		--machine falcon --dsp emu \
-		--tos third_party/f030dsp3d/tools/tos402.rom --patch-tos true \
+		--tos $(CURDIR)/third_party/f030dsp3d/tools/tos402.rom --patch-tos true \
 		--fast-boot true --fast-forward true --sound off \
 		--confirm-quit false --run-vbls 1200 \
-		--parse $(DSP_RT4_PROFILE_DIR)/algorithm-$*/start.ini \
-		$(RELEASE_DIR)/f030mxdrv.tos \
-		> $(DSP_RT4_PROFILE_DIR)/algorithm-$*/debug.log 2>&1 || { \
-			tail -n 100 $(DSP_RT4_PROFILE_DIR)/algorithm-$*/debug.log >&2; \
+		--parse $(CURDIR)/$(DSP_RT4_PROFILE_DIR)/algorithm-$*/start.ini \
+		f030mxdrv.tos \
+		> $(CURDIR)/$(DSP_RT4_PROFILE_DIR)/algorithm-$*/debug.log 2>&1 || { \
+			tail -n 100 $(CURDIR)/$(DSP_RT4_PROFILE_DIR)/algorithm-$*/debug.log >&2; \
 			exit 1; \
 		}
 	@test -s $(DSP_RT4_PROFILE_DIR)/algorithm-$*/profile.txt || { \
@@ -783,15 +790,15 @@ endurance: check
 	@cp $(RELEASE_DIR)/f030mxdrv.tos build/endurance/
 	@cp "$(CORPUS_DIR)/XEVIOUS.MDX" "$(CORPUS_DIR)/XEVIOUS.PDX" build/endurance/
 	@printf 'XEVIOUS.MDX\r\n' > build/endurance/AUTOPLAY.INF
-	@SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy $(HATARI) \
+	@cd build/endurance && SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy $(HATARI) \
 		--machine falcon --dsp emu \
-		--tos third_party/f030dsp3d/tools/tos402.rom --patch-tos true \
+		--tos $(CURDIR)/third_party/f030dsp3d/tools/tos402.rom --patch-tos true \
 		--fast-boot true --fast-forward true --sound off \
 		--confirm-quit false --run-vbls $(ENDURANCE_VBLS) \
-		--log-file build/hatari-endurance.log \
-		--trace-file build/hatari-endurance.trace \
+		--log-file $(CURDIR)/build/hatari-endurance.log \
+		--trace-file $(CURDIR)/build/hatari-endurance.trace \
 		--trace gemdos,dsp_host_interface,xbios \
-		build/endurance/f030mxdrv.tos
+		f030mxdrv.tos
 	@test $$(rg -c "Direct Transfer 0x190000" build/hatari-endurance.trace) -ge $(ENDURANCE_MIN_REFILLS)
 	@rg -q "Dsp_Unlock" build/hatari-endurance.trace
 	@# Matrix state survives across programs and Hatari always starts clean,
@@ -884,15 +891,15 @@ profile-dsp-rt5: check tools/profile_dsp.py
 		--marker 0x01c6c0 \
 		--start-symbol rt5_profile_loop_start \
 		--end-symbol rt5_profile_loop_done
-	@SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy $(HATARI) \
+	@cd $(RELEASE_DIR) && SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy $(HATARI) \
 		--machine falcon --dsp emu \
-		--tos third_party/f030dsp3d/tools/tos402.rom --patch-tos true \
+		--tos $(CURDIR)/third_party/f030dsp3d/tools/tos402.rom --patch-tos true \
 		--fast-boot true --fast-forward true --sound off \
 		--confirm-quit false --run-vbls 1200 \
-		--parse $(DSP_RT5_PROFILE_DIR)/start.ini \
-		$(RELEASE_DIR)/f030mxdrv.tos \
-		> $(DSP_RT5_PROFILE_DIR)/debug.log 2>&1 || { \
-			tail -n 100 $(DSP_RT5_PROFILE_DIR)/debug.log >&2; \
+		--parse $(CURDIR)/$(DSP_RT5_PROFILE_DIR)/start.ini \
+		f030mxdrv.tos \
+		> $(CURDIR)/$(DSP_RT5_PROFILE_DIR)/debug.log 2>&1 || { \
+			tail -n 100 $(CURDIR)/$(DSP_RT5_PROFILE_DIR)/debug.log >&2; \
 			exit 1; \
 		}
 	@test -s $(DSP_RT5_PROFILE_DIR)/profile.txt || { \
@@ -926,8 +933,8 @@ profile-dsp-live: check tools/profile_dsp_live.py
 
 run: all
 	$(call require_hatari,run)
-	$(HATARI) --machine falcon --dsp emu --tos \
-		third_party/f030dsp3d/tools/tos402.rom $(RELEASE_DIR)/f030mxdrv.tos
+	cd $(RELEASE_DIR) && $(HATARI) --machine falcon --dsp emu --tos \
+		$(CURDIR)/third_party/f030dsp3d/tools/tos402.rom f030mxdrv.tos
 
 clean:
 	rm -rf build release
