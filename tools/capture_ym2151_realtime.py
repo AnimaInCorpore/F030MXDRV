@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from hatari_binary import default_hatari  # noqa: E402
+from hatari_binary import default_hatari, program_argument  # noqa: E402
 from profile_dsp import parse_listing, require_symbol  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
@@ -270,7 +270,7 @@ def run_scenario(
         "--run-vbls", str(run_vbls),
         "--log-file", str(directory / "hatari.log"),
         "--parse", str(start_ini),
-        str(directory / "F030MXDRV.TOS"),
+        program_argument(directory / "F030MXDRV.TOS"),
     ]
     # Hatari occasionally exits silently while the preceding headless instance
     # is releasing its Cocoa process state. One immediate retry makes the

@@ -24,7 +24,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from hatari_binary import default_hatari
+from hatari_binary import default_hatari, program_argument
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PLAYER = os.path.join(REPO, "release", "f030mxdrv.tos")
@@ -121,7 +121,7 @@ def run_song(mdx_name, pdx_name, corpus_dir, keep_dir, hatari):
         "--log-file", os.path.join(work, "hatari.log"),
         "--trace-file", fifo_path,
         "--trace", "gemdos,dsp_host_interface,xbios",
-        os.path.join(work, "f030mxdrv.tos"),
+        program_argument(os.path.join(work, "f030mxdrv.tos")),
     ]
     started = time.monotonic()
     proc = subprocess.Popen(cmd, cwd=REPO, env=env,

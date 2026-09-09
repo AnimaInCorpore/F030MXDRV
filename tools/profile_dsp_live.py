@@ -47,7 +47,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from hatari_binary import default_hatari  # noqa: E402
+from hatari_binary import default_hatari, program_argument  # noqa: E402
 from profile_dsp import parse_listing, parse_profile, require_symbol  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
@@ -151,7 +151,7 @@ def main() -> int:
              "--fast-boot", "true", "--fast-forward", "true", "--sound", "off",
              "--confirm-quit", "false", "--run-vbls", str(args.run_vbls),
              "--log-file", str(work / "hatari.log"),
-             "--parse", str(start), str(player)],
+             "--parse", str(start), program_argument(player)],
             cwd=work, env=env, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL, timeout=1800, check=False,
         )

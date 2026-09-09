@@ -25,3 +25,20 @@ def default_hatari() -> str:
     if os.path.isfile(calibrated) and os.access(calibrated, os.X_OK):
         return calibrated
     return "hatari"
+
+
+def program_argument(path) -> str:
+    """Spell a guest program path the way Hatari's GEMDOS mount expects.
+
+    Hatari splits the program argument into a GEMDOS directory and a filename
+    on the host's separator. MSYS2's Python reports ``os.name == 'nt'`` but
+    sets ``os.sep`` to ``/``, so even an absolute path comes out
+    forward-slashed; Hatari then finds nothing to split, mounts the current
+    directory instead of the program's, and boots to the desktop without ever
+    running the program -- while still exiting 0. Hand Windows a backslash
+    path. POSIX hosts already use the separator Hatari expects.
+    """
+    text = os.fspath(path)
+    if os.name == "nt":
+        return text.replace("/", "\\")
+    return text

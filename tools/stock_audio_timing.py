@@ -19,7 +19,7 @@ import threading
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from hatari_binary import default_hatari
+from hatari_binary import default_hatari, program_argument
 
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -144,7 +144,7 @@ def main():
             "--log-file", os.path.join(work, "hatari.log"),
             "--trace-file", fifo_path,
             "--trace", "gemdos,dsp_host_interface,dsp_host_ssi,xbios",
-            player,
+            program_argument(player),
         ]
         try:
             completed = subprocess.run(
