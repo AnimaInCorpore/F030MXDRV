@@ -86,9 +86,19 @@ DOSBOX ?= $(shell command -v dosbox-staging 2>/dev/null || command -v dosbox 2>/
 # state table; see docs/hatari-timing.md. Override either variable:
 #   make <target> F030ARCADE=/path/to/F030Arcade
 #   make <target> HATARI=/path/to/hatari
+#
+# The checkout is not always under ~/Work -- a sibling of this repository is
+# just as common -- and a Windows host configures the tree as build-ucrt64 and
+# links hatari.exe. Search those spellings rather than hard-coding one, and
+# keep the answer absolute so it compares equal to a HATARI= the caller
+# reached by another route.
 F030ARCADE ?= $(HOME)/Work/F030Arcade
-HATARI_CALIBRATED := $(F030ARCADE)/third_party/hatari/build/src/hatari
-HATARI ?= $(firstword $(wildcard $(HATARI_CALIBRATED)) hatari)
+HATARI_ROOTS := $(F030ARCADE) $(abspath $(CURDIR)/../F030Arcade)
+HATARI_CANDIDATES := $(foreach root,$(HATARI_ROOTS),$(foreach build,build build-ucrt64,\
+	$(root)/third_party/hatari/$(build)/src/hatari \
+	$(root)/third_party/hatari/$(build)/src/hatari.exe))
+HATARI_CALIBRATED := $(firstword $(wildcard $(HATARI_CANDIDATES)))
+HATARI ?= $(firstword $(HATARI_CALIBRATED) hatari)
 
 # Hatari splits the program argument into a GEMDOS directory and a filename
 # using the host's separator, so a forward-slash path mounts the wrong root on
@@ -105,7 +115,7 @@ define require_hatari
 		echo "error: $(1) target needs Hatari ($(HATARI))" >&2; \
 		exit 1; \
 	fi
-	@if [ "$(HATARI)" != "$(HATARI_CALIBRATED)" ]; then \
+	@if [ "$(abspath $(HATARI))" != "$(abspath $(HATARI_CALIBRATED))" ]; then \
 		echo "warning: $(HATARI) is not the DSP-calibrated build; real-time" >&2; \
 		echo "         results will describe a 32 MIPS DSP - see docs/hatari-timing.md" >&2; \
 	fi
