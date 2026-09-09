@@ -66,20 +66,19 @@ def read_pdx_name(mdx_path, corpus_dir):
 
 
 class TraceScorer(threading.Thread):
-    """Consume the Hatari trace FIFO and score it line by line."""
+    """Score Hatari's streaming trace line by line."""
 
-    def __init__(self, fifo_path):
+    def __init__(self, stream):
         super().__init__(daemon=True)
-        self.fifo_path = fifo_path
+        self.stream = stream
         self.refills = 0
         self.unlock_at = None
         self.protocol_error = None
         self.tail = collections.deque(maxlen=TAIL_LINES)
 
     def run(self):
-        # Opens block until Hatari opens the write end.
-        with open(self.fifo_path, "r", errors="replace") as fifo:
-            for line in fifo:
+        with self.stream as trace:
+            for line in trace:
                 self.tail.append(line)
                 if REFILL_PATTERN in line:
                     self.refills += 1
@@ -107,11 +106,6 @@ def run_song(mdx_name, pdx_name, corpus_dir, keep_dir, hatari):
     with open(os.path.join(work, "AUTOPLAY.INF"), "w", newline="") as inf:
         inf.write(tokens + "\r\n")
 
-    fifo_path = os.path.join(work, "trace.fifo")
-    os.mkfifo(fifo_path)
-    scorer = TraceScorer(fifo_path)
-    scorer.start()
-
     env = dict(os.environ, SDL_VIDEODRIVER="dummy", SDL_AUDIODRIVER="dummy")
     cmd = [
         hatari, "--machine", "falcon", "--dsp", "emu",
@@ -119,14 +113,19 @@ def run_song(mdx_name, pdx_name, corpus_dir, keep_dir, hatari):
         "--fast-boot", "true", "--fast-forward", "true", "--sound", "off",
         "--confirm-quit", "false", "--run-vbls", str(RUN_VBLS),
         "--log-file", os.path.join(work, "hatari.log"),
-        "--trace-file", fifo_path,
         "--trace", "gemdos,dsp_host_interface,xbios",
         program_argument(os.path.join(work, "f030mxdrv.tos")),
     ]
     started = time.monotonic()
+    # With no --trace-file Hatari writes the trace to its own output, so score
+    # that stream directly. Nothing reaches the disk, and it needs no named
+    # pipe, which Windows Python cannot create.
     proc = subprocess.Popen(cmd, cwd=REPO, env=env,
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL)
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
+                            text=True, errors="replace")
+    scorer = TraceScorer(proc.stdout)
+    scorer.start()
     timed_out = False
     while proc.poll() is None:
         now = time.monotonic()
@@ -162,8 +161,6 @@ def run_song(mdx_name, pdx_name, corpus_dir, keep_dir, hatari):
             tail.writelines(scorer.tail)
     if verdict == "PASS" and not keep_dir:
         shutil.rmtree(work, ignore_errors=True)
-    else:
-        os.unlink(fifo_path)
 
     return {
         "song": song, "verdict": verdict, "refills": scorer.refills,

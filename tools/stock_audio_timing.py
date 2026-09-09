@@ -42,11 +42,11 @@ WORDS_PER_PERIOD = 512 * 2
 
 
 class TraceScorer(threading.Thread):
-    """Consume the trace FIFO without writing a many-megabyte trace file."""
+    """Score Hatari's trace as it streams, without ever storing it."""
 
-    def __init__(self, fifo_path):
+    def __init__(self, stream):
         super().__init__(daemon=True)
-        self.fifo_path = fifo_path
+        self.stream = stream
         self.production = False
         self.ssi_words = 0
         self.clipped_words = 0
@@ -61,8 +61,8 @@ class TraceScorer(threading.Thread):
 
     def run(self):
         try:
-            with open(self.fifo_path, "r", errors="replace") as fifo:
-                for line in fifo:
+            with self.stream as trace:
+                for line in trace:
                     if PDX_PATTERN in line:
                         self.production = True
                     ssi_match = SSI_WORD_RE.search(line)
@@ -130,10 +130,6 @@ def main():
         shutil.copy(PLAYER, player)
         shutil.copy(mdx_path, work)
         shutil.copy(pdx_path, work)
-        fifo_path = os.path.join(work, "trace.fifo")
-        os.mkfifo(fifo_path)
-        scorer = TraceScorer(fifo_path)
-        scorer.start()
 
         env = dict(os.environ, SDL_VIDEODRIVER="dummy", SDL_AUDIODRIVER="dummy")
         command = [
@@ -142,23 +138,29 @@ def main():
             "--fast-boot", "true", "--fast-forward", "true", "--sound", "off",
             "--confirm-quit", "false", "--run-vbls", str(args.run_vbls),
             "--log-file", os.path.join(work, "hatari.log"),
-            "--trace-file", fifo_path,
             "--trace", "gemdos,dsp_host_interface,dsp_host_ssi,xbios",
             program_argument(player),
         ]
+        # With no --trace-file Hatari writes the trace to its own output, so
+        # score that stream directly. Nothing reaches the disk, and it needs no
+        # named pipe, which Windows Python cannot create.
+        proc = subprocess.Popen(
+            command, cwd=REPO, env=env, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True, errors="replace",
+        )
+        scorer = TraceScorer(proc.stdout)
+        scorer.start()
         try:
-            completed = subprocess.run(
-                command, cwd=REPO, env=env, stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL, timeout=args.wall_timeout,
-                check=False,
-            )
+            returncode = proc.wait(timeout=args.wall_timeout)
         except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
             sys.exit(f"error: Hatari exceeded {args.wall_timeout}s wall time")
         scorer.join(timeout=30)
 
         reasons = []
-        if completed.returncode:
-            reasons.append(f"Hatari exited with status {completed.returncode}")
+        if returncode:
+            reasons.append(f"Hatari exited with status {returncode}")
         if scorer.is_alive():
             reasons.append("trace reader did not reach EOF")
         if scorer.failure:
