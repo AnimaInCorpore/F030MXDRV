@@ -12,8 +12,11 @@ from pathlib import Path
 
 LABEL_RE = re.compile(r"^\s*\d+\s+(?:[PXY]:[0-9A-F]+\s+)?\s*([A-Za-z_][A-Za-z0-9_]*):\s*$")
 ADDRESS_RE = re.compile(r"^\s*\d+\s+([PXYL]):([0-9A-F]+)\b")
+# Hatari prints the instruction percentage through the host's locale, so a
+# German Windows host writes "0,01%" where a C-locale host writes "0.01%".
+# Accept either separator; the counts beside it are plain integers.
 PROFILE_RE = re.compile(
-    r"^p:([0-9a-f]+).*?\s([0-9]+\.[0-9]+)% \((\d+), (\d+), (\d+)\)$"
+    r"^p:([0-9a-f]+).*?\s([0-9]+[.,][0-9]+)% \((\d+), (\d+), (\d+)\)$"
 )
 
 
@@ -88,7 +91,7 @@ def parse_profile(path: Path) -> tuple[int, int, list[tuple[int, int, int, float
         if not match:
             continue
         pc = int(match.group(1), 16)
-        percent = float(match.group(2))
+        percent = float(match.group(2).replace(",", "."))
         instructions = int(match.group(3))
         cycles = int(match.group(4))
         rows.append((pc, instructions, cycles, percent))
