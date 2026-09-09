@@ -20,7 +20,7 @@ playback, and fadeout.
 
 Dense eight-track FM songs fit the DSP budget as well: an FM-only period
 sends no PCM words (protocol v25's silent flag), the carrier, feedback and AM
-passes were fused bit-identically, pitch rebuilds are deferred to once per
+passes were fused without changing the gate's output, pitch rebuilds are deferred to once per
 channel and drain, and a burst-commit bug that dropped every YM write after
 the 32nd of a period is fixed. The measured result is in
 [`docs/hatari-timing.md`](docs/hatari-timing.md#eight-track-fm-songs).

@@ -1,0 +1,17 @@
+# sample  register  data
+# Channel 7, algorithm 7, RIGHT output only; only operator 4 is audible.
+# Exercises the one-sided noise path into the planar right stream, which
+# lives in Y memory; the first kernel accumulated it into X memory instead.
+0 27 87
+0 2f 4c
+0 37 00
+0 5f 01
+0 7f 00
+0 9f 1c
+0 bf 00
+0 df 00
+0 ff 0f
+
+# Enable the fastest channel-7 noise rate and key on operator 4.
+0 0f 9f
+0 08 47

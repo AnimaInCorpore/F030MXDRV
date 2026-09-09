@@ -1,0 +1,29 @@
+# native sample  register  data
+# The sustained AM carrier of perceptual_lfo.trace with its PM switched off
+# (PMD 0, PMS 0), so the spectrum after the AM ends is a plain tone. The AM
+# depth returns to zero mid-note and, later, the channel's AM sensitivity
+# does too. Both edges must restore the carrier's full amplitude: a block AM
+# pass that stops walking once the depth is zero leaves the last scaled gain
+# pair in place and the note nearly muted.
+
+0 18 a8
+0 19 7f
+0 19 80
+0 1b 00
+0 38 03
+0 20 c7
+0 28 4c
+0 30 00
+0 58 01
+0 78 00
+0 98 1f
+0 b8 80
+0 d8 00
+0 f8 0f
+0 08 40
+
+# AM depth to zero with the sensitivity still 3
+6000 19 00
+
+# then the sensitivity itself to zero
+11000 38 00

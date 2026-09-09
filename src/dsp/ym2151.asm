@@ -6093,9 +6093,10 @@ rt5_am_mult_done:
         ; rescale the live gain pairs of every channel whose AM sensitivity
         ; is, or last block was, nonzero, and remember whether any channel
         ; remains scaled for the idle early-out. The register mirror and the
-        ; previous-AMS words walk under two pointers; the flag is raised on
-        ; the rare apply path, which is the only place a sensitivity can be
-        ; nonzero, so the common all-zero walk costs no memory traffic.
+        ; previous-AMS words walk under two pointers; rt5_am_apply_channel
+        ; raises the flag for every nonzero sensitivity it applies, the only
+        ; place one can occur, so the common all-zero walk costs no memory
+        ; traffic and a depth returning to zero still restores every pair.
         clr     b
         move    b1,x:rt5_lfo_am_channel
         move    b1,x:rt5_am_engaged
@@ -6286,14 +6287,34 @@ rt5_noise_sign_ready:
         move    n6,r1                   ; segment-biased common-ring base
         jsr     rt5_noise_ring_pass
         jmp     rt5_noise_state_store
+        ; One-sided noise joins the planar streams' write-first contract:
+        ; an unwritten stream takes fresh values and raises its flag, a
+        ; written one accumulates. The left stream is X memory, the right
+        ; one Y memory, each with its own pass.
 rt5_noise_left_only:
         move    x:rt5_pan_left_base,r1
+        move    x:rt5_pan_left_written,a
+        tst     a
+        jne     rt5_noise_left_add
+        move    #>1,a
+        move    a1,x:rt5_pan_left_written
+        jsr     rt5_noise_stream_write_x
+        jmp     rt5_noise_state_store
+rt5_noise_left_add:
         jsr     rt5_noise_stream_pass
         jmp     rt5_noise_state_store
 rt5_noise_no_left:
         jclr    #7,a1,rt5_noise_unpanned
         move    x:rt5_pan_right_base,r1
-        jsr     rt5_noise_stream_pass
+        move    x:rt5_pan_right_written,a
+        tst     a
+        jne     rt5_noise_right_add
+        move    #>1,a
+        move    a1,x:rt5_pan_right_written
+        jsr     rt5_noise_ring_pass     ; fresh Y-memory values
+        jmp     rt5_noise_state_store
+rt5_noise_right_add:
+        jsr     rt5_noise_stream_pass_y
         jmp     rt5_noise_state_store
 rt5_noise_unpanned:
         move    n6,r1
@@ -6304,8 +6325,11 @@ rt5_noise_state_store:
 rt5_noise_block_done:
         rts
 
-; Both passes advance one Galois step and the latch DDA per frame; the
-; ring form writes the fresh values, the stream form accumulates them.
+; All passes advance one Galois step and the latch DDA per frame; the
+; ring form writes fresh values to Y memory (the common ring or an unwritten
+; right stream), the stream form accumulates into the X-memory left stream,
+; and the island holds the twins for a written right stream (Y accumulate)
+; and an unwritten left stream (X write).
 rt5_noise_ring_pass:
         do      n5,rt5_noise_ring_done
         add     x1,b
@@ -7696,7 +7720,7 @@ rt5_env_tl_gain:
 ; before the new entry is stored, so no write is ever dropped or reordered.
 ; Cold by construction (runs only between refills), so it lives in the
 ; island's tail gap below the phys $2b00 arrays.
-        org     p:$2ac0
+        org     p:$2ad0
 ssi_stream_write_realtime:
         move    x:ym_queue_count,a
         move    #>32,x0
@@ -8279,6 +8303,15 @@ rt5_pcm_silent_early_done:
 rt5_am_apply_channel:
         move    n4,x:rt5_lfo_am_op      ; n4 is the render's persistent
                                         ; dispatch offset: park it here
+        ; A nonzero sensitivity leaves this channel scaled after the pass,
+        ; so the next block must walk again even at zero AM depth to restore
+        ; the base pairs; a channel applied only for its previous sensitivity
+        ; restores unity here and leaves the flag alone.
+        move    y1,b
+        tst     b
+        jeq     rt5_am_apply_pointers
+        move    b1,x:rt5_am_engaged
+rt5_am_apply_pointers:
         move    #>rt5_am_mult,a
         add     y1,a
         move    a1,r3
@@ -8675,5 +8708,64 @@ rt5_alg5_mute:
         move    x:(r7+n7),y0
         move    y:(r2+n2),x1
         jmp     rt5_serial_transform_x
+
+; Noise pass twins for the planar streams (see rt5_noise_ring_pass): the
+; same Galois step and latch DDA per frame, storing fresh values into the
+; X-memory left stream or accumulating into the Y-memory right stream.
+rt5_noise_stream_write_x:
+        do      n5,rt5_noise_write_x_done
+        add     x1,b
+        move    y1,a
+        lsr     a
+        jcc     rt5_noise_write_x_stepped
+        move    #>$012000,x1
+        eor     x1,a
+        move    #>DSP_RT_NOISE_FRAME_STEP,x1
+rt5_noise_write_x_stepped:
+        move    a1,y1
+rt5_noise_write_x_drain:
+        cmp     x0,b
+        jlt     rt5_noise_write_x_value
+        sub     x0,b
+        move    x:rt5_noise_gain,a
+        move    y1,x:rt5_noise_state_snap
+        jclr    #16,y1,rt5_noise_write_x_pos
+        neg     a
+rt5_noise_write_x_pos:
+        move    a1,y0
+        jmp     rt5_noise_write_x_drain
+rt5_noise_write_x_value:
+        move    y0,x:(r1)+
+rt5_noise_write_x_done:
+        rts
+
+rt5_noise_stream_pass_y:
+        do      n5,rt5_noise_pass_y_done
+        add     x1,b
+        move    y1,a
+        lsr     a
+        jcc     rt5_noise_pass_y_stepped
+        move    #>$012000,x1
+        eor     x1,a
+        move    #>DSP_RT_NOISE_FRAME_STEP,x1
+rt5_noise_pass_y_stepped:
+        move    a1,y1
+rt5_noise_pass_y_drain:
+        cmp     x0,b
+        jlt     rt5_noise_pass_y_value
+        sub     x0,b
+        move    x:rt5_noise_gain,a
+        move    y1,x:rt5_noise_state_snap
+        jclr    #16,y1,rt5_noise_pass_y_pos
+        neg     a
+rt5_noise_pass_y_pos:
+        move    a1,y0
+        jmp     rt5_noise_pass_y_drain
+rt5_noise_pass_y_value:
+        move    y:(r1),a
+        add     y0,a
+        move    a,y:(r1)+
+rt5_noise_pass_y_done:
+        rts
 
         end

@@ -46,6 +46,14 @@ SCENARIOS: dict[str, tuple[str, int, int | None, int | None]] = {
     # At 32.780 kHz this longer window observes about 1,950 transitions,
     # keeping the 3% transition-rate gate statistically meaningful.
     "noise-slow": ("noise_channel7_slow.trace", 16384, None, None),
+    # The same noise panned to one output only: the substitution lands in a
+    # planar stream instead of the common ring, under the write-first stream
+    # flags a silent-PCM period starts clear (left is X memory, right is Y).
+    "noise-left": ("noise_channel7_left.trace", 8192, None, None),
+    "noise-right": ("noise_channel7_right.trace", 8192, None, None),
+    # AM depth, then AM sensitivity, return to zero on a sustained carrier;
+    # the block AM pass must keep walking until every scaled pair is restored.
+    "lfo-am-off": ("perceptual_lfo_am_off.trace", 8192, None, None),
     **{
         f"algorithm-{index}": ("perceptual_topology.trace", 4096, index, 4)
         for index in range(8)

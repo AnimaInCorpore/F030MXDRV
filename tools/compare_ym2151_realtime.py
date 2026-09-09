@@ -21,7 +21,8 @@ CODEC_RATE = 25_175_000.0 / 4.0 / 192.0
 PHASE_MODULUS = 1 << 22
 SLOW_NOISE_LATCH_NATIVE_SAMPLES = 8
 BASE_SCENARIOS = (
-    "pitch", "detune", "timing", "envelope", "lfo", "noise", "noise-slow"
+    "pitch", "detune", "timing", "envelope", "lfo", "noise", "noise-slow",
+    "noise-left", "noise-right", "lfo-am-off",
 )
 ALGORITHM_SCENARIOS = tuple(f"algorithm-{index}" for index in range(8))
 FEEDBACK_SCENARIOS = ("feedback-0", "feedback-7", "feedback-7-algorithm-5")
@@ -455,7 +456,32 @@ def compare_suites(
         f"spectral_cosine={lfo_spectral_cosine:.4f}"
     )
 
-    for scenario in ("noise", "noise-slow"):
+    # The AM-off scenario turns the AM depth off at native sample 6000 and the
+    # sensitivity off at 11000 on a sustained carrier. Its whole-window
+    # spectrum must still match, and the closing quarter, where every AM
+    # contribution has ended, must carry the carrier's full amplitude: a
+    # kernel that stops restoring scaled gain pairs once the depth is zero
+    # leaves the note nearly muted there.
+    am_off_reference = audio(reference["lfo-am-off"])
+    am_off_candidate = audio(candidate["lfo-am-off"])
+    am_off_cosine, am_off_rmse, am_off_energy = spectral_metrics(
+        am_off_reference, am_off_candidate
+    )
+    tail = len(am_off_reference) * 3 // 4
+    am_off_tail_ratio = rms(am_off_candidate[tail:]) / max(rms(am_off_reference[tail:]), 1e-9)
+    if am_off_cosine < 0.90:
+        errors.append(f"lfo-am-off: spectral cosine {am_off_cosine:.4f} is below 0.90")
+    if not 0.80 <= am_off_tail_ratio <= 1.25:
+        errors.append(
+            f"lfo-am-off: RMS ratio {am_off_tail_ratio:.3f} after AM turned off "
+            "is outside 0.80-1.25"
+        )
+    notes.append(
+        f"lfo-am-off: spectral_cosine={am_off_cosine:.4f}, log_rmse={am_off_rmse:.2f} dB, "
+        f"energy_ratio={am_off_energy:.3f}, tail_rms_ratio={am_off_tail_ratio:.3f}"
+    )
+
+    for scenario in ("noise", "noise-slow", "noise-left", "noise-right"):
         noise_reference = reference[scenario].column("noise_state")
         noise_candidate = candidate[scenario].column("noise_state")
         reference_transitions = len(transitions(noise_reference))
@@ -498,6 +524,29 @@ def compare_suites(
         if audio_cosine < 0.70:
             errors.append(
                 f"{scenario}: audio spectrum cosine {audio_cosine:.4f} is below 0.70"
+            )
+        if scenario in ("noise-left", "noise-right"):
+            # One-sided panning: the noise must reach the reference's output
+            # at the reference's level and leave the other output silent.
+            column = "left" if scenario == "noise-left" else "right"
+            other = "right" if scenario == "noise-left" else "left"
+            side_ratio = rms(candidate[scenario].column(column)) / max(
+                rms(reference[scenario].column(column)), 1e-9
+            )
+            leak_ratio = rms(candidate[scenario].column(other)) / max(
+                rms(candidate[scenario].column(column)), 1e-9
+            )
+            if not 0.80 <= side_ratio <= 1.25:
+                errors.append(
+                    f"{scenario}: {column} RMS ratio {side_ratio:.3f} is outside 0.80-1.25"
+                )
+            if leak_ratio > 0.01:
+                errors.append(
+                    f"{scenario}: {other} output carries {leak_ratio:.2%} of the noise"
+                )
+            notes.append(
+                f"{scenario}: {column}_rms_ratio={side_ratio:.3f}, "
+                f"{other}_leak={leak_ratio:.2%}"
             )
         notes.append(
             f"{scenario}: transition_error={noise_rate_error:.2%}, "

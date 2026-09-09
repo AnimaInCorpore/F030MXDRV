@@ -95,7 +95,7 @@ punctuality and the capture path is blocking rather than real-time paced:
 | --- | --- | --- |
 | `check` | pass | pass (no emulator) |
 | `smoke` | pass | pass |
-| `capture-realtime` | pass | pass, 19/19 scenarios |
+| `capture-realtime` | pass | pass, 23/23 scenarios |
 | `endurance` | pass | pass |
 | `endurance-batch` | pass | pass, 19/19 corpus songs |
 | `stock-audio` | pass | pass — 0 missed boundaries with the pipeline |
@@ -225,8 +225,11 @@ were all zero 46, envelope pass ~40, block AM ~36, per-block dispatch ~26,
 emit 9, the SSI interrupt 6. The host was never late: the boundary wait left
 through its "payload resident" test on all but one iteration per period.
 
-The changes, every one proven bit-identical by byte-equal capture vectors
-against the previous build and by the unchanged smoke mix checksum:
+The changes, each byte-equal to the previous build on the twenty capture
+scenarios of the time and leaving the smoke mix checksum unchanged. That
+was not the same as bit-identical everywhere: review found two paths the
+gate never exercised, both regressed by the stream flags and the AM
+rewrite and both fixed and gated since (see below).
 
 - **Silent PCM periods send nothing** (protocol v25). A period with no active
   PDX voice sets bit 2 of its pan word and carries no sample words; the 68030
@@ -262,6 +265,21 @@ against the previous build and by the unchanged smoke mix checksum:
 The `$17` profile checksum moved from `fe eb ad` to `fe eb 65`: it folds the
 packed dispatch word of channel 7, whose entry address moved by exactly 72
 words when algorithms 4 and 5 left the main stream, and by nothing else.
+
+Two regressions escaped that gate and were caught in review, against
+`8fb77e2`. One-sided channel-7 noise vanished on a silent-PCM period: the
+noise substitution accumulated into a planar stream without joining the
+write-first contract, so the stream stayed flagged unwritten, the next
+one-sided carrier overwrote it and the emit never read it. The rewritten AM
+walk cleared `rt5_am_engaged` and never raised it again, so once the AM
+depth returned to zero the pass stopped walking and every scaled gain pair
+stayed scaled - a sustained note fell from about ±8,192 to ±1. Fixing the
+noise path also exposed an older defect: right-only noise had always
+accumulated into X memory at the right stream's Y address, i.e. into the
+SSI buffers, and never reached the right output. The gate now has 23
+scenarios: `noise-left`, `noise-right` and `lfo-am-off` grade the panned
+noise level, its leak into the other output, and the amplitude after AM
+turns off.
 
 What remains is measured, not guessed: the STAGE5 payloads that still miss
 are key-on and voice-load bursts where the envelope walk and gain rebuilds

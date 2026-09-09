@@ -107,7 +107,7 @@ help:
 	@echo "  all              build the Falcon executables and DSP image"
 	@echo "  check            build everything and validate generated references"
 	@echo "  smoke            run the full non-interactive Hatari integration test"
-	@echo "  capture-realtime capture and compare all 20 perceptual scenarios"
+	@echo "  capture-realtime capture and compare all 23 perceptual scenarios"
 	@echo "  stock-audio      gate stock-clock SSI timing (needs Xevious corpus files)"
 	@echo "  endurance        play Xevious through two loops and fade under Hatari"
 	@echo "  endurance-batch  play every uppercase MDX in CORPUS_DIR under Hatari"
@@ -194,6 +194,9 @@ $(YM2151_PERCEPTUAL_STAMP): $(YM2151_ORACLE) \
 		tests/traces/perceptual_topology.trace \
 		tests/traces/noise_channel7.trace \
 		tests/traces/noise_channel7_slow.trace \
+		tests/traces/noise_channel7_left.trace \
+		tests/traces/noise_channel7_right.trace \
+		tests/traces/perceptual_lfo_am_off.trace \
 		tests/traces/perceptual_pitch.trace \
 		tests/traces/perceptual_detune.trace \
 		tests/traces/perceptual_timing.trace \
@@ -224,6 +227,12 @@ $(YM2151_PERCEPTUAL_STAMP): $(YM2151_ORACLE) \
 			> $$output_dir/noise.tsv || exit 1; \
 		$(YM2151_ORACLE) $$mode tests/traces/noise_channel7_slow.trace 16384 \
 			> $$output_dir/noise-slow.tsv || exit 1; \
+		$(YM2151_ORACLE) $$mode tests/traces/noise_channel7_left.trace 8192 \
+			> $$output_dir/noise-left.tsv || exit 1; \
+		$(YM2151_ORACLE) $$mode tests/traces/noise_channel7_right.trace 8192 \
+			> $$output_dir/noise-right.tsv || exit 1; \
+		$(YM2151_ORACLE) $$mode tests/traces/perceptual_lfo_am_off.trace 8192 \
+			> $$output_dir/lfo-am-off.tsv || exit 1; \
 		for algorithm in 0 1 2 3 4 5 6 7; do \
 			$(YM2151_ORACLE) $$mode tests/traces/perceptual_topology.trace 4096 \
 				--algorithm $$algorithm --feedback 4 \
