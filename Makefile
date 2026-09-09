@@ -947,4 +947,9 @@ run: all
 		$(CURDIR)/third_party/f030dsp3d/tools/tos402.rom f030mxdrv.tos
 
 clean:
-	rm -rf build release
+	rm -rf build
+	rm -f $(RELEASE_DIR)/f030mxdrv.tos $(RELEASE_DIR)/f030mxdrv.ttp \
+		$(RELEASE_DIR)/xevious.tos $(RELEASE_DIR)/xevverb.tos \
+		$(RELEASE_DIR)/xevv50.tos $(RELEASE_DIR)/ratetest.tos \
+		$(RELEASE_DIR)/dspprobe.tos $(RELEASE_DIR)/ym2151.lod
+	@rmdir $(RELEASE_DIR) 2>/dev/null || true
