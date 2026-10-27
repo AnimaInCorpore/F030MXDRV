@@ -555,6 +555,22 @@ frame while noise is enabled — over the budget only in the all-channels-maxed
 profile fixture, which therefore clears $0f and leaves the noise-enabled cost
 to the capture scenarios and the hardware soak.
 
+**An overdue queue head lands at the segment start (fixed 2026-10-27).** The
+split walk (`rt5_split_segment_loop`) forms the head's `time - block start` and
+masks `a1` with `$ffff`. For a write whose time had already passed, `a2` kept
+the negative sign, so the write compared as landing in this block and the walk
+hunted about 65,000 native samples. The segment count came out at hundreds of
+frames and the stage loops' stores ran over internal X RAM from `X:$80`.
+There they overwrote the LFO depths; a negative AM depth then put `rep n2` (the
+AM multiplier build) into 65,536-cycle stalls that starved the SSI: runs of
+about 100 identical frames, heard as a 48 Hz buzz. The walk now rebuilds `a`
+from the masked word and lands an offset in the upper half at the segment's
+start. Found by two arcade ports that reuse this kernel through F030Arcade
+(`games/sf2ce`, `games/ddragon`, whose captures had the stalls); `make check`,
+`make smoke` and `make capture-realtime` pass unchanged with the fix (pinned
+DSP-calibrated Hatari `59fde8e0`). No MXDRV corpus song has been run against it
+yet; `make endurance-batch` would show whether one ever queued an overdue write.
+
 ## Falcon audio-path constraints
 
 Four properties of the Falcon sound matrix bound the playback path. They come

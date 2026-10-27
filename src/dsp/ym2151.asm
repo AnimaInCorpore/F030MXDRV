@@ -6540,6 +6540,19 @@ rt5_split_segment_loop:
         sub     x0,a
         move    #>$00ffff,x0
         and     x0,a1
+        ; The and leaves a negative difference's sign in a2, so an overdue head
+        ; (its time before the block's start) compared as "in this block" and the walk
+        ; below hunted ~65,000 native samples: a segment count of hundreds of frames,
+        ; and the stage loops' stores ran over internal X RAM (the LFO depths among
+        ; it; a negative AM depth then sent `rep n2` into 65,536-cycle stalls).  Rebuild
+        ; a from the 16-bit offset, and land an overdue head (an offset in the upper
+        ; half) at the segment's start (found in F030Arcade games/sf2ce, 2026-10-27).
+        move    a1,a
+        move    #>$008000,x0
+        cmp     x0,a
+        jlt     rt5_split_head_ahead
+        clr     a
+rt5_split_head_ahead:
         move    x:rt5_seg_adv,b
         cmp     b,a
         jgt     rt5_split_render        ; lands in a later block
