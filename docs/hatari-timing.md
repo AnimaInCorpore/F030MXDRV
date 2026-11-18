@@ -59,12 +59,12 @@ All eleven bracketed profile reports are byte-identical between the two builds:
 | `profile-dsp-rt2` | 37.75 per codec frame (301.98 projected) | 326.27 | 0.93x |
 | `profile-dsp-rt3` | 37.70 per codec frame (301.61 projected) | 326.27 | 0.92x |
 | `profile-dsp-rt4-alg1..6` | 35.98-39.05 per codec frame (287.86-312.37 projected) | 326.27 | 0.88-0.96x |
-| `profile-dsp-rt5` | 336.60 per codec frame | 489.40 | 0.69x |
+| `profile-dsp-rt5` | 329.58 per codec frame | 489.40 | 0.67x |
 
 This is the expected result and it is worth stating plainly: the static budget
 analysis in [`dsp56001-notes.md`](dsp56001-notes.md) was never inflated by the
 emulator. `489.40 = 32,084,988 / 2 / 32,779.95` is the hardware's 16 MIPS, so
-the rt5 figure of 336.60 cycles per frame with 31.2% spare is a
+the rt5 figure of 329.58 cycles per frame with 32.7% spare is a
 statement about a real Falcon. Only the *emulated machine* was twice as fast as
 the one those numbers describe.
 
@@ -292,13 +292,15 @@ quarter. The pass costs about 45 cycles per PM channel and block: STAGE5,
 which drives two channels with the OPM LFO, renders its typical payload at
 422 cycles per frame instead of 415 and misses 40 boundaries instead of 25;
 STAGE6 still misses none, and the rt5 profile gate rises from 331.69 to
-336.60 cycles per frame.
+336.60 cycles per frame. (The 1024-step sine and the move of the stage loops
+into internal P RAM later brought it to 329.58; the live figures in this
+section predate that and have not been re-measured.)
 
 What remains is measured, not guessed: the STAGE5 payloads that still miss
 are key-on and voice-load bursts where the envelope walk and gain rebuilds
 add 80–100 cycles per frame on top of a 400-cycle base. The envelope pass
-lives in internal P RAM, which is full to the last word, so the next step
-there is to move cold command-loop code out of that window first. Neither
+lives in internal P RAM. The cold command-loop code has since left that
+window, but the sine-reading stage loops took its place and 18 words remain. Neither
 song has been played on the Falcon since these changes; the hardware verdict
 is still owed, and so is the soak.
 

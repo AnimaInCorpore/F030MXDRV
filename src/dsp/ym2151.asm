@@ -339,7 +339,20 @@ rt5_lfo_acc_lo:
 ; can be subtracted; the numeric offset is unchanged.
 ; The 32.780 kHz prescale-2 frame advances native time by 1920/1007. This
 ; signed 24-bit multiplier encodes the corresponding per-frame phase scale.
-RT5_PITCH_DDA_SCALE equ 4014223
+RT5_PITCH_DDA_SCALE equ 4002451
+
+; The production stages read a 1024-step sine, the chip's own logical
+; waveform resolution, instead of the 256-step factory ROM the block spikes
+; use. The generated table is assembled into a P island; Falcon external P
+; aliases external Y word for word, so the stage-two loader places it and
+; the stages read it as Y data. The base is 1024-aligned for the modulo-1024
+; r0, and the mask doubles as the phase MAC operand, so one cycle spans
+; 1024*2^24 accumulator units and a frame advances increment*2046.
+RT5_SINE_BASE   equ $3400
+RT5_SINE_MASK   equ $3ff
+; ymfm's out>>1 serial depth in 1024-step index units, relative to the
+; output-scale gain: four times the former 256-step $001000.
+RT5_MOD_GAIN_SCALE equ $004000
 
 RT5_INC_BASE     equ @cvs(x,rt5_operator_increment)-rt5_feedback_1
 RT5_INC_OP1_PRE  equ RT5_INC_BASE+0
@@ -427,8 +440,8 @@ rt5_event_commands:
 
 ; Live per-operator block gains in the same channel-major M1/C1/M2/C2 order
 ; as rt5_phase: the output-scale array feeds carrier stages and the
-; modulation-scale array (2^-13: ymfm's out>>1 serial depth in 256-step
-; sine-ROM index units) feeds modulator stages, each algorithm body pointing
+; modulation-scale array (2^-11: ymfm's out>>1 serial depth in 1024-step
+; sine-table index units) feeds modulator stages, each algorithm body pointing
 ; n7 at the constant offset matching the stage's role. The live words carry
 ; this block's AM; the base pairs below hold the AM-free decoded gains.
         org     x:$540
@@ -789,31 +802,7 @@ rt5_env_attack_path:
         jmp     rt5_env_finish_keep
 rt5_env_cap_path:
         cmp     x1,a
-        jlt     rt5_env_store_keep
-rt5_env_retire_capped:
-        ; full attenuation: pin the level, silence all four gain words
-        move    x1,a
-        move    a1,x:(r1+n1)
-        move    n2,b
-        move    #>rt5_env_gainmap,x0
-        add     x0,b
-        move    b1,r3
-        nop
-        movem   p:(r3),b
-        move    b1,n1
-        move    #rt5_operator_gain_out,r1
-        clr     a
-        move    a1,x:(r1+n1)
-        move    #rt5_operator_gain_mod,r1
-        nop
-        move    a1,x:(r1+n1)
-        move    #rt5_operator_gain_base_out,r1
-        nop
-        move    a1,x:(r1+n1)
-        move    #rt5_operator_gain_base_mod,r1
-        nop
-        move    a1,x:(r1+n1)
-        jmp     rt5_env_remove
+        jge     rt5_env_retire_capped
 rt5_env_store_keep:
         move    a1,x:(r1+n1)
         ; skip the gain rebuild while the 10-bit attenuation is unchanged
@@ -830,26 +819,6 @@ rt5_env_keep_done:
         jmp     rt5_env_scan_next
 rt5_env_scan_done:
         rts
-rt5_env_remove:
-        ; clear the active bit and swap the list tail into this slot
-        move    #rt5_env_state,r5
-        nop
-        move    x:(r5+n5),a
-        bclr    #3,a1
-        move    a1,x:(r5+n5)
-        move    x:rt5_active_count,a
-        move    #>1,x0
-        sub     x0,a
-        move    a1,x:rt5_active_count
-        move    a1,n0
-        move    #rt5_active_list,r0
-        move    y1,a
-        sub     x0,a
-        move    a1,y1                   ; the register-held end shrinks too
-        move    x:(r0+n0),b
-        move    b1,x:(r4)
-        jmp     rt5_env_scan_next
-
 ; Rebuild both AM gain variants of the operator in N1 from its total-level
 ; base and current envelope level: gain = tl * 2^(-level/64), decomposed
 ; into the generated 64-entry fraction table and a per-octave shift.
@@ -889,7 +858,7 @@ rt5_env_gain_shifted:
         ; depth. A feedback-active M1 receives a second independently scaled
         ; product in its stage loop; the 32.780 kHz production cadence retains
         ; enough cycles for the independently scaled feedback product.
-        move    #>$001000,x1
+        move    #>RT5_MOD_GAIN_SCALE,x1
 rt5_env_gain_mod_scale:
         move    y0,x0
         mpy     x0,x1,a
@@ -930,157 +899,268 @@ rt5_env_transition_reload:
         move    b1,x:rt5_env_current
         jmp     rt5_env_reload_op
 
-start:
-        movep   #1,x:m_pbc              ; enable the Falcon host port
-        movep   #$1f8,x:m_pcc           ; Port C pins to SSI function; they
-                                        ; reset to GPIO, leaving the slave
-                                        ; SSI clockless on real hardware
-        movep   #0,x:m_bcr              ; reset leaves fifteen wait states on
-                                        ; every external access, and this
-                                        ; bootstrap path bypasses the TOS
-                                        ; loader that would clear them; the
-                                        ; Falcon SRAM needs none and Hatari
-                                        ; ignores the register entirely
-        movep   #$3000,x:m_ipr          ; SSI interrupt priority level 2
-        andi    #$fc,mr                 ; reset leaves I1:I0=11 masking IPL 2;
-                                        ; the SSI ISR needs the mask lowered
-        move    #>-1,m0                 ; linear addressing for ym_regdata
-
-        jsr     ym_initialize_slot_offsets
-        jsr     ym_reset
-
-command_loop:
-        jclr    #0,x:m_hsr,*            ; wait for host receive data full
-        movep   x:m_hrx,x1
-        move    x1,x:last_command
-
-        move    x1,a
-        move    #>$ff0000,y0
-        and     y0,a1                   ; isolate opcode
-
-        move    #>DSP_CMD_PING,x0
-        cmp     x0,a
-        jeq     command_ping
-
-        move    #>DSP_CMD_WRITE_REG,x0
-        cmp     x0,a
-        jeq     command_write
-
-        move    #>DSP_CMD_RESET,x0
-        cmp     x0,a
-        jeq     command_reset
-
-        move    #>DSP_CMD_CLOCK,x0
-        cmp     x0,a
-        jeq     command_clock
-
-        move    #>DSP_CMD_QUERY_PHASE,x0
-        cmp     x0,a
-        jeq     command_query_phase
-
-        move    #>DSP_CMD_QUERY_RIGHT,x0
-        cmp     x0,a
-        jeq     command_query_right
-
-        move    #>DSP_CMD_QUERY_ENV,x0
-        cmp     x0,a
-        jeq     command_query_envelope
-
-        move    #>DSP_CMD_QUERY_STATUS,x0
-        cmp     x0,a
-        jeq     command_query_status
-
-        move    #>DSP_CMD_QUERY_LFO,x0
-        cmp     x0,a
-        jeq     command_query_lfo
-
-        move    #>DSP_CMD_LOAD_TABLES,x0
-        cmp     x0,a
-        jeq     command_load_tables
-
-        move    #>DSP_CMD_START_AUDIO,x0
-        cmp     x0,a
-        jeq     command_start_audio
-
-        move    #>DSP_CMD_STOP_AUDIO,x0
-        cmp     x0,a
-        jeq     command_stop_audio
-
-        move    #>DSP_CMD_QUERY_AUDIO,x0
-        cmp     x0,a
-        jeq     command_query_audio
-
-        move    #>DSP_CMD_QUEUE_WRITE,x0
-        cmp     x0,a
-        jeq     command_queue_write
-
-        move    #>DSP_CMD_QUERY_TIME,x0
-        cmp     x0,a
-        jeq     command_query_time
-
-        move    #>DSP_CMD_PROFILE_RT,x0
-        cmp     x0,a
-        jeq     command_profile_realtime
-
-        move    #>DSP_CMD_PROFILE_RT2,x0
-        cmp     x0,a
-        jeq     command_profile_realtime2
-
-        move    #>DSP_CMD_PROFILE_RT3,x0
-        cmp     x0,a
-        jeq     command_profile_realtime3
-
-        move    #>DSP_CMD_PROFILE_RT4,x0
-        cmp     x0,a
-        jeq     command_profile_realtime4
-
-        move    #>DSP_CMD_PROFILE_RT5,x0
-        cmp     x0,a
-        jeq     command_profile_realtime5
-
-        move    #>DSP_CMD_START_RT_MIXED,x0
-        cmp     x0,a
-        jeq     command_start_realtime_mixed
-
-        move    #>DSP_CMD_START_MIXED,x0
-        cmp     x0,a
-        jeq     command_start_mixed
-
-        move    #>DSP_CMD_QUERY_MIX,x0
-        cmp     x0,a
-        jeq     command_query_mix
-
-        move    #>DSP_REPLY_ERROR,a
-        jsr     send_reply
-        jmp     command_loop
-
-; Runtime initialization keeps this persistent table out of the .LOD image
-; while making the exact renderer's logical-to-raw operator mapping a single
-; fetch.
-ym_initialize_slot_offsets:
-        ; MAME's raw register order is M1,C1,M2,C2: offsets 0,16,8,24.
-        move    #ym_slot_offsets,r0
-        clr     a
-        move    a1,x:(r0)+
-        move    #>16,a
-        move    a1,x:(r0)+
-        move    #>8,a
-        move    a1,x:(r0)+
-        move    #>24,a
-        move    a1,x:(r0)
+; O1 for the all-carrier algorithm. Quality mode computes the audible carrier
+; and the independently scaled feedback history as separate products. For
+; feedback level FB, history is the exact serial-depth gain divided by
+; 2^(9-FB), matching (out0+out1)>>(10-FB).
+rt5_feedback_write_carrier:
+        move    x:(r7+n7),y0            ; carrier gain; n7 is the OUT offset
+        move    y0,y:rt5_alg7_gain_ring ; first alternating gain is carrier
+        move    #>RT5_MOD_GAIN_OFFSET,n7
+        nop                              ; address-register pipeline interlock
+        move    x:(r7+n7),y0            ; exact serial-depth gain
+        move    y0,a
+        rep     n1                      ; history shift 9-FB from rt5_render_channel
+        asr     a
+        move    a1,y:rt5_alg7_gain_ring+1
+        move    a1,y0                   ; first product is feedback history
+        move    #>RT5_OUT_GAIN_OFFSET,n7
+        move    #rt5_alg7_gain_ring,r5
+        move    #1,m5
+        move    #rt2_stage_ring,r3
+        move    l:(r7),b10
+        do      n5,rt5_feedback_write_carrier_done
+        move    x:(r2),x0 y:(r4),a      ; x0 = newer history product, a = older
+        add     x0,a x0,y:(r4)          ; out0+out1; the newer product ages into Y
+        add     b,a
+        and     y1,a1
+        move    a1,n0
+        mac     x1,y1,b
+        move    y:(r0+n0),x0
+        mpyr    x0,y0,a y:(r5)+,y0      ; history; y0 becomes carrier
+        mpyr    x0,y0,a a,x:(r2) y:(r5)+,y0 ; carrier; history enters X; y0 becomes history
+        move    a,x:(r3)+
+rt5_feedback_write_carrier_done:
+        move    b10,l:(r7)+
+        move    (r2)+
+        move    (r4)+
+        move    #>-1,m5
         rts
 
-command_ping:
-        move    #>DSP_REPLY_HELLO,a
-        jsr     send_reply
-        jmp     command_loop
 
-; SSI transmit-underrun recovery. Reading SSISR followed by writing TX clears
-; TUE; this long exception path is not part of normal buffered playback.
-ssi_tx_exception:
-        movep   x:m_sr,x:ssi_status_snapshot
-        movep   x:(r6)+,x:m_tx
-        rti
+; All-topology stages for the live-SSI profile. r0 is the sine-ROM base and r7
+; walks 32 overlaid internal long phases, leaving r6/m6 untouched for the
+; interrupt. Callers preload each stage's decoded PM-adjusted increment into
+; x1 and its block gain into y0 before the jsr; rt5_render_channel parks the
+; channel's feedback-history shift in n1 for the operator-1 stages.
+; Every operator-1 stage keeps the channel's two-frame feedback history with
+; the newest product in the X slot and the older one in the Y slot: the
+; frame's sum reads both, the X word ages into Y beside that add, and the
+; new product lands in X beside the onward multiply, so the store needs no
+; instruction of its own. The pair starts at zero, and the three stages
+; agree on the order, so an algorithm change never reorders a history.
+rt5_feedback_write_x:
+        ; Feedback level 0 contributes zero self-modulation, exactly as
+        ; ymfm's (out0+out1)>>(10-FB) special-cases it, but that dispatch now
+        ; happens at register-decode time through the per-channel class entry
+        ; (rt5_feedback_write_bypass), so the stages carry no per-block test.
+        move    x:(r7+n7),y0            ; exact onward serial gain
+        move    y0,y:rt5_alg7_gain_ring
+        move    y0,a
+        rep     n1                      ; history shift 9-FB from rt5_render_channel
+        asr     a
+        move    a1,y:rt5_alg7_gain_ring+1
+        move    a1,y0                   ; first product is feedback history
+        move    #rt5_alg7_gain_ring,r5
+        move    #1,m5
+        move    #rt2_stage_ring,r3
+        move    l:(r7),b10
+        do      n5,rt5_feedback_write_x_done
+        move    x:(r2),x0 y:(r4),a      ; x0 = newer history product, a = older
+        add     x0,a x0,y:(r4)          ; out0+out1; the newer product ages into Y
+        add     b,a
+        and     y1,a1
+        move    a1,n0
+        mac     x1,y1,b
+        move    y:(r0+n0),x0
+        mpyr    x0,y0,a y:(r5)+,y0      ; history product; y0 becomes the onward gain
+        mpyr    x0,y0,a a,x:(r2) y:(r5)+,y0 ; onward product; history enters X
+        move    a,x:(r3)+
+rt5_feedback_write_x_done:
+        move    b10,l:(r7)+
+        move    (r2)+
+        move    (r4)+
+        move    #>-1,m5
+        rts
+
+; Feedback-level-0 class stages: load the stage gain, advance the channel's
+; feedback pair (every later stage and the next channel's control read
+; anchor on r2/r4), and run the feedback-less twin.
+
+; Add operator 1's feedback output to an existing X modulation ring. This is
+; the reordered algorithm-2 fan-in used by the isolated command-$16 spike.
+rt5_feedback_add_x:
+        move    x:(r7+n7),y0            ; exact onward serial gain
+        move    y0,y:rt5_alg7_gain_ring
+        move    y0,a
+        rep     n1                      ; history shift 9-FB from rt5_render_channel
+        asr     a
+        move    a1,y:rt5_alg7_gain_ring+1
+        move    a1,y0
+        move    #rt5_alg7_gain_ring,r5
+        move    #1,m5
+        move    #rt2_stage_ring,r3
+        move    l:(r7),b10
+        do      n5,rt5_feedback_add_x_done
+        move    x:(r2),x0 y:(r4),a      ; x0 = newer history product, a = older
+        add     x0,a x0,y:(r4)          ; out0+out1; the newer product ages into Y
+        add     b,a
+        and     y1,a1
+        move    a1,n0
+        mac     x1,y1,b
+        move    y:(r0+n0),x0
+        mpyr    x0,y0,a y:(r5)+,y0
+        ; The onward multiply consumes the old sine/gain pair while the
+        ; history product enters its X slot and the next history gain loads.
+        mpyr    x0,y0,a a,x:(r2) y:(r5)+,y0
+        move    x:(r3),x0
+        add     x0,a
+        move    a,x:(r3)+
+rt5_feedback_add_x_done:
+        move    b10,l:(r7)+
+        move    (r2)+
+        move    (r4)+
+        move    #>-1,m5
+        rts
+
+
+
+; Start or add an unmodulated operator in the internal X stage ring.
+rt5_independent_write_x:
+        ; Software-pipeline the ring store through the following frame's
+        ; phase mask.  The first parallel write lands in unused slot 63;
+        ; m3 then wraps r3 to slot zero, and the epilogue commits the final
+        ; result.  Runtime segments are at most 32 frames, so slot 63 is
+        ; never consumed by a following stage.
+        move    #rt2_stage_ring+63,r3
+        move    l:(r7),b10
+        and     y1,b1
+        move    b1,n0
+        do      n5,rt5_independent_write_x_done
+        mac     x1,y1,b y:(r0+n0),x0
+        and     y1,b1 a,x:(r3)+
+        move    b1,n0
+        mpyr    x0,y0,a
+rt5_independent_write_x_done:
+        move    a,x:(r3)+
+        move    b10,l:(r7)+
+        rts
+
+rt5_independent_add_x:
+        move    #rt2_stage_ring,r3
+        move    #rt2_stage_ring,r5
+        move    l:(r7),b10
+        and     y1,b1
+        move    b1,n0
+        do      n5,rt5_independent_add_x_done
+        mac     x1,y1,b y:(r0+n0),x0
+        and     y1,b1 x:(r3)+,a
+        move    b1,n0
+        macr    x0,y0,a
+        move    a,x:(r5)+
+rt5_independent_add_x_done:
+        move    b10,l:(r7)+
+        rts
+
+rt5_serial_transform_x:
+        move    #rt2_stage_ring,r5
+; Write-first twin for a one-sided stream: r5 already addresses the block's
+; unwritten left stream, so the carrier stores through the same limiter
+; move that adding onto zeros would have produced.
+rt5_serial_write_x:
+        move    #rt2_stage_ring,r3
+        move    l:(r7),b10
+        move    x:(r3)+,a
+        do      n5,rt5_serial_transform_x_done
+        add     b,a
+        and     y1,a1
+        move    a1,n0
+        mac     x1,y1,b
+        move    y:(r0+n0),x0
+        mpyr    x0,y0,a x:(r3)+,x0
+        move    a,x:(r5)+ x0,a
+rt5_serial_transform_x_done:
+        move    b10,l:(r7)+
+        rts
+
+rt5_serial_accumulate_x:
+        ; The gain rides in x0 so y0 can serve as the loop's only temporary:
+        ; the R:Y class II move then reloads the next modulation word into A
+        ; beside the ring store, one instruction fewer per frame than the
+        ; store-then-load pair. Same products, same limiter, bit-identical.
+        move    #rt2_stage_ring,r3
+        move    l:(r7),b10
+        move    y0,x0
+        move    x:(r3)+,a
+        do      n5,rt5_serial_accumulate_x_done
+        add     b,a
+        and     y1,a1
+        move    a1,n0
+        mac     x1,y1,b
+        move    y:(r0+n0),y0
+        mpyr    x0,y0,a y:(r1)+,y0
+        add     y0,a x:(r3)+,y0
+        move    y0,a a,y:(r5)+
+rt5_serial_accumulate_x_done:
+        move    b10,l:(r7)+
+        rts
+
+; Write-first variant of the both-panned carrier: the block's first common
+; carrier stores into the Y mix ring without reading it, replacing the former
+; per-block ring clear. The stored full-A move keeps the same limiter
+; semantics as accumulating onto a cleared ring, so output is bit-identical.
+; The shared prologue routes an already-written ring to the accumulate loop.
+rt5_serial_mix_common:
+        move    y:rt5_mix_written,a
+        tst     a
+        jne     rt5_serial_accumulate_x
+        move    #>1,a
+        move    a1,y:rt5_mix_written
+rt5_serial_write_y:
+        move    #rt2_stage_ring,r3
+        move    l:(r7),b10
+        move    y0,x0
+        move    x:(r3)+,a
+        do      n5,rt5_serial_write_y_done
+        add     b,a
+        and     y1,a1
+        move    a1,n0
+        mac     x1,y1,b
+        move    y:(r0+n0),y0
+        mpyr    x0,y0,a x:(r3)+,y0
+        move    y0,a a,y:(r5)+
+rt5_serial_write_y_done:
+        move    b10,l:(r7)+
+        rts
+
+; Left-only channels use an X-memory accumulator so their planar PCM can be
+; fetched in parallel with the right Y-memory stream during stereo emission.
+rt5_serial_accumulate_left_x:
+        move    #rt2_stage_ring,r3
+        move    l:(r7),b10
+        move    x:(r3)+,a
+        do      n5,rt5_serial_accumulate_left_x_done
+        add     b,a
+        and     y1,a1
+        move    a1,n0
+        mac     x1,y1,b
+        move    y:(r0+n0),x0
+        mpyr    x0,y0,a x:(r1)+,x0
+        add     x0,a x:(r3)+,x0
+        move    a,x:(r5)+ x0,a
+rt5_serial_accumulate_left_x_done:
+        move    b10,l:(r7)+
+        rts
+
+; Everything from the envelope pass to here must stay inside internal P RAM
+; ($0080-$01ff): the stage loops above read the external sine table, and an
+; instruction fetched from external P that also reads external data pays an
+; extra bus cycle. The cold command loop and the rare envelope retirement
+; paths live in the external stream where these stages used to be.
+rt5_internal_stage_end:
+        if      @cvs(n,rt5_internal_stage_end)>$200
+        fail    'hot stage loops spill out of internal P RAM'
+        endif
 
 command_write:
         jsr     ym_write_packed
@@ -2293,15 +2373,15 @@ rt5_initialize_pdx_right_done:
 
         ori     #$04,omr
         nop                             ; map the on-chip Y sine ROM
-        move    #>$100,r0              ; r0 replaces r6 as the sine base
-        move    #255,m0
+        move    #>RT5_SINE_BASE,r0     ; r0 replaces r6 as the sine base
+        move    #>RT5_SINE_MASK,m0
         move    #>-1,m1
         move    #>-1,m2
         move    #63,m3
         move    #>-1,m4
         move    #63,m5
         move    #>-1,m7
-        move    #>$ff,y1
+        move    #>RT5_SINE_MASK,y1
         move    #>rt5_channel_render-@cvs(x,rt5_feedback_0),n4
 
         ; Run real SSI traffic from buffer A while rendering into independent
@@ -2339,7 +2419,7 @@ rt5_profile_loop_start:
         move    #rt5_mix_ring,n6
         jsr     rt5_noise_block
 
-        move    #>$100,r0
+        move    #>RT5_SINE_BASE,r0
         move    #rt5_feedback_1,r2
         move    #rt5_feedback_0,r4
         move    #rt5_phase,r7
@@ -2351,7 +2431,7 @@ rt5_profile_loop_start:
         ; and selected the AM gain set. The channel-control read rides the
         ; parallel feedback pointer through (r4+n4), so n2 stays free for
         ; the per-stage increment offsets.
-        move    #>$ff,y1
+        move    #>RT5_SINE_MASK,y1
         move    #>-1,m5
         do      #8,rt5_channel_block_done
         jsr     rt5_render_channel
@@ -2495,7 +2575,7 @@ rt5_receive_runtime_pcm:
 rt5_enter_runtime_map:
         ori     #$04,omr
         nop
-        move    #255,m0
+        move    #>RT5_SINE_MASK,m0
         move    #>-1,m1
         move    #>-1,m2
         move    #63,m3
@@ -2508,12 +2588,12 @@ rt5_enter_runtime_map:
 ; One n5-frame pass over all eight channels from the shared stage bodies;
 ; both the whole-block path and the island's event-split segments use it.
 rt5_render_runtime_channels:
-        move    #>$100,r0
+        move    #>RT5_SINE_BASE,r0
         move    #rt5_feedback_1,r2
         move    #rt5_feedback_0,r4
         move    #rt5_phase,r7
         move    #>-1,m7
-        move    #>$ff,y1
+        move    #>RT5_SINE_MASK,y1
         move    #>-1,m5
         do      #8,rt5_runtime_channels_done
         jsr     rt5_render_channel
@@ -3095,258 +3175,206 @@ rt5_render_algorithm7_tail:
         jsr     rt5_independent_add_x
         jmp     rt5_route_accumulated_carriers
 
-; O1 for the all-carrier algorithm. Quality mode computes the audible carrier
-; and the independently scaled feedback history as separate products. For
-; feedback level FB, history is the exact serial-depth gain divided by
-; 2^(9-FB), matching (out0+out1)>>(10-FB).
-rt5_feedback_write_carrier:
-        move    x:(r7+n7),y0            ; carrier gain; n7 is the OUT offset
-        move    y0,y:rt5_alg7_gain_ring ; first alternating gain is carrier
-        move    #>RT5_MOD_GAIN_OFFSET,n7
-        nop                              ; address-register pipeline interlock
-        move    x:(r7+n7),y0            ; exact serial-depth gain
-        move    y0,a
-        rep     n1                      ; history shift 9-FB from rt5_render_channel
-        asr     a
-        move    a1,y:rt5_alg7_gain_ring+1
-        move    a1,y0                   ; first product is feedback history
-        move    #>RT5_OUT_GAIN_OFFSET,n7
-        move    #rt5_alg7_gain_ring,r5
-        move    #1,m5
-        move    #rt2_stage_ring,r3
-        move    l:(r7),b10
-        do      n5,rt5_feedback_write_carrier_done
-        move    x:(r2),x0 y:(r4),a      ; x0 = newer history product, a = older
-        add     x0,a x0,y:(r4)          ; out0+out1; the newer product ages into Y
-        add     b,a
-        and     y1,a1
+
+; Cold code displaced from internal P RAM by the stage loops: the envelope
+; retirement paths, the reset entry and the command dispatch.
+rt5_env_retire_capped:
+        ; full attenuation: pin the level, silence all four gain words
+        move    x1,a
+        move    a1,x:(r1+n1)
+        move    n2,b
+        move    #>rt5_env_gainmap,x0
+        add     x0,b
+        move    b1,r3
+        nop
+        movem   p:(r3),b
+        move    b1,n1
+        move    #rt5_operator_gain_out,r1
+        clr     a
+        move    a1,x:(r1+n1)
+        move    #rt5_operator_gain_mod,r1
+        nop
+        move    a1,x:(r1+n1)
+        move    #rt5_operator_gain_base_out,r1
+        nop
+        move    a1,x:(r1+n1)
+        move    #rt5_operator_gain_base_mod,r1
+        nop
+        move    a1,x:(r1+n1)
+        jmp     rt5_env_remove
+
+rt5_env_remove:
+        ; clear the active bit and swap the list tail into this slot
+        move    #rt5_env_state,r5
+        nop
+        move    x:(r5+n5),a
+        bclr    #3,a1
+        move    a1,x:(r5+n5)
+        move    x:rt5_active_count,a
+        move    #>1,x0
+        sub     x0,a
+        move    a1,x:rt5_active_count
         move    a1,n0
-        mac     x1,y1,b
-        move    y:(r0+n0),x0
-        mpyr    x0,y0,a y:(r5)+,y0      ; history; y0 becomes carrier
-        mpyr    x0,y0,a a,x:(r2) y:(r5)+,y0 ; carrier; history enters X; y0 becomes history
-        move    a,x:(r3)+
-rt5_feedback_write_carrier_done:
-        move    b10,l:(r7)+
-        move    (r2)+
-        move    (r4)+
-        move    #>-1,m5
+        move    #rt5_active_list,r0
+        move    y1,a
+        sub     x0,a
+        move    a1,y1                   ; the register-held end shrinks too
+        move    x:(r0+n0),b
+        move    b1,x:(r4)
+        jmp     rt5_env_scan_next
+
+start:
+        movep   #1,x:m_pbc              ; enable the Falcon host port
+        movep   #$1f8,x:m_pcc           ; Port C pins to SSI function; they
+                                        ; reset to GPIO, leaving the slave
+                                        ; SSI clockless on real hardware
+        movep   #0,x:m_bcr              ; reset leaves fifteen wait states on
+                                        ; every external access, and this
+                                        ; bootstrap path bypasses the TOS
+                                        ; loader that would clear them; the
+                                        ; Falcon SRAM needs none and Hatari
+                                        ; ignores the register entirely
+        movep   #$3000,x:m_ipr          ; SSI interrupt priority level 2
+        andi    #$fc,mr                 ; reset leaves I1:I0=11 masking IPL 2;
+                                        ; the SSI ISR needs the mask lowered
+        move    #>-1,m0                 ; linear addressing for ym_regdata
+
+        jsr     ym_initialize_slot_offsets
+        jsr     ym_reset
+
+command_loop:
+        jclr    #0,x:m_hsr,*            ; wait for host receive data full
+        movep   x:m_hrx,x1
+        move    x1,x:last_command
+
+        move    x1,a
+        move    #>$ff0000,y0
+        and     y0,a1                   ; isolate opcode
+
+        move    #>DSP_CMD_PING,x0
+        cmp     x0,a
+        jeq     command_ping
+
+        move    #>DSP_CMD_WRITE_REG,x0
+        cmp     x0,a
+        jeq     command_write
+
+        move    #>DSP_CMD_RESET,x0
+        cmp     x0,a
+        jeq     command_reset
+
+        move    #>DSP_CMD_CLOCK,x0
+        cmp     x0,a
+        jeq     command_clock
+
+        move    #>DSP_CMD_QUERY_PHASE,x0
+        cmp     x0,a
+        jeq     command_query_phase
+
+        move    #>DSP_CMD_QUERY_RIGHT,x0
+        cmp     x0,a
+        jeq     command_query_right
+
+        move    #>DSP_CMD_QUERY_ENV,x0
+        cmp     x0,a
+        jeq     command_query_envelope
+
+        move    #>DSP_CMD_QUERY_STATUS,x0
+        cmp     x0,a
+        jeq     command_query_status
+
+        move    #>DSP_CMD_QUERY_LFO,x0
+        cmp     x0,a
+        jeq     command_query_lfo
+
+        move    #>DSP_CMD_LOAD_TABLES,x0
+        cmp     x0,a
+        jeq     command_load_tables
+
+        move    #>DSP_CMD_START_AUDIO,x0
+        cmp     x0,a
+        jeq     command_start_audio
+
+        move    #>DSP_CMD_STOP_AUDIO,x0
+        cmp     x0,a
+        jeq     command_stop_audio
+
+        move    #>DSP_CMD_QUERY_AUDIO,x0
+        cmp     x0,a
+        jeq     command_query_audio
+
+        move    #>DSP_CMD_QUEUE_WRITE,x0
+        cmp     x0,a
+        jeq     command_queue_write
+
+        move    #>DSP_CMD_QUERY_TIME,x0
+        cmp     x0,a
+        jeq     command_query_time
+
+        move    #>DSP_CMD_PROFILE_RT,x0
+        cmp     x0,a
+        jeq     command_profile_realtime
+
+        move    #>DSP_CMD_PROFILE_RT2,x0
+        cmp     x0,a
+        jeq     command_profile_realtime2
+
+        move    #>DSP_CMD_PROFILE_RT3,x0
+        cmp     x0,a
+        jeq     command_profile_realtime3
+
+        move    #>DSP_CMD_PROFILE_RT4,x0
+        cmp     x0,a
+        jeq     command_profile_realtime4
+
+        move    #>DSP_CMD_PROFILE_RT5,x0
+        cmp     x0,a
+        jeq     command_profile_realtime5
+
+        move    #>DSP_CMD_START_RT_MIXED,x0
+        cmp     x0,a
+        jeq     command_start_realtime_mixed
+
+        move    #>DSP_CMD_START_MIXED,x0
+        cmp     x0,a
+        jeq     command_start_mixed
+
+        move    #>DSP_CMD_QUERY_MIX,x0
+        cmp     x0,a
+        jeq     command_query_mix
+
+        move    #>DSP_REPLY_ERROR,a
+        jsr     send_reply
+        jmp     command_loop
+
+; Runtime initialization keeps this persistent table out of the .LOD image
+; while making the exact renderer's logical-to-raw operator mapping a single
+; fetch.
+ym_initialize_slot_offsets:
+        ; MAME's raw register order is M1,C1,M2,C2: offsets 0,16,8,24.
+        move    #ym_slot_offsets,r0
+        clr     a
+        move    a1,x:(r0)+
+        move    #>16,a
+        move    a1,x:(r0)+
+        move    #>8,a
+        move    a1,x:(r0)+
+        move    #>24,a
+        move    a1,x:(r0)
         rts
 
+command_ping:
+        move    #>DSP_REPLY_HELLO,a
+        jsr     send_reply
+        jmp     command_loop
 
-; All-topology stages for the live-SSI profile. r0 is the sine-ROM base and r7
-; walks 32 overlaid internal long phases, leaving r6/m6 untouched for the
-; interrupt. Callers preload each stage's decoded PM-adjusted increment into
-; x1 and its block gain into y0 before the jsr; rt5_render_channel parks the
-; channel's feedback-history shift in n1 for the operator-1 stages.
-; Every operator-1 stage keeps the channel's two-frame feedback history with
-; the newest product in the X slot and the older one in the Y slot: the
-; frame's sum reads both, the X word ages into Y beside that add, and the
-; new product lands in X beside the onward multiply, so the store needs no
-; instruction of its own. The pair starts at zero, and the three stages
-; agree on the order, so an algorithm change never reorders a history.
-rt5_feedback_write_x:
-        ; Feedback level 0 contributes zero self-modulation, exactly as
-        ; ymfm's (out0+out1)>>(10-FB) special-cases it, but that dispatch now
-        ; happens at register-decode time through the per-channel class entry
-        ; (rt5_feedback_write_bypass), so the stages carry no per-block test.
-        move    x:(r7+n7),y0            ; exact onward serial gain
-        move    y0,y:rt5_alg7_gain_ring
-        move    y0,a
-        rep     n1                      ; history shift 9-FB from rt5_render_channel
-        asr     a
-        move    a1,y:rt5_alg7_gain_ring+1
-        move    a1,y0                   ; first product is feedback history
-        move    #rt5_alg7_gain_ring,r5
-        move    #1,m5
-        move    #rt2_stage_ring,r3
-        move    l:(r7),b10
-        do      n5,rt5_feedback_write_x_done
-        move    x:(r2),x0 y:(r4),a      ; x0 = newer history product, a = older
-        add     x0,a x0,y:(r4)          ; out0+out1; the newer product ages into Y
-        add     b,a
-        and     y1,a1
-        move    a1,n0
-        mac     x1,y1,b
-        move    y:(r0+n0),x0
-        mpyr    x0,y0,a y:(r5)+,y0      ; history product; y0 becomes the onward gain
-        mpyr    x0,y0,a a,x:(r2) y:(r5)+,y0 ; onward product; history enters X
-        move    a,x:(r3)+
-rt5_feedback_write_x_done:
-        move    b10,l:(r7)+
-        move    (r2)+
-        move    (r4)+
-        move    #>-1,m5
-        rts
+; SSI transmit-underrun recovery. Reading SSISR followed by writing TX clears
+; TUE; this long exception path is not part of normal buffered playback.
+ssi_tx_exception:
+        movep   x:m_sr,x:ssi_status_snapshot
+        movep   x:(r6)+,x:m_tx
+        rti
 
-; Feedback-level-0 class stages: load the stage gain, advance the channel's
-; feedback pair (every later stage and the next channel's control read
-; anchor on r2/r4), and run the feedback-less twin.
-
-; Add operator 1's feedback output to an existing X modulation ring. This is
-; the reordered algorithm-2 fan-in used by the isolated command-$16 spike.
-rt5_feedback_add_x:
-        move    x:(r7+n7),y0            ; exact onward serial gain
-        move    y0,y:rt5_alg7_gain_ring
-        move    y0,a
-        rep     n1                      ; history shift 9-FB from rt5_render_channel
-        asr     a
-        move    a1,y:rt5_alg7_gain_ring+1
-        move    a1,y0
-        move    #rt5_alg7_gain_ring,r5
-        move    #1,m5
-        move    #rt2_stage_ring,r3
-        move    l:(r7),b10
-        do      n5,rt5_feedback_add_x_done
-        move    x:(r2),x0 y:(r4),a      ; x0 = newer history product, a = older
-        add     x0,a x0,y:(r4)          ; out0+out1; the newer product ages into Y
-        add     b,a
-        and     y1,a1
-        move    a1,n0
-        mac     x1,y1,b
-        move    y:(r0+n0),x0
-        mpyr    x0,y0,a y:(r5)+,y0
-        ; The onward multiply consumes the old sine/gain pair while the
-        ; history product enters its X slot and the next history gain loads.
-        mpyr    x0,y0,a a,x:(r2) y:(r5)+,y0
-        move    x:(r3),x0
-        add     x0,a
-        move    a,x:(r3)+
-rt5_feedback_add_x_done:
-        move    b10,l:(r7)+
-        move    (r2)+
-        move    (r4)+
-        move    #>-1,m5
-        rts
-
-
-
-; Start or add an unmodulated operator in the internal X stage ring.
-rt5_independent_write_x:
-        ; Software-pipeline the ring store through the following frame's
-        ; phase mask.  The first parallel write lands in unused slot 63;
-        ; m3 then wraps r3 to slot zero, and the epilogue commits the final
-        ; result.  Runtime segments are at most 32 frames, so slot 63 is
-        ; never consumed by a following stage.
-        move    #rt2_stage_ring+63,r3
-        move    l:(r7),b10
-        and     y1,b1
-        move    b1,n0
-        do      n5,rt5_independent_write_x_done
-        mac     x1,y1,b y:(r0+n0),x0
-        and     y1,b1 a,x:(r3)+
-        move    b1,n0
-        mpyr    x0,y0,a
-rt5_independent_write_x_done:
-        move    a,x:(r3)+
-        move    b10,l:(r7)+
-        rts
-
-rt5_independent_add_x:
-        move    #rt2_stage_ring,r3
-        move    #rt2_stage_ring,r5
-        move    l:(r7),b10
-        and     y1,b1
-        move    b1,n0
-        do      n5,rt5_independent_add_x_done
-        mac     x1,y1,b y:(r0+n0),x0
-        and     y1,b1 x:(r3)+,a
-        move    b1,n0
-        macr    x0,y0,a
-        move    a,x:(r5)+
-rt5_independent_add_x_done:
-        move    b10,l:(r7)+
-        rts
-
-rt5_serial_transform_x:
-        move    #rt2_stage_ring,r5
-; Write-first twin for a one-sided stream: r5 already addresses the block's
-; unwritten left stream, so the carrier stores through the same limiter
-; move that adding onto zeros would have produced.
-rt5_serial_write_x:
-        move    #rt2_stage_ring,r3
-        move    l:(r7),b10
-        move    x:(r3)+,a
-        do      n5,rt5_serial_transform_x_done
-        add     b,a
-        and     y1,a1
-        move    a1,n0
-        mac     x1,y1,b
-        move    y:(r0+n0),x0
-        mpyr    x0,y0,a x:(r3)+,x0
-        move    a,x:(r5)+ x0,a
-rt5_serial_transform_x_done:
-        move    b10,l:(r7)+
-        rts
-
-rt5_serial_accumulate_x:
-        ; The gain rides in x0 so y0 can serve as the loop's only temporary:
-        ; the R:Y class II move then reloads the next modulation word into A
-        ; beside the ring store, one instruction fewer per frame than the
-        ; store-then-load pair. Same products, same limiter, bit-identical.
-        move    #rt2_stage_ring,r3
-        move    l:(r7),b10
-        move    y0,x0
-        move    x:(r3)+,a
-        do      n5,rt5_serial_accumulate_x_done
-        add     b,a
-        and     y1,a1
-        move    a1,n0
-        mac     x1,y1,b
-        move    y:(r0+n0),y0
-        mpyr    x0,y0,a y:(r1)+,y0
-        add     y0,a x:(r3)+,y0
-        move    y0,a a,y:(r5)+
-rt5_serial_accumulate_x_done:
-        move    b10,l:(r7)+
-        rts
-
-; Write-first variant of the both-panned carrier: the block's first common
-; carrier stores into the Y mix ring without reading it, replacing the former
-; per-block ring clear. The stored full-A move keeps the same limiter
-; semantics as accumulating onto a cleared ring, so output is bit-identical.
-; The shared prologue routes an already-written ring to the accumulate loop.
-rt5_serial_mix_common:
-        move    y:rt5_mix_written,a
-        tst     a
-        jne     rt5_serial_accumulate_x
-        move    #>1,a
-        move    a1,y:rt5_mix_written
-rt5_serial_write_y:
-        move    #rt2_stage_ring,r3
-        move    l:(r7),b10
-        move    y0,x0
-        move    x:(r3)+,a
-        do      n5,rt5_serial_write_y_done
-        add     b,a
-        and     y1,a1
-        move    a1,n0
-        mac     x1,y1,b
-        move    y:(r0+n0),y0
-        mpyr    x0,y0,a x:(r3)+,y0
-        move    y0,a a,y:(r5)+
-rt5_serial_write_y_done:
-        move    b10,l:(r7)+
-        rts
-
-; Left-only channels use an X-memory accumulator so their planar PCM can be
-; fetched in parallel with the right Y-memory stream during stereo emission.
-rt5_serial_accumulate_left_x:
-        move    #rt2_stage_ring,r3
-        move    l:(r7),b10
-        move    x:(r3)+,a
-        do      n5,rt5_serial_accumulate_left_x_done
-        add     b,a
-        and     y1,a1
-        move    a1,n0
-        mac     x1,y1,b
-        move    y:(r0+n0),x0
-        mpyr    x0,y0,a x:(r1)+,x0
-        add     x0,a x:(r3)+,x0
-        move    a,x:(r5)+ x0,a
-rt5_serial_accumulate_left_x_done:
-        move    b10,l:(r7)+
-        rts
 
 ; Algorithms 6 and 7 finish with an already-summed carrier ring rather than a
 ; final operator awaiting transformation. Route that ring directly while
@@ -7276,10 +7304,10 @@ rt5_pitch_dt1_ready:
         asr     b
         move    b0,a                    ; integer step * MUL
         ; Exact block-DDA conversion. The render's per-frame mac multiplies
-        ; each increment by $ff and doubles, and one sine-ROM cycle spans
-        ; 256*2^24 accumulator units, so the increment that reproduces the
+        ; each increment by $3ff and doubles, and one sine-table cycle spans
+        ; 1024*2^24 accumulator units, so the increment that reproduces the
         ; 10.10 native step at the 1920:1007 quality rate is
-        ; step*MUL * 2^20/(68*1007); the scale constant carries sub-ppm error and
+        ; step*MUL * 2^14*1920/(1007*2046); the scale constant carries sub-ppm error and
         ; the pitch fixture lands within 0.05 ppm. Only tones already past
         ; the codec Nyquist wrap into the signed alias domain.
         move    #>RT5_PITCH_DDA_SCALE,x0

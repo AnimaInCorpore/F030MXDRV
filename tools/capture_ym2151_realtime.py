@@ -506,7 +506,11 @@ def mid_block_level(before: int, after: int, multiplier: int) -> int:
 # mirror below.
 DT2_DELTA = (0, 384, 500, 608)
 RAW_SLOT = (0, 16, 8, 24)  # logical M1,C1,M2,C2 to raw register slots
-PITCH_DDA_SCALE = 4014223
+PITCH_DDA_SCALE = 4002451
+# The stages mask a 1024-step table index and reuse the mask as the phase MAC
+# operand: a frame advances increment * 2 * 1023, and a cycle is 2^34 units.
+FRAME_PHASE_FACTOR = 2046
+SINE_CYCLE_UNITS = 1 << 34
 
 
 def load_pitch_tables(source_path: Path) -> tuple[list[int], list[int]]:
@@ -730,14 +734,14 @@ def reconstruct_rows(
             current = incs
         return current
 
-    # The independent-operator render path keeps only the sine-ROM index in
+    # The independent-operator render path keeps only the sine-table index in
     # the stored accumulator (`and y1,b1` masks it every frame), so dumped
-    # phases are meaningful modulo one ROM cycle (2^32 accumulator units) and
+    # phases are meaningful modulo one table cycle (2^34 accumulator units) and
     # cannot disambiguate multi-wrap blocks. Phase is reconstructed by
     # accumulating the mirrored per-segment increments; every block is
     # verified against the dumped accumulator modulo one cycle, and every
     # boundary dump's increments must equal the mirror's final segment.
-    rom_cycle = 1 << 32
+    rom_cycle = SINE_CYCLE_UNITS
     for index in range(blocks):
         state = boundaries[index].lfsr
         for _ in range(BLOCK_FRAMES):
@@ -765,7 +769,7 @@ def reconstruct_rows(
                 for offset in range(start, end):
                     if reset_offset is not None and offset == reset_offset:
                         advance = 0
-                    advance += incs[column] * 510
+                    advance += incs[column] * FRAME_PHASE_FACTOR
             base = (
                 0
                 if reset_offset is not None
@@ -782,7 +786,7 @@ def reconstruct_rows(
 
     # Channel-0 logical operators M1,C1,M2,C2: operator-major increment and
     # envelope slots. Phase accumulates unwrapped so the emitted column wraps
-    # in ymfm's 2^22 domain rather than at the 256-step ROM cycle.
+    # in ymfm's 2^22 domain rather than at the 1024-step table cycle.
     env_slots = [0, 8, 16, 24]
     phase_accumulators = [0, 0, 0, 0]
 
@@ -834,8 +838,8 @@ def reconstruct_rows(
             # advance, so accumulate first and emit second. The increment is
             # the mirrored value for this frame's segment, so a mid-block
             # KC/KF/MUL/DT write bends the phase at its landing frame.
-            phase_accumulators[op] += segment_incs[op] * 510
-            phase = (phase_accumulators[op] >> 22) & 0x3FFFFF
+            phase_accumulators[op] += segment_incs[op] * FRAME_PHASE_FACTOR
+            phase = (phase_accumulators[op] >> 24) & 0x3FFFFF
 
             before = entry.levels[e_slot]
             after = exit_.levels[e_slot]

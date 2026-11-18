@@ -8,9 +8,14 @@ still evolving.
 
 from __future__ import annotations
 
+import math
 import re
 import sys
 from pathlib import Path
+
+
+# Which 1024-step waveform the production stages read; see main().
+CHIP_QUANTISED_SINE = True
 
 
 def initializer(source: str, declaration: str) -> str:
@@ -138,8 +143,8 @@ def main() -> int:
     ]
     # Leave P:$0000-$13ff available to the command kernel, then place the
     # expanded exact tables and their packed upload source contiguously. The
-    # codec-rate kernels use the DSP56001's factory Y sine ROM, so no separate
-    # waveform is uploaded.
+    # block spikes use the DSP56001's factory Y sine ROM; the production
+    # stages read the 1024-step table emitted below.
     runtime_table_start = 0x1400
     table_words = sum(len(values) for _, values in uploaded_tables)
 
@@ -176,6 +181,34 @@ def main() -> int:
         for name, values in uploaded_tables:
             emit_dsp_reservation(name, values)
         print("opm_uploaded_tables_end:")
+        print()
+        # The production sine: the chip's own 1024-step waveform at zero
+        # envelope attenuation, exactly as ymfm's compute_volume() forms it
+        # (quarter-wave log-sine through the power table, phase bit 9 as the
+        # sign), scaled so the chip's 13-bit full scale of 8192 is 1.0. The
+        # stages multiply it by linear gains, so it carries the chip's
+        # waveform quantization at every level. CHIP_QUANTISED_SINE = False
+        # emits the ideal sin(2*pi*(i + 0.5)/1024) at the same phase points
+        # instead. Assembled as a P section because the stage-two loader
+        # carries P memory only and Falcon external P aliases external Y
+        # word for word; the kernel reads it at Y:RT5_SINE_BASE.
+        def chip_sample(index: int) -> int:
+            quarter = (~index if index & 0x100 else index) & 0xFF
+            attenuation = sine[quarter]
+            volume = power[attenuation & 0xFF] >> (attenuation >> 8)
+            return -volume if index & 0x200 else volume
+
+        if CHIP_QUANTISED_SINE:
+            sine_1024 = [(chip_sample(index) << 10) & 0xFFFFFF for index in range(1024)]
+        else:
+            sine_1024 = [
+                round(math.sin(2.0 * math.pi * (index + 0.5) / 1024.0) * 0x7FFFFF)
+                & 0xFFFFFF
+                for index in range(1024)
+            ]
+        print("        org     p:RT5_SINE_BASE")
+        print()
+        emit_dsp_table("rt5_sine_table", sine_1024)
 
     return 0
 

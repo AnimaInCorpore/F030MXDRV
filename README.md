@@ -67,7 +67,7 @@ The exact support boundary is documented in
 - Reproducible native-oracle, perceptual, smoke, stock-clock timing, endurance,
   and DSP-cycle gates.
 
-The integrated worst-case DSP profile measures 336.60 instruction cycles per
+The integrated worst-case DSP profile measures 329.58 instruction cycles per
 32.780 kHz frame against a 489.40-cycle budget. The exact scalar renderer costs
 12,271.21 cycles per native 62.5 kHz sample against a 256.68-cycle budget, so it
 is deliberately a test oracle rather than the production renderer.
@@ -265,7 +265,7 @@ The repository intentionally separates three contracts:
    phase, envelope, timer, noise, LFO, algorithm, feedback, and YM3012
    checkpoints.
 2. The production kernel preserves exact long-term pitch and control timing,
-   while timbre is graded against a codec-rate 256-step-sine reference with
+   while timbre is graded against a codec-rate 1024-step-sine reference with
    explicit spectral, envelope, LFO, noise, and splice thresholds.
 3. Hatari integration gates exercise the actual player, file loading, MDX/PDX
    execution, refill cadence, shutdown, and optional local song corpus.

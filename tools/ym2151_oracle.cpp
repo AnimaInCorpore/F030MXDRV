@@ -398,9 +398,10 @@ private:
     static int32_t quantized_volume(ymfm::fm_operator<ymfm::opm_registers> &op,
         int32_t modulation, uint32_t am_offset)
     {
-        // ymfm addresses a 1024-step logical waveform. Clearing its low two
-        // phase bits projects that address onto the DSP56001's 256-step ROM.
-        const uint32_t phase = (op.phase() + modulation) & ~uint32_t(3);
+        // ymfm addresses a 1024-step logical waveform, and the DSP kernel's
+        // generated sine table has the same 1024 steps, so the projection
+        // keeps every phase bit.
+        const uint32_t phase = op.phase() + modulation;
         return op.compute_volume(phase, am_offset);
     }
 

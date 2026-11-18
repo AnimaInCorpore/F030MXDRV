@@ -86,8 +86,11 @@ The build mechanically imports ymfm's phase-step, DT1, log-sine, power, and
 envelope-increment tables. Fixed-width and delta packing reduce host-transfer
 and DSP-memory cost. The packed source tables live in the 68030 executable;
 command `$0a` uploads the complete 329-word block, which is expanded exactly
-on the DSP before conformance or audio work begins. Codec-rate kernels use the
-DSP56001's factory 256-step sine ROM instead of uploading a second waveform.
+on the DSP before conformance or audio work begins. The production codec-rate
+kernel reads a generated 1024-step sine: the chip's own waveform at zero
+envelope attenuation, formed from the same log-sine and power tables, assembled
+into the program image at `P:$3400` and read as `Y:$3400`. The historical
+block spikes still use the DSP56001's factory 256-step sine ROM.
 DT1 continues to be read from its packed table. Program code is installed by
 the embedded second-stage loader, so TOS's former converted-LOD size ceiling
 no longer constrains specialization.
@@ -119,7 +122,7 @@ it in four ways:
   output and operator/control state at the Falcon codec cadence, including the
   native-sample and ordered-write marker consumed by every frame; and
 - `--perceptual-vectors TRACE FRAMES [--algorithm N] [--feedback N]` retains
-  that exact boundary state but independently renders 256-step sine lookup,
+  that exact boundary state but independently renders 1024-step sine lookup,
   codec-rate feedback/topology, panning, noise, and YM3012 output.
 
 `tools/compare_ym2151_realtime.py` validates the resulting perceptual corpus

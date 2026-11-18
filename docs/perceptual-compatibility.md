@@ -46,7 +46,7 @@ intermediates agree with independent recomputation within table
 quantization on early stages and then diverge by dozens of sine-index
 steps from a fraction of a percent of difference, so two correct
 implementations with different table quantization (ymfm's 13-bit log
-tables against the DSP's 24-bit linear ROM) separate trajectory-wise and
+tables against the DSP's linear sine table) separate trajectory-wise and
 the spectral comparison graded chaos flavor. At moderate depth the
 cascades stay in the regime where quantization differences remain small,
 and the gate discriminates real pitch, depth, routing, and envelope
@@ -81,15 +81,16 @@ from weakening the later candidate comparison.
 The oracle also emits an independent projection under
 `build/reference/ym2151-perceptual-model/`. It keeps the exact frame-boundary
 phase, ADSR, LFO, noise, and ordered-write state, but renders operator topology
-only once per codec frame, quantizes the logical 1024-step waveform phase onto
-the DSP56001's 256-step sine ROM, and advances its own feedback history at the
-codec rate. It then applies the channel algorithms, panning, noise substitution,
+only once per codec frame, keeps the logical 1024-step waveform phase the
+DSP's generated sine table also has, and advances its own feedback history at
+the codec rate. It then applies the channel algorithms, panning, noise substitution,
 and YM3012 round trip independently of ymfm's native-rate channel output.
 
 This isolates the chosen synthesis-rate/timbre compromise from control-state
 implementation errors. The checked projection has zero pitch/control drift,
 algorithm spectral cosine from 0.7955 to 1.0000, normalized log-spectrum RMSE
-from 1.81 to 8.64 dB, and RMS energy ratios from 0.984 to 1.015. Its generated
+from 1.62 to 8.53 dB, and RMS energy ratios from 0.985 to 1.019; the
+feedback-free scenarios now match the exact reference outright. Its generated
 `comparison-report.txt` is a build gate. It is not a substitute for capturing
 the eventual DSP implementation, because it deliberately borrows exact
 frame-boundary control state.
@@ -126,9 +127,9 @@ host-buffer ownership before the DSP finishes rendering.
 Reconstruction refuses to guess: the dumped native clock must match the
 1920:1007 DDA at every boundary, consecutive LFSR dumps must be exactly 32
 Galois steps apart, and every block's phase advance must equal its
-per-segment increments at 510 accumulator units per frame — modulo one sine-ROM cycle
-(2^32 accumulator units), because the independent-operator render path masks
-the stored accumulator to the ROM index every frame — or the run aborts.
+per-segment increments at 2046 accumulator units per frame — modulo one sine-table cycle
+(2^34 accumulator units), because the independent-operator render path masks
+the stored accumulator to the table index every frame — or the run aborts.
 Because the kernel splits blocks at each write's landing frame, the
 reconstruction carries a bit-exact Python mirror of the channel pitch
 rebuild (positions, DT1/DT2, multipliers, and the block-DDA scale from the
@@ -162,7 +163,7 @@ timing, LFO, noise, envelope state, all eight algorithms, feedback 0/7, and
 the sustained-feedback splice fixture are graded in two explicit tiers. The
 independent codec-rate model must first pass absolute exact-reference bounds.
 The captured DSP is then checked against that same exact-feedback model for
-the residual caused by its linear 256-step ROM and block-quantized state. No
+the residual caused by its linear sine table and block-quantized state. No
 folded-feedback model or per-algorithm feedback bias is accepted.
 
 The realtime engine advances envelope state once per 32-frame block with a
@@ -188,7 +189,7 @@ special level-7 repair class. The integrated worst-case profile measures
 331.69 cycles per quality frame against a 489.40-cycle budget. Sustained FB7
 remains separately splice-gated because feedback trajectories are sensitive
 to waveform-table quantization even when their depth law is correct — the
-exact-arithmetic implementation model already carries the ROM/block
+exact-arithmetic implementation model already carries the block
 quantization the DSP capture must additionally survive, and its own
 splice count is now printed alongside the candidate's (`model_splices` in
 the comparator report) so a future failure can tell which layer diverged.
@@ -210,7 +211,7 @@ scenario alone therefore uses a 13,000-count splice threshold
 8,000 bound tuned against algorithm 4's smoother topology; the 25-splice
 count margin, the part of the gate that actually catches instability, is
 unchanged. The quantized model already comes in clean at either threshold
-(max step 7,708) — its 256-step ROM rounds off exactly the sharp edges that
+(max step 6,740) — codec-rate feedback rounds off the sharp edges that
 push the exact reference past 8,000.
 
 The comparator enforces these boundaries:
@@ -234,7 +235,7 @@ every captured topology even when the implementation tier is decisive.
 
 The phase, event, and accumulator boundaries are intentionally stricter than
 the timbre boundary: long-term pitch and control timing are chip semantics,
-whereas the 256-step sine ROM, codec-rate feedback, and YM3012 approximation
+whereas the linear sine table, codec-rate feedback, and YM3012 approximation
 are the selected perceptual compromise. The comparator complements the exact
 command-clocked conformance suite and the separate real-MDX/PDX endurance
 corpus; it does not replace either one.

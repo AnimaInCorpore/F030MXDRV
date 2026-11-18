@@ -862,7 +862,8 @@ player_test_no_pdx_mdx:
         dc.b    'MDX no PDX test',13,10,$1a,0
 player_test_no_pdx_mdx_end:
 player_test_filename:
-        dc.b    'ym2151.lod',0
+        dc.b    'dspprobe.tos',0        ; any small release file: the DSP
+                                        ; image outgrew the MDX buffer
         even
 
         bss

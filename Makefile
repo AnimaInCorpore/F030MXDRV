@@ -401,7 +401,8 @@ $(DSP_STAGE2_IMAGE): tools/generate_dsp_stage2.py $(DSP_BUILD)/.assembled
 		--program $(DSP_BUILD)/YM2151.LOD \
 		--program-limit 0x1400 \
 		--island 0x2000 0x2b00 \
-		--island 0x2b20 0x3400 > $@
+		--island 0x2b20 0x3400 \
+		--island 0x3400 0x3800 > $@
 
 $(RATETEST_BOOT_IMAGE): tools/generate_dsp_stage2.py $(DSP_BUILD)/.assembled
 	@mkdir -p $(GENERATED_BUILD)
@@ -557,7 +558,7 @@ smoke: check
 	@rg -q "Direct Transfer 0x01c5de" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x01c6c0" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x170000" build/hatari-smoke.trace
-	@rg -q "Transfer 0x984e55" build/hatari-smoke.trace
+	@rg -q "Transfer 0xb9f2c1" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x01c6de" build/hatari-smoke.trace
 	@rg -q "XBIOS 0x80 Locksnd" build/hatari-smoke.trace
 	@rg -q "XBIOS 0x89 Dsptristate\\(0x1, 0x0\\)" build/hatari-smoke.trace
@@ -590,7 +591,7 @@ smoke: check
 	@rg -q "Transfer 0x0007a0" build/hatari-smoke.trace
 	@rg -q "Transfer 0x000b70" build/hatari-smoke.trace
 	@rg -q "Transfer 0x000600" build/hatari-smoke.trace
-	@rg -q "Transfer 0xf8c040" build/hatari-smoke.trace
+	@rg -q "Transfer 0x18eff0" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x01db10" build/hatari-smoke.trace
 	@rg -q "Direct Transfer 0x0c0000" build/hatari-smoke.trace
 	@rg -q "XBIOS 0x89 Dsptristate\\(0x0, 0x0\\)" build/hatari-smoke.trace

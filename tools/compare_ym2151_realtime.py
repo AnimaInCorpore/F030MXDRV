@@ -605,7 +605,7 @@ def compare_suites(
                     f"{name}: implementation-model cosine {model_cosine:.4f} is below 0.60"
                 )
             # A nearly identical power spectrum can still have a huge log
-            # error when a sparse harmonic lands exactly on the linear ROM's
+            # error when a sparse harmonic lands exactly on the linear table's
             # zero floor. In that case cosine plus the independent energy gate
             # carries the audible comparison; otherwise retain the log bound.
             if model_cosine < 0.95 and model_rmse > 14.0:

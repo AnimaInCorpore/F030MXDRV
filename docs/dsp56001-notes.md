@@ -152,7 +152,8 @@ uses `m6=1023`; the exact 1007-frame conformance stream retains `m6=2013`.
 
 Start imports the exact register and key image into persistent decoded state,
 clears phase and feedback, rebuilds pitch/gain/envelope state, backs up the
-packed table, derives the 32-step noise jump tables, and maps the sine ROM.
+packed table, derives the 32-step noise jump tables, and points `r0` at the
+1024-step sine table (the factory ROM is still mapped but no longer read).
 Refill selects the inactive planar workspace and SSI output buffer and receives
 the next host period behind a ready-token gate. Once the upload is private DSP
 memory it acknowledges the host, allowing the 16 MHz 68030 to mix the following
@@ -214,7 +215,7 @@ that block into ordered segments and takes effect on its first codec frame.
 DT1/DT2 pitch offsets and channel-7 noise frequency/output substitution are
 decoded by the production kernel. The Hatari smoke gate renders three buffers,
 checks 1536 prepared frames, and pins the first attack buffer checksum to
-`$f8c040`.
+`$18eff0`.
 
 ## Cycle feasibility gate
 
@@ -232,7 +233,8 @@ space. Instruction fetch counts as a P access, so a hot instruction living in
 one of the `P:$2000` islands pays that penalty as soon as it also touches
 external X or Y, and an internal-P instruction pays it for an external-X plus
 external-Y parallel move. That is the rule behind the placement decisions
-recorded here — the envelope pass in internal P, the phase cache in internal
+recorded here — the envelope pass and the sine-reading stage loops in
+internal P, the phase cache in internal
 Y, gain pairs in internal X — and it is also the lever for recovering the
 remaining margin, because those instruction pairs can be located statically
 before any rewrite. The model is credible for placement work but not for
@@ -414,7 +416,7 @@ SSI, saturation, and event service are not included.
 `rt5_profile_loop_start` and `rt5_profile_loop_done` and writes
 `build/dsp-profile-rt5/report.txt`. It is the first profile to execute eight
 channels, one for each algorithm, rather than projecting one channel linearly.
-The sine ROM
+The sine table base
 moves to `r0`, leaving `r6/m6` exclusively owned by the real two-word SSI fast
 interrupt while buffer A loops. Thirty-two long phases and eight feedback
 pairs overlay the exact renderer's internal cache/scratch range at
@@ -443,8 +445,8 @@ covers every decoded register class: eight `$20-$27` algorithm/pan rewrites,
 five four-band total-level writes, four KC and two KF events that rebuild
 four base increments from the exact expanded `opm_phase_step` table with
 octave shift and doubled per-operator multiplier — converted to block DDA
-units through the `2^20/(68*1007)` scale that matches the lower-rate render's
-phase mac against the 256-step sine ROM, exact to 0.04 ppm
+units through the `2^14*1920/(1007*2046)` scale that matches the lower-rate
+render's phase mac against the 1024-step sine table, exact to 0.1 ppm
 with only past-Nyquist tones wrapping into the signed alias domain —
 five key on/off edges
 driving real attack/release state, one write from each of the four
@@ -462,10 +464,36 @@ fill — so no noise-table words occupy the bounded P-memory image. Cleanup
 disables SSI, reads SSISR and writes TX to clear a latched underrun,
 restores the external Y map, and rebuilds the exact phase cache, including
 the internal-Y frequency-cache words the decoded multiplier/increment arrays
-overlay. The deterministic reply is `$984e55`.
+overlay. The deterministic reply is `$b9f2c1`; it folds in one main-stream
+code address, so it moves whenever that code shifts.
+
+### The 1024-step sine and the internal-P stage loops
+
+The production stages read a generated 1024-step sine at `Y:$3400`
+(`RT5_SINE_BASE`), the chip's logical waveform resolution, in place of the
+256-step factory ROM. `tools/generate_ym2151_tables.py` emits the chip's own
+waveform at zero envelope attenuation (ymfm's quarter log-sine through the
+power table, 8192 scaled to 1.0) as a P section; Falcon external P aliases
+external Y word for word, so the stage-two loader installs it through the
+`[$3400,$3800)` island and no protocol word carries it. The `$3ff` index mask
+doubles as the phase MAC operand, so one cycle spans `1024*2^24` accumulator
+units and a frame advances `increment*2046`; the modulation gain scale is
+`$004000`, four times the former `$001000`, and modulation now rounds to
+1/1024 of a cycle.
+
+An external table read from a loop fetched from external P costs one extra
+cycle per read under the shared-bus rule above: the first version measured
+368.60 cycles per frame against the ROM kernel's 336.60. The nine
+sine-reading stage loops (197 words) therefore live in internal P RAM,
+directly after the envelope pass and ending at `P:$01ee`; an assembler check
+fails the build if they pass `$0200`. They displaced the cold command loop
+and the two rare envelope retirement paths, which now sit in the external
+main stream. The PDX stream reads inside two of those loops stopped paying
+the same penalty, and the profile now measures 329.58 cycles per frame.
 
 Decoded envelope curvature runs as a block-boundary pass at `P:$0080` in
-internal P RAM, where instruction fetches avoid the external-memory penalty.
+internal P RAM, where instruction fetches avoid the external-memory penalty;
+its full-attenuation retirement and list-removal paths are external.
 Every envelope-active operator advances once per block by one composed
 full-block affine step, `level' = a*level + b` in 10.13 fixed point, whose
 per-rate constants `tools/generate_envelope_tables.py` composes from the
@@ -486,10 +514,10 @@ live in the external island with the generated tables. The capture harness
 derives mid-block levels analytically from the same defining recurrence, so
 no mid-block state is stored.
 
-Hatari measures 2,757,432 instruction cycles for 8,192 frames over 256
-blocks, or 336.60 cycles per frame against the 489.40-cycle budget, leaving
-152.80 cycles (31.2%). The 171.88 ms modeled span fits its 249.91 ms period.
-Those 152.80 cycles are not all spare capacity. The window is bracketed between
+Hatari measures 329.58 instruction cycles per frame over 8,192 frames and 256
+blocks against the 489.40-cycle budget, leaving 159.82 cycles (32.7%); the
+ROM kernel before the 1024-step table measured 336.60.
+Those 159.82 cycles are not all spare capacity. The window is bracketed between
 two render markers, so it excludes the SSI transmit interrupt, the host-port
 receive and the refill command; `make profile-dsp-live` measures the same DSP
 across 128 whole production periods of Xevious and finds 391.80 cycles per

@@ -99,8 +99,8 @@ register writes (KC, KF, DT1/MUL, DT2) only mark their channel; each drain
 rebuilds every marked channel's four increments once from the final register
 image, so a voice load costs one rebuild instead of eight. The start command imports the exact register and key image into the
 persistent realtime state, backs up the packed lookup tables before its planar
-right stream overlays external Y, derives the noise jump tables, and maps the
-DSP56001 sine ROM. The DSP acknowledges once it owns the host payload; the
+right stream overlays external Y, derives the noise jump tables, and selects
+the 1024-step sine table. The DSP acknowledges once it owns the host payload; the
 68030 then mixes and uploads the following period while the DSP renders and
 waits for the next complete active-buffer boundary. Stop restores the packed
 tables, exact caches, external-Y mapping, and linear address modifiers.
@@ -229,11 +229,11 @@ output — and the command checksum — are bit-identical to the cleared-ring
 ordering. Algorithms 6/7 route their already-summed
 carrier rings through a separate decoded-pan path. The command explicitly
 clears a latched SSI underrun before restoring the external Y map and exact
-phase cache. Its checksum is `98 4e 55`.
+phase cache. Its checksum is `b9 f2 c1`.
 
-Hatari measures 336.60 cycles per codec frame over the 8,192-frame,
-256-block profile against the 489.40-cycle budget, leaving 152.80 cycles
-(31.2%). Dynamic topology/pan routing, planar PDX accumulation, final
+Hatari measures 329.58 cycles per codec frame over the 8,192-frame,
+256-block profile against the 489.40-cycle budget, leaving 159.82 cycles
+(32.7%). Dynamic topology/pan routing, planar PDX accumulation, final
 saturation, live SSI, the full decoded register control path, and decoded
 envelope curvature therefore fit the budget together. That figure is a
 bracketed render window and is not the whole cost: measured across whole
@@ -337,7 +337,7 @@ protocol version in the ping reply whenever either side changes incompatibly.
    time by 47.81x before steady SSI and host-port overhead. That exact kernel is
    retained as the conformance reference. The production block kernel renders
    eight channels, mixed PDX, decoded controls, block envelopes, and live SSI
-   at 336.60 cycles per codec frame against a 489.40-cycle budget. Its relaxed
+   at 329.58 cycles per codec frame against a 489.40-cycle budget. Its relaxed
    boundary is block-rate envelope/LFO evolution and codec-rate synthesis;
    ordered writes split blocks at their first landing frame, and DT1/DT2 plus
    noise-frequency/output substitution are integrated. An embedded second-stage P-memory loader removes the
@@ -397,10 +397,10 @@ coverage and accepts future candidate captures using drift/timing, envelope,
 LFO/noise-rate, and spectral thresholds documented in
 `docs/perceptual-compatibility.md`. This completes the reference and policy
 half of the perceptual gate. A second native projection independently applies
-the 256-step sine phase, codec-rate feedback, algorithms, panning, noise, and
+the 1024-step sine phase, codec-rate feedback, algorithms, panning, noise, and
 YM3012 rounding while borrowing exact frame-boundary control state. It passes
 with topology spectral cosine of 0.7955-1.0000, log-spectrum RMSE of
-1.81-8.64 dB, and energy ratio of 0.984-1.015. The integrated DSP kernel is
+1.62-8.53 dB, and energy ratio of 0.985-1.019. The integrated DSP kernel is
 captured separately by `make capture-realtime`.
 
 ### What the emulator cannot decide
@@ -591,7 +591,7 @@ Falcon. `SOUND_CLK25M` is therefore the only supported production clock, and
 the 32.780 kHz cadence is chosen from the 25.175 MHz table. The external-clock
 exception is real but requires non-stock hardware: an external 32 MHz
 oscillator on the DSP port is codec-legal and would make 41,666.67 Hz
-available, against a 385-cycle frame budget that the measured 336.60-cycle
+available, against a 385-cycle frame budget that the measured 329.58-cycle
 kernel fits. That remains an optional future mode, not a supported
 configuration.
 
